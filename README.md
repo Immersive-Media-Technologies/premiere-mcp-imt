@@ -161,15 +161,23 @@ Clients with their own skill support can load the folder directly (e.g. copy `sk
 Several Premiere MCP servers exist; they differ in what the model sees, what it knows and what it
 sends home. As of 2026-10-26:
 
-| | **PR-MCP-IMT** | [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp) (upstream) | [AdobePremiereProMCP](https://github.com/ayushozha/AdobePremiereProMCP) | [Adobe_Premiere_Pro_MCP](https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP) | [flue](https://github.com/sfkislev/flue) |
-|---|---|---|---|---|---|
-| Tools the model sees by default | 9, over ~380 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
-| Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
-| Non-English Premiere | matchName lookup, verified on Russian | English and es-ES measured | not stated | not stated | not stated |
-| Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
-| Connector install | by the agent, with consent; installers with a live self-test | CLI flag | build from source (Go, Rust, Python) | CLI flag | `pip` + setup |
-| Clients | Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client | npm, .mcpb, Codex / Claude Code plugins | build from source | npm, plugins, .mcpb | CLI + skill |
-| License | IMT Non-Commercial | MIT | MIT | MIT | MIT |
+<table>
+<tr>
+<th width="17%"></th>
+<th width="19%">PR-MCP-IMT</th>
+<th><a href="https://github.com/leancoderkavy/premiere-pro-mcp">premiere-<br>pro-mcp</a><br>(upstream)</th>
+<th><a href="https://github.com/ayushozha/AdobePremiereProMCP">AdobePremiere<br>ProMCP</a></th>
+<th><a href="https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP">Adobe_Premiere<br>_Pro_MCP</a></th>
+<th><a href="https://github.com/sfkislev/flue">flue</a></th>
+</tr>
+<tr><td>Tools the model sees by default</td><td>9, over ~380 operations</td><td>the whole catalog (~440 tools)</td><td>74 (profile <code>standard</code>) of ~1,060</td><td>5, over 283 operations</td><td>none — the agent pipes ExtendScript</td></tr>
+<tr><td>Knowledge of Premiere's AI tools</td><td>skill with 8 references + recipes</td><td>2 skills (editing, development)</td><td>7 workflow skills</td><td>1 skill</td><td>1 skill (scripting)</td></tr>
+<tr><td>Non-English Premiere</td><td>matchName lookup, verified on Russian</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
+<tr><td>Telemetry</td><td>none</td><td>PostHog, off unless a key is set</td><td>none found</td><td>on by default (opt-out)</td><td>none mentioned</td></tr>
+<tr><td>Connector install</td><td>by the agent, with consent; installers with a live self-test</td><td>CLI flag</td><td>build from source (Go, Rust, Python)</td><td>CLI flag</td><td><code>pip</code> + setup</td></tr>
+<tr><td>Clients</td><td>Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client</td><td>npm, .mcpb, Codex / Claude Code plugins</td><td>build from source</td><td>npm, plugins, .mcpb</td><td>CLI + skill</td></tr>
+<tr><td>License</td><td>IMT Non-Commercial</td><td>MIT</td><td>MIT</td><td>MIT</td><td>MIT</td></tr>
+</table>
 
 What we changed in the upstream code, besides the skill and the packaging: component and property
 lookup by matchName (on a Russian Premiere every opacity, motion, keyframe and volume operation of
