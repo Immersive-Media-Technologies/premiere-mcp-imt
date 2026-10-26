@@ -192,7 +192,7 @@ describe("file bridge uncovered security and fallback paths", () => {
   });
 });
 
-const TOKEN = "<<SET_ME>>";
+const TOKEN = "bridge-edge-token-at-least-16-characters";
 const liveBridges: UxpWebSocketBridge[] = [];
 
 async function startBridge(options: {

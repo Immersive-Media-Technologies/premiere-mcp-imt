@@ -79,7 +79,7 @@ describe("least-privilege UXP workspace broker", () => {
     });
     expect(JSON.parse(fixture.files.get("workspace-access.json") ?? "{}")).toEqual({
       schemaVersion: 1,
-      persistentToken: "<<SET_ME>>",
+      persistentToken: "persistent-capability-token",
     });
     await expect(broker.assertPathAllowed("D:\\Projects\\Film\\exports\\edit.aaf", { label: "output", kind: "file" }))
       .resolves.toBe("D:/Projects/Film/exports/edit.aaf");

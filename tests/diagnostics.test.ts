@@ -83,7 +83,7 @@ describe("non-technical diagnostics", () => {
       nodeVersion: "v22.12.0",
       environment: {
         APPDATA: "C:\\Users\\Private\\AppData",
-        PREMIERE_UXP_TOKEN: "<<SET_ME>>",
+        PREMIERE_UXP_TOKEN: "very-secret-token-value",
         POSTHOG_API_KEY: "another-secret",
       },
       exists: () => true,

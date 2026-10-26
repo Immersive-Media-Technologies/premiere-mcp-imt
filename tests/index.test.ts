@@ -47,8 +47,8 @@ describe("CLI flags", () => {
       encoding: "utf-8",
       env: {
         ...process.env,
-        PREMIERE_UXP_TOKEN: "<<SET_ME>>",
-        POSTHOG_API_KEY: "<<SET_ME>>",
+        PREMIERE_UXP_TOKEN: "cli-test-token-that-must-not-appear",
+        POSTHOG_API_KEY: "cli-test-key-that-must-not-appear",
       },
     });
     const report = JSON.parse(output);

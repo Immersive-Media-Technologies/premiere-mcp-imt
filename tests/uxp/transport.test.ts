@@ -6,7 +6,7 @@ import {
   UxpWebSocketBridge,
 } from "../../src/bridge/uxp-websocket-bridge.js";
 
-const TOKEN = "<<SET_ME>>";
+const TOKEN = "test-token-at-least-16-characters";
 const bridges: UxpWebSocketBridge[] = [];
 
 async function createBridge(options: {
