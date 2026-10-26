@@ -163,8 +163,8 @@ sends home. As of 2026-10-26:
 
 <table>
 <tr>
-<th width="17%"></th>
-<th width="19%">PR-MCP-IMT</th>
+<th width="120"></th>
+<th width="150">PR-MCP-IMT</th>
 <th><a href="https://github.com/leancoderkavy/premiere-pro-mcp">premiere-<br>pro-mcp</a><br>(upstream)</th>
 <th><a href="https://github.com/ayushozha/AdobePremiereProMCP">AdobePremiere<br>ProMCP</a></th>
 <th><a href="https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP">Adobe_Premiere<br>_Pro_MCP</a></th>
