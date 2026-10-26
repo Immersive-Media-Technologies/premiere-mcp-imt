@@ -28,7 +28,8 @@ jobs:
       - run: npm ci
       - name: Audit dependency lockfile
         if: matrix.os == 'windows-latest' && matrix.node == 22
-        run: npm audit --audit-level=moderate
+        # Shipped dependencies only: dev-tool advisories (vitest) do not reach users.
+        run: npm audit --omit=dev --audit-level=moderate
       - run: npm run check
       - name: Enforce unit test coverage baseline
         if: matrix.os == 'windows-latest' && matrix.node == 22
