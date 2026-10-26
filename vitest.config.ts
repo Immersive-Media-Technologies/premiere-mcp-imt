@@ -12,7 +12,9 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      exclude: ["src/**/*.d.ts", "src/resources/**/*.json"],
+      // src/index.ts is the CLI entry: tests/index.test.ts runs it as a subprocess, which coverage
+      // cannot see (it counted as 0 % of 165 branches).
+      exclude: ["src/**/*.d.ts", "src/resources/**/*.json", "src/index.ts"],
       reporter: ["text", "html", "lcov", "json-summary"],
       reportsDirectory: "coverage",
       thresholds: {

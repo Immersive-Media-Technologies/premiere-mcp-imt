@@ -8,7 +8,7 @@ import { facadeInstructions } from "../src/da/instructions.js";
 import { extendGuiPath } from "../src/da/pathfix.js";
 import { listSkillDocs, readSkillDoc, skillTool } from "../src/da/skill.js";
 import { envFlag } from "../src/da/envflag.js";
-import { buildFacade, facadeEnabled } from "../src/da/facade.js";
+import { buildFacade, categorize, facadeEnabled, mapExecuteScriptArgs } from "../src/da/facade.js";
 import { connectorCommand } from "../src/da/connector.js";
 import { isToolPermitted, resolveCapabilities } from "../src/security/capabilities.js";
 
@@ -53,6 +53,65 @@ describe("facade is the default", () => {
     const t = facadeInstructions();
     expect(t).toContain("pr_skill");
     expect(t.length).toBeLessThan(1500);
+  });
+});
+
+describe("facade tools", () => {
+  const def = (description = "Op.") => ({
+    description,
+    parameters: {
+      type: "object",
+      properties: { a: { type: "string", description: "x" }, b: { type: "number", enum: [1, 2], default: 1 } },
+      required: ["a"],
+    },
+    handler: vi.fn(),
+  });
+  categorize("timeline", { split_clip: {}, trim_clip: {} });
+  const tools = {
+    split_clip: def("Split a clip.\n\nLong tail that the catalog drops."),
+    trim_clip: def(),
+    verify_premiere_connection: def(),
+    execute_extendscript: def(),
+  };
+  const invoke = vi.fn(async (name: string, args: Record<string, unknown>) => ({
+    content: [{ type: "text" as const, text: JSON.stringify({ name, args }) }],
+  }));
+  const facade = Object.fromEntries(buildFacade(tools, invoke).map((s) => [s.name, s]));
+  const first = (r: { content: { type: string; text?: string }[] }) => r.content[0].text ?? "";
+
+  it("pr_catalog lists categories, one category with parameters, and refuses an unknown one", async () => {
+    expect(first(await facade.pr_catalog.run({}))).toContain("timeline (2): split_clip, trim_clip");
+    const one = first(await facade.pr_catalog.run({ category: "Timeline" }));
+    expect(one).toContain("- split_clip: Split a clip.");
+    expect(one).not.toContain("Long tail");
+    expect(one).toContain("a: string — x");
+    expect(one).toContain("b?: 1 | 2 (default 1)");
+    expect((await facade.pr_catalog.run({ category: "nope" })).isError).toBe(true);
+  });
+  it("pr_do runs an operation and suggests similar names for an unknown one", async () => {
+    await facade.pr_do.run({ operation: "split_clip", args: { a: "1" } });
+    expect(invoke).toHaveBeenLastCalledWith("split_clip", { a: "1" });
+    const r = await facade.pr_do.run({ operation: "split_clips" });
+    expect(r.isError).toBe(true);
+    expect(first(r)).toContain("Similar: split_clip");
+  });
+  it("pr_batch stops at the first error by default and goes on with stopOnError:false", async () => {
+    const ops = [{ operation: "nope_x" }, { operation: "trim_clip", args: {} }];
+    const stopped = JSON.parse(first(await facade.pr_batch.run({ ops })));
+    expect(stopped).toHaveLength(1);
+    expect(stopped[0].ok).toBe(false);
+    const all = JSON.parse(first(await facade.pr_batch.run({ ops, stopOnError: false })));
+    expect(all.map((o: { ok: boolean }) => o.ok)).toEqual([false, true]);
+  });
+  it("direct tools run their operation; pr_execute_script wraps an expression", async () => {
+    await facade.pr_verify.run({});
+    expect(invoke).toHaveBeenLastCalledWith("verify_premiere_connection", {});
+    await facade.pr_execute_script.run({ script: "1+1", timeout_ms: 5 });
+    const args = invoke.mock.calls.at(-1)?.[1] as { code: string; timeout_ms: number };
+    expect(args.code).toContain('eval("1+1")');
+    expect(args.timeout_ms).toBe(5);
+    expect(mapExecuteScriptArgs({ code: "return __result({})" }).code).toBe("return __result({})");
+    expect(facade.pr_execute_script.parameters).not.toHaveProperty("_op");
   });
 });
 
