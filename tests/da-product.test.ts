@@ -1,9 +1,9 @@
 // Product switches of the IMT build: facade by default, boolean env flags from .mcpb settings,
 // read-only / script capability switches, the connector installer tool.
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { facadeInstructions } from "../src/da/instructions.js";
 import { extendGuiPath } from "../src/da/pathfix.js";
 import { listSkillDocs, readSkillDoc, skillTool } from "../src/da/skill.js";
@@ -120,6 +120,7 @@ describe("pr_skill", () => {
   mkdirSync(path.join(dir, "references"));
   writeFileSync(path.join(dir, "SKILL.md"), "router");
   writeFileSync(path.join(dir, "references", "generative.md"), "gen");
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   it("serves the router and references and refuses anything else", () => {
     expect(readSkillDoc(undefined, dir)).toBe("router");
