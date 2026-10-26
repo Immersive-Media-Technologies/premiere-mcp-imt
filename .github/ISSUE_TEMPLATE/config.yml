@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup and troubleshooting
+    url: https://github.com/Immersive-Media-Technologies/premiere-mcp-imt#install
+    about: Installation for each client, the connector, and what to do when Premiere does not answer.
+  - name: Security vulnerability
+    url: https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/security/policy
+    about: Report vulnerabilities privately through the security policy instead of a public issue.

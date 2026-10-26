@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "premiere-mcp-imt",
+  "display_name": "PR-MCP-IMT + SKILLS — Premiere Pro for AI agents",
+  "version": "0.0.0",
+  "description": "Drive a running Adobe Premiere Pro from Claude: sequences, cuts, clips, effects, keyframes, markers, captions, exports and frames — plus the Premiere agent skill for its AI tools.",
+  "long_description": "PR-MCP-IMT by Immersive Media Technologies. About 380 Premiere Pro operations behind nine MCP tools (catalog, do, batch, verify, sequence, save, frame, connector, skill; raw ExtendScript only when you allow it), readback-verified writes, works on localized Premiere (non-English UI), no telemetry; ships the Premiere agent skill: how to drive the program, and when and how to use Premiere's AI tools (Generative Extend, Generative Media, Object Mask, text-based editing, captions, Enhance Speech, Search, the AI Assistant) and their combinations. Requires Adobe Premiere Pro 2024+ running on this computer; the agent installs the Premiere connector on first use, with your consent (pr_install_connector). Non-commercial license; unofficial, not affiliated with Adobe Inc.",
+  "author": {
+    "name": "Immersive Media Technologies",
+    "url": "https://github.com/Immersive-Media-Technologies"
+  },
+  "homepage": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt"
+  },
+  "documentation": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt#readme",
+  "support": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/issues",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "icon.png",
+  "keywords": ["mcp", "premiere-pro", "adobe", "video-editing", "ai-agents"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/dist/index.js"],
+      "env": {
+        "PR_MCP_READONLY": "${user_config.readOnly}",
+        "PR_MCP_ENABLE_SCRIPT": "${user_config.enableScript}",
+        "PR_MCP_FACADE": "${user_config.compactTools}"
+      }
+    }
+  },
+  "user_config": {
+    "readOnly": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "On: nothing may modify the Premiere project — inspect and export check frames only. Recommended for the first session on a new machine.",
+      "default": false,
+      "required": false
+    },
+    "enableScript": {
+      "type": "boolean",
+      "title": "Allow arbitrary ExtendScript (pr_execute_script)",
+      "description": "Off by default. Arbitrary scripts can touch the file system; enable only for a trusted agent.",
+      "default": false,
+      "required": false
+    },
+    "compactTools": {
+      "type": "boolean",
+      "title": "Compact tool set (recommended)",
+      "description": "On: nine tools, every operation reached through pr_catalog / pr_do (about 1.5K tokens of tool definitions). Off: all ~380 operations as separate tools (about 150K tokens per turn).",
+      "default": true,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "node": ">=20.19.0"
+    }
+  },
+  "tools_generated": true
+}

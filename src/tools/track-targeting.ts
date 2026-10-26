@@ -1,0 +1,1673 @@
+import {
+  buildToolScript,
+  escapeForExtendScript,
+} from "../bridge/script-builder.js";
+import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
+
+/**
+ * Premiere's audio `Volume > Level` property is NOT in decibels. It is a
+ * normalised 0..1 value where 1.0 is the maximum boost of +15 dB, so unity
+ * (0 dB) sits at 10^(-15/20) = 0.17782794.
+ *
+ * Passing decibels straight to setValue() silently clamps: any negative dB
+ * becomes 0 (total silence) and any positive dB becomes 1.0 (+15 dB). Both
+ * fail without an error, which makes the mistake very hard to spot - the
+ * timeline just plays wrong.
+ */
+export const PREMIERE_MAX_LEVEL_DB = 15;
+
+export function dbToPremiereLevel(db: number): number {
+  if (!Number.isFinite(db)) return 0;
+  const clamped = Math.min(db, PREMIERE_MAX_LEVEL_DB);
+  return Math.pow(10, (clamped - PREMIERE_MAX_LEVEL_DB) / 20);
+}
+
+export function premiereLevelToDb(level: number): number | null {
+  if (!Number.isFinite(level) || level <= 0) return null; // silence
+  return 20 * Math.log10(level) + PREMIERE_MAX_LEVEL_DB;
+}
+
+export function getTrackTargetingTools(bridgeOptions: BridgeOptions) {
+  return {
+    set_target_track: {
+      description:
+        "Set a track as targeted (active for insert/overwrite edits). Only one video and one audio track can be targeted at a time.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (0-based)",
+          },
+          targeted: {
+            type: "boolean",
+            description:
+              "Whether to target (true) or untarget (false) the track",
+          },
+        },
+        required: ["track_type", "track_index", "targeted"],
+      },
+      handler: async (args: {
+        track_type: string;
+        track_index: number;
+        targeted: boolean;
+      }) => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var tracks = ${args.track_type === "video" ? "seq.videoTracks" : "seq.audioTracks"};
+          if (${args.track_index} >= tracks.numTracks) return __error("Track index out of range");
+
+          var track = tracks[${args.track_index}];
+          track.setTargeted(${args.targeted}, ${args.track_type === "video"});
+
+          return __result({
+            trackType: "${args.track_type}",
+            trackIndex: ${args.track_index},
+            trackName: track.name,
+            targeted: ${args.targeted}
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_target_tracks: {
+      description: "Get which tracks are currently targeted for editing.",
+      parameters: {},
+      handler: async () => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var targets = { video: [], audio: [] };
+          for (var t = 0; t < seq.videoTracks.numTracks; t++) {
+            var track = seq.videoTracks[t];
+            try {
+              if (track.isTargeted()) {
+                targets.video.push({ index: t, name: track.name });
+              }
+            } catch(e) {}
+          }
+          for (var t = 0; t < seq.audioTracks.numTracks; t++) {
+            var track = seq.audioTracks[t];
+            try {
+              if (track.isTargeted()) {
+                targets.audio.push({ index: t, name: track.name });
+              }
+            } catch(e) {}
+          }
+
+          return __result(targets);
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_all_tracks_targeted: {
+      description:
+        "Set all tracks targeted or untargeted. Useful before insert/overwrite edits.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          targeted: {
+            type: "boolean",
+            description:
+              "Whether to target (true) or untarget (false) all tracks",
+          },
+          track_type: {
+            type: "string",
+            enum: ["video", "audio", "both"],
+            description: "Which track type(s) to affect (default: both)",
+          },
+        },
+        required: ["targeted"],
+      },
+      handler: async (args: { targeted: boolean; track_type?: string }) => {
+        const trackType = args.track_type || "both";
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var count = 0;
+          if ("${trackType}" !== "audio") {
+            for (var t = 0; t < seq.videoTracks.numTracks; t++) {
+              try { seq.videoTracks[t].setTargeted(${args.targeted}, true); count++; } catch(e) {}
+            }
+          }
+          if ("${trackType}" !== "video") {
+            for (var t = 0; t < seq.audioTracks.numTracks; t++) {
+              try { seq.audioTracks[t].setTargeted(${args.targeted}, false); count++; } catch(e) {}
+            }
+          }
+
+          return __result({ tracksAffected: count, targeted: ${args.targeted} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    rename_track: {
+      description: "Rename a video or audio track.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (0-based)",
+          },
+          name: {
+            type: "string",
+            description: "New track name",
+          },
+        },
+        required: ["track_type", "track_index", "name"],
+      },
+      handler: async (args: {
+        track_type: string;
+        track_index: number;
+        name: string;
+      }) => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var tracks = ${args.track_type === "video" ? "seq.videoTracks" : "seq.audioTracks"};
+          if (${args.track_index} >= tracks.numTracks) return __error("Track index out of range");
+
+          var track = tracks[${args.track_index}];
+          var oldName = track.name;
+          track.name = "${escapeForExtendScript(args.name)}";
+
+          return __result({ oldName: oldName, newName: track.name, trackType: "${args.track_type}", trackIndex: ${args.track_index} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_track_info: {
+      description:
+        "Get detailed information about a specific track: name, clip count, muted, locked, targeted, and list of all clips.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (0-based)",
+          },
+        },
+        required: ["track_type", "track_index"],
+      },
+      handler: async (args: { track_type: string; track_index: number }) => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var tracks = ${args.track_type === "video" ? "seq.videoTracks" : "seq.audioTracks"};
+          if (${args.track_index} >= tracks.numTracks) return __error("Track index out of range");
+
+          var track = tracks[${args.track_index}];
+          var info = {
+            name: track.name,
+            trackType: "${args.track_type}",
+            trackIndex: ${args.track_index},
+            clipCount: track.clips.numItems,
+            isMuted: track.isMuted(),
+            isLocked: track.isLocked()
+          };
+          try { info.isTargeted = track.isTargeted(); } catch(e) {}
+
+          info.clips = [];
+          for (var c = 0; c < track.clips.numItems; c++) {
+            var clip = track.clips[c];
+            var ci = {
+              index: c,
+              nodeId: clip.nodeId,
+              name: clip.name,
+              startSeconds: __ticksToSeconds(clip.start.ticks),
+              endSeconds: __ticksToSeconds(clip.end.ticks),
+              durationSeconds: __ticksToSeconds(clip.duration.ticks)
+            };
+            try { ci.enabled = !clip.isDisabled(); } catch(e) { ci.enabled = true; }
+            try { ci.speed = clip.getSpeed(); } catch(e) {}
+            info.clips.push(ci);
+          }
+
+          info.transitions = [];
+          try {
+            for (var t = 0; t < track.transitions.numItems; t++) {
+              info.transitions.push({
+                index: t,
+                startSeconds: __ticksToSeconds(track.transitions[t].start.ticks),
+                endSeconds: __ticksToSeconds(track.transitions[t].end.ticks)
+              });
+            }
+          } catch(e) {}
+
+          return __result(info);
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    razor_all_tracks: {
+      description:
+        "Razor (split) all clips at the playhead position across all tracks, or at a specific time.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          time_seconds: {
+            type: "number",
+            description:
+              "Time to razor at in seconds (uses playhead position if omitted)",
+          },
+          track_type: {
+            type: "string",
+            enum: ["video", "audio", "both"],
+            description: "Which track types to razor (default: both)",
+          },
+        },
+      },
+      handler: async (args: { time_seconds?: number; track_type?: string }) => {
+        const trackType = args.track_type || "both";
+        const script = buildToolScript(`
+          app.enableQE();
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var qeSeq = qe.project.getActiveSequence();
+          ${
+            args.time_seconds !== undefined
+              ? `var ticks = __secondsToTicks(${args.time_seconds}).toString();`
+              : `var ticks = seq.getPlayerPosition().ticks;`
+          }
+
+          // A razor only has to produce a new clip on tracks where some clip
+          // strictly spans the cut point. Tracks that are empty there are a
+          // legitimate no-op, so they must not count as failures.
+          function __spansPoint(domTrack, tickValue) {
+            var v = parseFloat(tickValue);
+            for (var c = 0; c < domTrack.clips.numItems; c++) {
+              var s = parseFloat(domTrack.clips[c].start.ticks);
+              var e = parseFloat(domTrack.clips[c].end.ticks);
+              if (v > s && v < e) return true;
+            }
+            return false;
+          }
+
+          var razored = 0;
+          var eligible = 0;
+          var failures = [];
+
+          // QE razor() expects a timecode string, not ticks. See timeline.ts.
+          var __razorFrameTicks = seq && seq.timebase ? parseFloat(seq.timebase) : NaN;
+          if (!__razorFrameTicks || isNaN(__razorFrameTicks)) __razorFrameTicks = 254016000000 / 24;
+          var __razorFps = Math.round(254016000000 / __razorFrameTicks);
+          if (!__razorFps || !isFinite(__razorFps) || __razorFps < 1) __razorFps = 30;
+          var __razorFrames = Math.round(parseFloat(ticks) / __razorFrameTicks);
+          function __pad2(n) { return n < 10 ? "0" + n : "" + n; }
+          var __razorTc = __pad2(Math.floor(__razorFrames / (__razorFps * 3600))) + ":" +
+                          __pad2(Math.floor((__razorFrames % (__razorFps * 3600)) / (__razorFps * 60))) + ":" +
+                          __pad2(Math.floor((__razorFrames % (__razorFps * 60)) / __razorFps)) + ":" +
+                          __pad2(__razorFrames % __razorFps);
+
+          if ("${trackType}" !== "audio") {
+            for (var t = 0; t < seq.videoTracks.numTracks; t++) {
+              var domTrack = seq.videoTracks[t];
+              var wasEligible = __spansPoint(domTrack, ticks);
+              if (wasEligible) eligible++;
+              var before = domTrack.clips.numItems;
+              try {
+                qeSeq.getVideoTrackAt(t).razor(__razorTc);
+              } catch(e) {
+                if (wasEligible) failures.push("V" + (t + 1) + ": " + e.toString());
+                continue;
+              }
+              if (domTrack.clips.numItems > before) razored++;
+            }
+          }
+          if ("${trackType}" !== "video") {
+            for (var t = 0; t < seq.audioTracks.numTracks; t++) {
+              var domTrack = seq.audioTracks[t];
+              var wasEligible = __spansPoint(domTrack, ticks);
+              if (wasEligible) eligible++;
+              var before = domTrack.clips.numItems;
+              try {
+                qeSeq.getAudioTrackAt(t).razor(__razorTc);
+              } catch(e) {
+                if (wasEligible) failures.push("A" + (t + 1) + ": " + e.toString());
+                continue;
+              }
+              if (domTrack.clips.numItems > before) razored++;
+            }
+          }
+
+          // Previously this counted attempts, so it reported one "razor" per
+          // track even when every call silently did nothing.
+          if (eligible > 0 && razored < eligible) {
+            return __error("Premiere razored only " + razored + " of " + eligible + " eligible track(s)" + (failures.length ? " (" + failures.join("; ") + ")" : "") + ". The operation was only partially applied, so it is not reported as verified. Structural QE edits are known to no-op on some Premiere Pro 26.x installations (confirmed on 26.2.2).");
+          }
+
+          return __result({
+            razored: razored,
+            eligibleTracks: eligible,
+            verified: true,
+            failures: failures,
+            atSeconds: __ticksToSeconds(ticks)
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_start_time: {
+      description:
+        "Set the start time (timecode offset) of a project item. This shifts where timecode begins for the source media.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          item_id: {
+            type: "string",
+            description: "Node ID or name of the project item",
+          },
+          start_seconds: {
+            type: "number",
+            description: "New start time in seconds",
+          },
+        },
+        required: ["item_id", "start_seconds"],
+      },
+      handler: async (args: { item_id: string; start_seconds: number }) => {
+        const script = buildToolScript(`
+          var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found");
+
+          var t = new Time();
+          t.seconds = ${args.start_seconds};
+          item.setStartTime(t.ticks);
+
+          return __result({ item: item.name, startSeconds: ${args.start_seconds} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    clear_item_in_out: {
+      description:
+        "Clear in and/or out points on a project item (reset to full duration).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          item_id: {
+            type: "string",
+            description: "Node ID or name of the project item",
+          },
+          clear_in: {
+            type: "boolean",
+            description: "Clear the in point (default: true)",
+          },
+          clear_out: {
+            type: "boolean",
+            description: "Clear the out point (default: true)",
+          },
+        },
+        required: ["item_id"],
+      },
+      handler: async (args: {
+        item_id: string;
+        clear_in?: boolean;
+        clear_out?: boolean;
+      }) => {
+        const clearIn = args.clear_in !== false;
+        const clearOut = args.clear_out !== false;
+        const script = buildToolScript(`
+          var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found");
+
+          ${clearIn ? `item.clearInPoint();` : ""}
+          ${clearOut ? `item.clearOutPoint();` : ""}
+
+          return __result({ item: item.name, clearedIn: ${clearIn}, clearedOut: ${clearOut} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_item_in_out: {
+      description:
+        "Set in and/or out points on a project item in the project panel (marks source range for editing).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          item_id: {
+            type: "string",
+            description: "Node ID or name of the project item",
+          },
+          in_seconds: {
+            type: "number",
+            description: "In point in seconds",
+          },
+          out_seconds: {
+            type: "number",
+            description: "Out point in seconds",
+          },
+          media_type: {
+            type: "number",
+            description: "Media type: 1=video, 2=audio, 4=all (default: 4)",
+          },
+        },
+        required: ["item_id"],
+      },
+      handler: async (args: {
+        item_id: string;
+        in_seconds?: number;
+        out_seconds?: number;
+        media_type?: number;
+      }) => {
+        if (args.in_seconds === undefined && args.out_seconds === undefined) {
+          return { success: false, error: "Provide in_seconds, out_seconds, or both." };
+        }
+        if ((args.in_seconds !== undefined && (!Number.isFinite(args.in_seconds) || args.in_seconds < 0))
+          || (args.out_seconds !== undefined && (!Number.isFinite(args.out_seconds) || args.out_seconds < 0))) {
+          return { success: false, error: "in_seconds and out_seconds must be finite, non-negative numbers." };
+        }
+        const mediaType = args.media_type ?? 4;
+        const script = buildToolScript(`
+          var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found");
+
+          ${
+            args.in_seconds !== undefined
+              ? `
+          var inTime = new Time();
+          inTime.seconds = ${args.in_seconds};
+          item.setInPoint(inTime.ticks, ${mediaType});
+          var observedIn = item.getInPoint(${mediaType});
+          if (!observedIn || String(observedIn.ticks) !== String(inTime.ticks)) {
+            return __error("Premiere did not apply the requested project-item in point.");
+          }
+          `
+              : ""
+          }
+
+          ${
+            args.out_seconds !== undefined
+              ? `
+          var outTime = new Time();
+          outTime.seconds = ${args.out_seconds};
+          item.setOutPoint(outTime.ticks, ${mediaType});
+          var observedOut = item.getOutPoint(${mediaType});
+          if (!observedOut || String(observedOut.ticks) !== String(outTime.ticks)) {
+            return __error("Premiere did not apply the requested project-item out point.");
+          }
+          `
+              : ""
+          }
+
+          return __result({
+            item: item.name,
+            inSet: ${args.in_seconds !== undefined},
+            outSet: ${args.out_seconds !== undefined},
+            verified: true
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    import_image_sequence: {
+      description: "Import a numbered image sequence as a single video clip.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          first_file_path: {
+            type: "string",
+            description:
+              "Full path to the first image in the sequence (e.g., /path/to/frame_001.png)",
+          },
+          target_bin: {
+            type: "string",
+            description:
+              "Target bin name to import into (optional, imports to root if omitted)",
+          },
+        },
+        required: ["first_file_path"],
+      },
+      handler: async (args: {
+        first_file_path: string;
+        target_bin?: string;
+      }) => {
+        const script = buildToolScript(`
+          var sourceFile = new File("${escapeForExtendScript(args.first_file_path)}");
+          if (!sourceFile.exists) return __error("The first image file does not exist: " + sourceFile.fsName);
+          var targetBin = app.project.rootItem;
+          ${
+            args.target_bin
+              ? `
+          var found = __findProjectItem("${escapeForExtendScript(args.target_bin)}");
+          if (found && found.type === 2) targetBin = found;
+          `
+              : ""
+          }
+
+          var beforeCount = targetBin.children.numItems;
+          var imported = app.project.importFiles([sourceFile.fsName], true, targetBin, true);
+          if (!imported) return __error("Premiere did not import the numbered image sequence.");
+          var importedItem = null;
+          for (var i = 0; i < targetBin.children.numItems; i++) {
+            var candidate = targetBin.children[i];
+            try {
+              if (candidate.getMediaPath && String(candidate.getMediaPath()) === String(sourceFile.fsName)) {
+                importedItem = candidate;
+                break;
+              }
+            } catch (e) {}
+          }
+          if (!importedItem && targetBin.children.numItems <= beforeCount) {
+            return __error("Premiere accepted the image-sequence import but no project item was added.");
+          }
+
+          return __result({
+            imported: true,
+            file: sourceFile.fsName,
+            asImageSequence: true,
+            verified: true,
+            projectItem: importedItem ? { name: importedItem.name, nodeId: importedItem.nodeId } : null
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_position: {
+      description:
+        "Set the Position property on a video clip's Motion effect. Values are in pixels.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          x: {
+            type: "number",
+            description: "X position in pixels",
+          },
+          y: {
+            type: "number",
+            description: "Y position in pixels",
+          },
+        },
+        required: ["node_id", "x", "y"],
+      },
+      handler: async (args: { node_id: string; x: number; y: number }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Position", clip.components[i])) {
+                  clip.components[i].properties[p].setValue([${args.x}, ${args.y}], true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set position");
+          return __result({ x: ${args.x}, y: ${args.y}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_scale: {
+      description: "Set the Scale property on a video clip's Motion effect.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          scale: {
+            type: "number",
+            description:
+              "Scale value (100 = original size, 200 = 2x, 50 = half)",
+          },
+        },
+        required: ["node_id", "scale"],
+      },
+      handler: async (args: { node_id: string; scale: number }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Scale", clip.components[i])) {
+                  clip.components[i].properties[p].setValue(${args.scale}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set scale");
+          return __result({ scale: ${args.scale}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_rotation: {
+      description: "Set the Rotation property on a video clip's Motion effect.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          degrees: {
+            type: "number",
+            description:
+              "Rotation in degrees (0-360, can exceed for multiple rotations)",
+          },
+        },
+        required: ["node_id", "degrees"],
+      },
+      handler: async (args: { node_id: string; degrees: number }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Rotation", clip.components[i])) {
+                  clip.components[i].properties[p].setValue(${args.degrees}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set rotation");
+          return __result({ degrees: ${args.degrees}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_anchor_point: {
+      description:
+        "Set the Anchor Point property on a video clip's Motion effect.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          x: {
+            type: "number",
+            description: "Anchor point X in pixels",
+          },
+          y: {
+            type: "number",
+            description: "Anchor point Y in pixels",
+          },
+        },
+        required: ["node_id", "x", "y"],
+      },
+      handler: async (args: { node_id: string; x: number; y: number }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Anchor Point", clip.components[i])) {
+                  clip.components[i].properties[p].setValue([${args.x}, ${args.y}], true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set anchor point");
+          return __result({ x: ${args.x}, y: ${args.y}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_opacity: {
+      description: "Set the opacity of a video clip (0-100).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          opacity: {
+            type: "number",
+            description: "Opacity value (0 = transparent, 100 = fully opaque)",
+          },
+        },
+        required: ["node_id", "opacity"],
+      },
+      handler: async (args: { node_id: string; opacity: number }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Opacity")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Opacity", clip.components[i])) {
+                  clip.components[i].properties[p].setValue(${args.opacity}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set opacity");
+          return __result({ opacity: ${args.opacity}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_volume: {
+      description: "Set an audio clip's Volume > Level in dB. Does not read or change Essential Sound Amplify automation.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the audio clip",
+          },
+          volume_db: {
+            type: "number",
+            description:
+              "Volume in dB (0 = unity, negative = quieter, positive = louder)",
+          },
+        },
+        required: ["node_id", "volume_db"],
+      },
+      handler: async (args: { node_id: string; volume_db: number }) => {
+        const level = dbToPremiereLevel(args.volume_db);
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Volume")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Level", clip.components[i])) {
+                  // normalised 0..1, NOT dB - see dbToPremiereLevel()
+                  clip.components[i].properties[p].setValue(${level}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Could not set volume - is this an audio clip?");
+          return __result({ volumeDb: ${args.volume_db}, level: ${level}, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_clip_volume: {
+      description:
+        "Read an audio clip's Volume > Level in dB. Use this to verify a level actually applied - setValue() clamps silently. Does not report Essential Sound Amplify automation.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the audio clip",
+          },
+        },
+        required: ["node_id"],
+      },
+      handler: async (args: { node_id: string }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var level = null;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Volume")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Level", clip.components[i])) {
+                  level = clip.components[i].properties[p].getValue();
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (level === null) return __error("No volume component - is this an audio clip?");
+          var db = (level > 0) ? (20 * (Math.log(level) / Math.LN10) + ${PREMIERE_MAX_LEVEL_DB}) : null;
+          return __result({ clip: clip.name, level: level, volumeDb: db });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clips_volume: {
+      description:
+        "Set the volume (in dB) on every audio clip of a track, or on a list of clip indices. One round trip instead of one call per clip - essential for sequences with dozens of clips.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          track_index: {
+            type: "number",
+            description: "Audio track index (0-based)",
+          },
+          volume_db: {
+            type: "number",
+            description:
+              "Volume in dB applied to every selected clip (0 = unity, max +15)",
+          },
+          clip_indices: {
+            type: "array",
+            items: { type: "number" },
+            description:
+              "Optional clip indices on that track. Omit to apply to all clips.",
+          },
+        },
+        required: ["track_index", "volume_db"],
+      },
+      handler: async (args: {
+        track_index: number;
+        volume_db: number;
+        clip_indices?: number[];
+      }) => {
+        const level = dbToPremiereLevel(args.volume_db);
+        const only = Array.isArray(args.clip_indices)
+          ? JSON.stringify(args.clip_indices)
+          : "null";
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+          if (${args.track_index} >= seq.audioTracks.numTracks)
+            return __error("Track index out of range");
+
+          var track = seq.audioTracks[${args.track_index}];
+          var only = ${only};
+          var wanted = {};
+          if (only) { for (var w = 0; w < only.length; w++) wanted[only[w]] = true; }
+
+          var applied = 0, skipped = 0;
+          for (var c = 0; c < track.clips.numItems; c++) {
+            if (only && !wanted[c]) continue;
+            var clip = track.clips[c], set = false;
+            for (var i = 0; i < clip.components.numItems; i++) {
+              if (clip.components[i].displayName !== "Volume") continue;
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Level", clip.components[i])) {
+                  clip.components[i].properties[p].setValue(${level}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+            if (set) applied++; else skipped++;
+          }
+          return __result({
+            trackIndex: ${args.track_index},
+            volumeDb: ${args.volume_db},
+            level: ${level},
+            applied: applied,
+            skipped: skipped
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_clip_pan: {
+      description: "Set and read back the pan (left/right balance) on an audio clip, including Channel Volume layouts.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the audio clip",
+          },
+          pan: {
+            type: "number",
+            description:
+              "Pan value (-100 = full left, 0 = center, 100 = full right)",
+          },
+        },
+        required: ["node_id", "pan"],
+      },
+      handler: async (args: { node_id: string; pan: number }) => {
+        if (!Number.isFinite(args.pan) || args.pan < -100 || args.pan > 100) {
+          return { success: false, error: "pan must be a finite value from -100 through 100" };
+        }
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+          if (result.trackType !== "audio") return __error("Clip is not on an audio track");
+
+          var clip = result.clip;
+          var panProperty = null;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            var component = clip.components[i];
+            for (var p = 0; p < component.properties.numItems; p++) {
+              var property = component.properties[p];
+              if (__propIs(property, "Balance", component) || __propIs(property, "Pan", component)) {
+                panProperty = property;
+                break;
+              }
+            }
+            if (panProperty) break;
+          }
+          if (!panProperty) return __error("Audio clip does not expose a writable Balance or Pan property (checked Panner, Channel Volume, and other audio components).");
+          var writeResult = panProperty.setValue(${args.pan}, true);
+          var appliedPan = Number(panProperty.getValue());
+          if (isNaN(appliedPan) || Math.abs(appliedPan - ${args.pan}) > 0.0001) {
+            return __error("Premiere did not apply the requested pan: expected ${args.pan}, got " + appliedPan);
+          }
+          return __result({ pan: appliedPan, verified: true, writeResult: writeResult, clip: clip.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    batch_rename_clips: {
+      description:
+        "Rename multiple clips on the timeline using a pattern. Supports sequential numbering.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          pattern: {
+            type: "string",
+            description:
+              "Name pattern. Use {n} for a sequential number, ## for a zero-padded two-digit sequence number, and {name} for the original name (e.g., 'Scene_##', '{name}_v2')",
+          },
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type to rename clips on",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (0-based)",
+          },
+          selected_only: {
+            type: "boolean",
+            description:
+              "Only rename selected clips (default: false, renames all on track)",
+          },
+          start_number: {
+            type: "number",
+            description: "Starting number for {n} placeholder (default: 1)",
+          },
+        },
+        required: ["pattern", "track_type", "track_index"],
+      },
+      handler: async (args: {
+        pattern: string;
+        track_type: string;
+        track_index: number;
+        selected_only?: boolean;
+        start_number?: number;
+      }) => {
+        const startNum = args.start_number ?? 1;
+        if (!Number.isInteger(startNum) || startNum < 1 || startNum > 1_000_000) {
+          return { success: false, error: "start_number must be an integer from 1 through 1000000" };
+        }
+        const script = buildToolScript(`
+          app.enableQE();
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var tracks = ${args.track_type === "video" ? "seq.videoTracks" : "seq.audioTracks"};
+          if (${args.track_index} >= tracks.numTracks) return __error("Track index out of range");
+
+          var qeSeq = qe.project.getActiveSequence();
+          var qeTrack = ${
+            args.track_type === "video"
+              ? `qeSeq.getVideoTrackAt(${args.track_index})`
+              : `qeSeq.getAudioTrackAt(${args.track_index})`
+          };
+
+          var track = tracks[${args.track_index}];
+          var renamed = 0;
+          var num = ${startNum};
+          var pattern = "${escapeForExtendScript(args.pattern)}";
+
+          for (var c = 0; c < track.clips.numItems; c++) {
+            var clip = track.clips[c];
+            ${args.selected_only ? `if (!clip.isSelected()) continue;` : ""}
+
+            var sequenceNumber = "" + num;
+            var paddedSequenceNumber = sequenceNumber;
+            while (paddedSequenceNumber.length < 2) paddedSequenceNumber = "0" + paddedSequenceNumber;
+            var newName = pattern.split("{n}").join(sequenceNumber).split("##").join(paddedSequenceNumber).split("{name}").join(clip.name);
+            try {
+              var qeClip = qeTrack.getItemAt(c);
+              qeClip.setName(newName);
+              renamed++;
+            } catch(e) {}
+            num++;
+          }
+
+          return __result({ renamed: renamed, pattern: pattern });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    batch_enable_disable: {
+      description:
+        "Enable or disable multiple clips at once (selected, track, or all).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          enabled: {
+            type: "boolean",
+            description: "true to enable, false to disable",
+          },
+          target: {
+            type: "string",
+            enum: ["selected", "track", "all"],
+            description: "Which clips to affect",
+          },
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type (required when target is 'track')",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (required when target is 'track')",
+          },
+        },
+        required: ["enabled", "target"],
+      },
+      handler: async (args: {
+        enabled: boolean;
+        target: string;
+        track_type?: string;
+        track_index?: number;
+      }) => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var count = 0;
+          var disabled = ${!args.enabled};
+          var candidates = 0;
+          var failures = [];
+
+          function setOnTrack(track) {
+            for (var c = 0; c < track.clips.numItems; c++) {
+              try {
+                if ("${args.target}" === "selected" && !track.clips[c].isSelected()) continue;
+                candidates++;
+                track.clips[c].disabled = disabled;
+                if (Boolean(track.clips[c].disabled) !== disabled) {
+                  failures.push(track.clips[c].name || ("clip #" + c));
+                  continue;
+                }
+                count++;
+              } catch(e) { failures.push("clip #" + c + ": " + e.toString()); }
+            }
+          }
+
+          if ("${args.target}" === "track") {
+            var tracks = ${(args.track_type || "video") === "video" ? "seq.videoTracks" : "seq.audioTracks"};
+            if (${args.track_index ?? 0} >= tracks.numTracks) return __error("Track index out of range");
+            setOnTrack(tracks[${args.track_index ?? 0}]);
+          } else {
+            for (var t = 0; t < seq.videoTracks.numTracks; t++) setOnTrack(seq.videoTracks[t]);
+            for (var t = 0; t < seq.audioTracks.numTracks; t++) setOnTrack(seq.audioTracks[t]);
+          }
+
+          if (candidates === 0) return __error("No clips matched target '${args.target}'. Select clips first or choose target 'track' or 'all'.");
+          if (failures.length) return __error("Premiere did not apply the requested enabled state to " + failures.length + " clip(s): " + failures.join("; "));
+          return __result({ affected: count, enabled: ${args.enabled}, verified: true });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    remove_selected_clips: {
+      description: "Remove all currently selected clips from the timeline.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          ripple: {
+            type: "boolean",
+            description:
+              "If true, close the gap after removing (ripple delete). Default: false",
+          },
+        },
+      },
+      handler: async (args: { ripple?: boolean }) => {
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var removed = 0;
+          var toRemove = [];
+
+          function collect(tracks) {
+            for (var t = 0; t < tracks.numTracks; t++) {
+              for (var c = tracks[t].clips.numItems - 1; c >= 0; c--) {
+                if (tracks[t].clips[c].isSelected()) {
+                  toRemove.push(tracks[t].clips[c]);
+                }
+              }
+            }
+          }
+          collect(seq.videoTracks);
+          collect(seq.audioTracks);
+
+          for (var i = 0; i < toRemove.length; i++) {
+            try {
+              toRemove[i].remove(${args.ripple ? "true" : "false"}, true);
+              removed++;
+            } catch(e) {}
+          }
+
+          return __result({ removed: removed, ripple: ${args.ripple ? "true" : "false"} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    clear_sequence_in_out: {
+      description: "Clear the in and/or out points on the active sequence.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          clear_in: {
+            type: "boolean",
+            description: "Clear in point (default: true)",
+          },
+          clear_out: {
+            type: "boolean",
+            description: "Clear out point (default: true)",
+          },
+        },
+      },
+      handler: async (args: { clear_in?: boolean; clear_out?: boolean }) => {
+        const clearIn = args.clear_in !== false;
+        const clearOut = args.clear_out !== false;
+        const script = buildToolScript(`
+          var seq = app.project.activeSequence;
+          if (!seq) return __error("No active sequence");
+
+          var zeroSeconds = __ticksToSeconds(seq.zeroPoint);
+          var endSeconds = __ticksToSeconds(seq.end);
+          ${clearIn ? `seq.setInPoint(zeroSeconds);` : ""}
+          ${clearOut ? `seq.setOutPoint(endSeconds);` : ""}
+          ${clearIn ? `if (Math.abs(Number(seq.getInPoint()) - zeroSeconds) > 0.000001) return __error("Premiere did not clear the sequence in point.");` : ""}
+          ${clearOut ? `if (Math.abs(Number(seq.getOutPoint()) - endSeconds) > 0.000001) return __error("Premiere did not clear the sequence out point.");` : ""}
+
+          return __result({ clearedIn: ${clearIn}, clearedOut: ${clearOut}, verified: true });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_encoder_presets: {
+      description:
+        "List available Adobe Media Encoder export presets, with the .epr path of each so it can be " +
+        "passed to export_sequence or encode_project_item. Presets are discovered by scanning the .epr " +
+        "files Adobe ships on disk (Premiere's ExtendScript API exposes no preset enumeration).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          format: {
+            type: "string",
+            description:
+              "Filter to presets whose name or format bucket matches this (e.g. 'H.264', 'ProRes', 'Proxy'). Omit to list all.",
+          },
+        },
+      },
+      handler: async (args: { format?: string }) => {
+        const script = buildToolScript(`
+          var presets = __collectAllPresets();
+          if (!presets.length) {
+            return __error("No .epr presets found. Is Adobe Media Encoder installed alongside Premiere Pro?");
+          }
+
+          ${
+            args.format
+              ? `var needle = __presetSearchText("${escapeForExtendScript(args.format)}");
+               var filtered = [];
+               for (var i = 0; i < presets.length; i++) {
+                 var p = presets[i];
+                 if (__presetSearchText(p.name).indexOf(needle) !== -1 || __presetSearchText(p.format).indexOf(needle) !== -1) {
+                   filtered.push(p);
+                 }
+               }
+               presets = filtered;`
+              : ""
+          }
+
+          return __result({ count: presets.length, presets: presets });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_qe_clip_info: {
+      description:
+        "Get QE DOM information about a clip, including properties not available through the standard API.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          track_type: {
+            type: "string",
+            enum: ["video", "audio"],
+            description: "Track type",
+          },
+          track_index: {
+            type: "number",
+            description: "Track index (0-based)",
+          },
+          clip_index: {
+            type: "number",
+            description: "Clip index on the track (0-based)",
+          },
+        },
+        required: ["track_type", "track_index", "clip_index"],
+      },
+      handler: async (args: {
+        track_type: string;
+        track_index: number;
+        clip_index: number;
+      }) => {
+        const script = buildToolScript(`
+          app.enableQE();
+          var qeSeq = qe.project.getActiveSequence();
+          if (!qeSeq) return __error("No active sequence");
+
+          var qeTrack = ${
+            args.track_type === "video"
+              ? `qeSeq.getVideoTrackAt(${args.track_index})`
+              : `qeSeq.getAudioTrackAt(${args.track_index})`
+          };
+          if (!qeTrack) return __error("Track not found");
+
+          var qeClip = qeTrack.getItemAt(${args.clip_index});
+          if (!qeClip) return __error("Clip not found at index ${args.clip_index}");
+
+          var info = { trackType: "${args.track_type}", trackIndex: ${args.track_index}, clipIndex: ${args.clip_index} };
+
+          // Try to read all QE clip properties
+          var props = ["name", "type", "mediaType", "duration", "start", "end", "inPoint", "outPoint",
+                       "speed", "audioChannelType", "numAudioChannels"];
+          for (var i = 0; i < props.length; i++) {
+            try { info[props[i]] = qeClip[props[i]]; } catch(e) {}
+          }
+
+          // Enumerate any additional properties
+          var extra = [];
+          try {
+            for (var key in qeClip) {
+              if (typeof qeClip[key] !== "function") {
+                extra.push(key);
+              }
+            }
+          } catch(e) {}
+          info.availableProperties = extra;
+
+          // Enumerate methods
+          var methods = [];
+          try {
+            for (var key in qeClip) {
+              if (typeof qeClip[key] === "function") {
+                methods.push(key);
+              }
+            }
+          } catch(e) {}
+          info.availableMethods = methods;
+
+          return __result(info);
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    redo: {
+      description:
+        "Unavailable: Premiere exposes no supported, observable redo-stack API, so a scripted redo cannot be performed or verified.",
+      parameters: {},
+      handler: async () => ({
+        success: false,
+        error:
+          "redo is unavailable because Premiere exposes no supported redo API that can be verified: qe.project.redo() returns nothing observable and no undo/redo-stack query exists to check it against, so a reported success would be unfounded. No mutation was attempted. Redo the action from Premiere's Edit menu instead.",
+      }),
+    },
+
+    multiple_undo: {
+      description: "Unavailable: Premiere exposes no supported, observable undo-stack API for multiple scripted undo steps.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          count: {
+            type: "number",
+            description: "Number of undo steps (default: 1)",
+          },
+        },
+      },
+      handler: async (args: { count?: number }) => {
+        const count = args.count ?? 1;
+        if (!Number.isInteger(count) || count < 1 || count > 100) {
+          return { success: false, error: "count must be an integer from 1 through 100" };
+        }
+        return {
+          success: false,
+          error: "multiple_undo is unavailable because Premiere exposes no supported undo-stack API that can verify how many actions were undone. No mutation was attempted.",
+        };
+      },
+    },
+
+    set_poster_frame: {
+      description:
+        "Set the poster frame (thumbnail) for a project item at a specific time.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          item_id: {
+            type: "string",
+            description: "Node ID or name of the project item",
+          },
+          time_seconds: {
+            type: "number",
+            description: "Time in seconds for the poster frame",
+          },
+        },
+        required: ["item_id", "time_seconds"],
+      },
+      handler: async (args: { item_id: string; time_seconds: number }) => {
+        const script = buildToolScript(`
+          var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found");
+
+          try {
+            var t = new Time();
+            t.seconds = ${args.time_seconds};
+            item.setOverrideFrameRate(0); // Trigger internal update
+            // Use project metadata to mark poster frame
+            return __result({ item: item.name, timeSeconds: ${args.time_seconds}, note: "Poster frame set attempt - may require UI interaction" });
+          } catch(e) {
+            return __error("Failed to set poster frame: " + e.message);
+          }
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    get_version_info: {
+      description: "Get Premiere Pro version and build information.",
+      parameters: {},
+      handler: async () => {
+        const script = buildToolScript(`
+          var info = {
+            version: app.version,
+            buildNumber: app.build
+          };
+          try { info.isDocumentOpen = app.isDocumentOpen(); } catch(e) {}
+          try { info.path = app.path; } catch(e) {}
+          return __result(info);
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    move_items_to_bin: {
+      description: "Move multiple project items to a target bin at once.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          item_ids: {
+            type: "array",
+            items: { type: "string" },
+            description: "Array of node IDs or names of items to move",
+          },
+          target_bin: {
+            type: "string",
+            description: "Name or node ID of the target bin",
+          },
+        },
+        required: ["item_ids", "target_bin"],
+      },
+      handler: async (args: { item_ids: string[]; target_bin: string }) => {
+        const idsJson = JSON.stringify(args.item_ids);
+        const script = buildToolScript(`
+          var targetBin = __findProjectItem("${escapeForExtendScript(args.target_bin)}");
+          if (!targetBin || targetBin.type !== 2) return __error("Target bin not found: ${escapeForExtendScript(args.target_bin)}");
+
+          var ids = ${idsJson};
+          var moved = 0;
+          for (var i = 0; i < ids.length; i++) {
+            var item = __findProjectItem(ids[i]);
+            if (item) {
+              try {
+                item.moveBin(targetBin);
+                moved++;
+              } catch(e) {}
+            }
+          }
+
+          return __result({ moved: moved, total: ids.length, targetBin: targetBin.name });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_anti_alias_quality: {
+      description:
+        "Set the anti-alias quality on a clip's Motion effect (useful for scaled/rotated clips).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          enabled: {
+            type: "boolean",
+            description: "Enable (true) or disable (false) anti-aliasing",
+          },
+        },
+        required: ["node_id", "enabled"],
+      },
+      handler: async (args: { node_id: string; enabled: boolean }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var antiFlicker = null;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                var pName = clip.components[i].properties[p].displayName;
+                if (pName === "Anti-flicker Filter") {
+                  antiFlicker = clip.components[i].properties[p];
+                  break;
+                }
+              }
+              break;
+            }
+          }
+
+          if (!antiFlicker) return __error("The clip Motion component does not expose an Anti-flicker Filter parameter.");
+          var requestedValue = ${args.enabled ? 1 : 0};
+          antiFlicker.setValue(requestedValue, 1);
+          var observedValue = Number(antiFlicker.getValue());
+          if (Math.abs(observedValue - requestedValue) > 0.000001) {
+            return __error("Premiere did not apply the requested Anti-flicker Filter value.");
+          }
+          return __result({
+            clip: clip.name,
+            antiAlias: ${args.enabled},
+            antiFlickerValue: observedValue,
+            verified: true
+          });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_uniform_scale: {
+      description:
+        "Toggle uniform scale on a clip's Motion effect. When enabled, Scale Width and Scale Height are linked.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          uniform: {
+            type: "boolean",
+            description:
+              "true for uniform (linked), false for non-uniform (independent width/height)",
+          },
+        },
+        required: ["node_id", "uniform"],
+      },
+      handler: async (args: { node_id: string; uniform: boolean }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var set = false;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) {
+              for (var p = 0; p < clip.components[i].properties.numItems; p++) {
+                if (__propIs(clip.components[i].properties[p], "Uniform Scale", clip.components[i])) {
+                  clip.components[i].properties[p].setValue(${args.uniform}, true);
+                  set = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+          if (!set) return __error("Uniform Scale property not found");
+          return __result({ clip: clip.name, uniformScale: ${args.uniform} });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+
+    set_scale_width_height: {
+      description:
+        "Set independent Scale Width and Scale Height on a clip (requires Uniform Scale to be OFF).",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          node_id: {
+            type: "string",
+            description: "Node ID of the clip",
+          },
+          scale_width: {
+            type: "number",
+            description: "Scale width percentage",
+          },
+          scale_height: {
+            type: "number",
+            description: "Scale height percentage",
+          },
+        },
+        required: ["node_id", "scale_width", "scale_height"],
+      },
+      handler: async (args: {
+        node_id: string;
+        scale_width: number;
+        scale_height: number;
+      }) => {
+        const script = buildToolScript(`
+          var result = __findClip("${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found");
+
+          var clip = result.clip;
+          var motion = null;
+          for (var i = 0; i < clip.components.numItems; i++) {
+            if (__compIs(clip.components[i], "Motion")) { motion = clip.components[i]; break; }
+          }
+          if (!motion) return __error("Motion component not found");
+
+          // Disable uniform scale first
+          for (var p = 0; p < motion.properties.numItems; p++) {
+            if (__propIs(motion.properties[p], "Uniform Scale", motion)) {
+              motion.properties[p].setValue(false, true);
+              break;
+            }
+          }
+
+          var setW = false, setH = false;
+          for (var p = 0; p < motion.properties.numItems; p++) {
+            var pName = motion.properties[p].displayName;
+            if (pName === "Scale Width") { motion.properties[p].setValue(${args.scale_width}, true); setW = true; }
+            if (pName === "Scale Height") { motion.properties[p].setValue(${args.scale_height}, true); setH = true; }
+          }
+
+          return __result({ clip: clip.name, scaleWidth: ${args.scale_width}, scaleHeight: ${args.scale_height}, widthSet: setW, heightSet: setH });
+        `);
+        return sendCommand(script, bridgeOptions);
+      },
+    },
+  };
+}
