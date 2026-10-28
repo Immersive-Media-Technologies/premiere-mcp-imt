@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Drive Adobe Premiere Pro through PR-MCP-IMT (pr_verify, pr_catalog, pr_do, pr_batch, pr_get_sequence, pr_export_frame) and use Premiere's AI tools — Generative Extend, Generative Media Tool, Object Mask, transcripts and Paper Edit, captions, Enhance Speech/Audio, Search, AI Assistant, Auto Reframe, Scene Edit Detection, Morph Cut. Read at the start of any Premiere task. This file is the router; open only the reference it points to.
+description: Drive Adobe Premiere Pro through PR-MCP-IMT (pr_verify, pr_catalog, pr_do, pr_batch, pr_get_sequence, pr_export_frame) and use Premiere's AI tools — Generative Extend, Generative Media Tool, Object Mask, transcripts and Paper Edit, captions, Enhance Speech/Audio, Search, AI Assistant, Auto Reframe, Scene Edit Detection, Morph Cut — on localized Premiere in any UI language too. Read at the start of any Premiere task. This file is the router; open only the reference it points to.
 revision: 2
 updated_at: 2026-10-26
 ---

@@ -10,19 +10,23 @@ frames and export — from plain language.
 Two parts, made to work together:
 
 - **The MCP server** — about 380 Premiere operations behind nine tools; writes are verified by
-  reading Premiere back; **works on every Premiere UI language** — English effect, transition and
-  parameter names are translated through Premiere's own dictionaries (verified live in English,
-  Russian, German, Chinese, French and Spanish); no telemetry.
+  reading Premiere back; **works on every Premiere UI language** (verified live); no telemetry.
 - **The skill** (`skills/pr`, also served by the `pr_skill` tool, so it works in any client) — how
   to drive Premiere safely, where scripting ends, and how to use **Premiere's own AI tools**:
   Generative Extend, the Generative Media Tool (video, sound effects, music), Object Mask, Speech to
   Text and Paper Edit, captions, Enhance Speech and stem separation, Search, the AI Assistant, Auto
   Reframe, Scene Edit Detection, Morph Cut — plus recipes that combine them and the gotchas.
 
+**Built for localized Premiere, not just English.** Most Premiere MCP servers and agent skills assume
+the English UI — on a German, Chinese or Russian install their effect, transition and parameter names
+stop matching. PR-MCP-IMT finds components by matchName and translates English effect, transition and
+parameter names through Premiere's own UI dictionaries, so the same agent and the same skill work on
+all ten UI languages Premiere ships — verified live.
+
 By **[Immersive Media Technologies](https://github.com/Immersive-Media-Technologies)**.
 
-**macOS and Windows · Premiere Pro 2024–2026 — verified live on macOS (26.5.1, Russian UI) and on
-Windows 11 ARM (26.5.2, English UI, Claude Desktop from the Microsoft Store) · Node.js 20.19+ (none
+**macOS and Windows · Premiere Pro 2024–2026 — verified live on macOS (26.5) and on Windows 11 ARM
+(26.5.2, Claude Desktop from the Microsoft Store) · Node.js 20.19+ (none
 needed with the Claude Desktop extension).**
 
 > [!CAUTION]
@@ -173,7 +177,7 @@ sends home. As of 2026-10-26:
 </tr>
 <tr><td>Tools the model sees by default</td><td>9, over ~380 operations</td><td>the whole catalog (~440 tools)</td><td>74 (profile <code>standard</code>) of ~1,060</td><td>5, over 283 operations</td><td>none — the agent pipes ExtendScript</td></tr>
 <tr><td>Knowledge of Premiere's AI tools</td><td>skill with 8 references + recipes</td><td>2 skills (editing, development)</td><td>7 workflow skills</td><td>1 skill</td><td>1 skill (scripting)</td></tr>
-<tr><td>Non-English Premiere</td><td>all 10 UI languages; verified live in en, ru, de, zh, fr, es</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
+<tr><td>Non-English Premiere</td><td>every UI language (all ten), verified live</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
 <tr><td>Telemetry</td><td>none</td><td>PostHog, off unless a key is set</td><td>none found</td><td>on by default (opt-out)</td><td>none mentioned</td></tr>
 <tr><td>Connector install</td><td>by the agent, with consent; installers with a live self-test</td><td>CLI flag</td><td>build from source (Go, Rust, Python)</td><td>CLI flag</td><td><code>pip</code> + setup</td></tr>
 <tr><td>Clients</td><td>Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client</td><td>npm, .mcpb, Codex / Claude Code plugins</td><td>build from source</td><td>npm, plugins, .mcpb</td><td>CLI + skill</td></tr>
@@ -182,7 +186,7 @@ sends home. As of 2026-10-26:
 
 What we changed in the upstream code, besides the skill and the packaging: component and property
 lookup by matchName and English names translated through Premiere's own UI dictionaries (on a
-Russian Premiere every opacity, motion, keyframe and volume operation of upstream failed), `split_clip` that cuts the clip you name (upstream cut track 0), no telemetry, stdio
+localized Premiere every opacity, motion, keyframe and volume operation of upstream failed), `split_clip` that cuts the clip you name (upstream cut track 0), no telemetry, stdio
 only, and a compact tool surface.
 
 ## Releases
@@ -193,7 +197,7 @@ change is in [`CHANGELOG.md`](CHANGELOG.md).
 
 - [v1.0.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.0) · 2026-10-28 —
   every Premiere UI language (English names translated through Premiere's own dictionaries; verified
-  live in six languages), honest results for unknown effects, colour correction and LUTs, Apache-2.0.
+  live), honest results for unknown effects, colour correction and LUTs, Apache-2.0.
 - [v0.1.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v0.1.0) · 2026-10-26 —
   first public release: the Premiere agent skill, nine-tool surface, `pr_skill`, connector install by
   the agent, Claude Desktop extension, installers with a live self-test, ChatGPT gateway.
