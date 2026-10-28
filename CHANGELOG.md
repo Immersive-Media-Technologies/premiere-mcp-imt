@@ -7,7 +7,7 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
-## [1.0.4] - 2026-10-28
+## [1.1.0] - 2026-10-28
 
 ### Changed
 

@@ -1,4 +1,4 @@
-// IMT 1.0.4: refusals raised before any write are not_applied (no host-recovery lock);
+// IMT 1.1.0: refusals raised before any write are not_applied (no host-recovery lock);
 // the facade tells the agent how to resume after an unknown outcome.
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";

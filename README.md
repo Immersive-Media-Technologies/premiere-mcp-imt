@@ -187,7 +187,7 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
-- [v1.0.4](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.4) · 2026-10-28 —
+- [v1.1.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.1.0) · 2026-10-28 —
   built on premiere-pro-mcp 1.26.0: every edit read back from Premiere, about 60 more operations, the UI-language
   layer carried into the new code; reinstall the connector with `pr_install_connector`.
 - [v1.0.2](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.2) · 2026-10-28 —
