@@ -187,6 +187,9 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.1.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.1.1) · 2026-10-28 —
+  Premiere's home screen: `pr_verify` says when no project is open, and an edit tried without a project no longer
+  pauses the edits after it.
 - [v1.1.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.1.0) · 2026-10-28 —
   built on premiere-pro-mcp 1.26.0: every edit read back from Premiere, about 60 more operations, the UI-language
   layer carried into the new code; reinstall the connector with `pr_install_connector`.

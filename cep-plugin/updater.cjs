@@ -7,7 +7,7 @@
 })(this, function () {
   "use strict";
 
-  var CURRENT_VERSION = "1.1.0";
+  var CURRENT_VERSION = "1.1.1";
   var PACKAGE_NAME = "@immersive-media-technologies/premiere-mcp-imt";
   var LATEST_PACKAGE_API = "https://registry.npmjs.org/" + PACKAGE_NAME.replace("/", "%2F") + "/latest";
   // The /latest endpoint serves only full JSON: it answers HTTP 406 to the abbreviated

@@ -7,6 +7,8 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-28
+
 ### Fixed
 
 - Premiere's home screen (no project open): `pr_verify` reported that a project was open — Premiere keeps a
