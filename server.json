@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Immersive-Media-Technologies/premiere-mcp-imt",
+  "title": "PR-MCP-IMT — Premiere Pro for AI agents",
+  "description": "Adobe Premiere Pro for AI agents: ~380 readback-verified operations behind 9 tools, AI-tools skill",
+  "repository": {
+    "url": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt#readme",
+  "version": "0.1.0",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/mcpb/icon.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/download/v0.1.0/premiere-mcp-imt-0.1.0.mcpb",
+      "fileSha256": "aa976aebb5b23e5f78b69081ab1b0e89642234c7c100632da55e6db61f92310b",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
