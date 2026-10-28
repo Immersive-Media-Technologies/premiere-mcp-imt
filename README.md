@@ -60,10 +60,10 @@ inside Premiere that the server talks to. The agent installs it for you on first
 
 | Client | How |
 |---|---|
-| <img src="https://www.google.com/s2/favicons?domain=claude.ai&sz=32" width="16" height="16" alt=""> **Claude Desktop** | download [`premiere-mcp-imt.mcpb`](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/latest/download/premiere-mcp-imt.mcpb), double-click, **Install** (Windows: drag it onto Settings → Extensions). No Node needed. |
-| <img src="https://www.google.com/s2/favicons?domain=cursor.com&sz=32" width="16" height="16" alt=""> **Cursor** | <a href="https://cursor.com/en/install-mcp?name=premiere&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBpbW1lcnNpdmUtbWVkaWEtdGVjaG5vbG9naWVzL3ByZW1pZXJlLW1jcC1pbXQiXX0="><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add to Cursor" height="20"></a> |
-| <img src="https://www.google.com/s2/favicons?domain=antigravity.google&sz=32" width="16" height="16" alt=""> **Google Antigravity** | Settings → Customizations → Installed MCP Servers → **View raw config** → add the snippet below. |
-| <img src="https://www.google.com/s2/favicons?domain=chatgpt.com&sz=32" width="16" height="16" alt=""> **ChatGPT** (remote servers only) | on the Premiere machine: `npx -p @immersive-media-technologies/premiere-mcp-imt premiere-mcp-imt-chatgpt` — it starts the server behind a tunnel and prints the URL to paste into ChatGPT. |
+| ![](https://www.google.com/s2/favicons?domain=claude.ai&sz=16) **Claude Desktop** | download [`premiere-mcp-imt.mcpb`](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/latest/download/premiere-mcp-imt.mcpb), double-click, **Install** (Windows: drag it onto Settings → Extensions). No Node needed. |
+| ![](https://www.google.com/s2/favicons?domain=cursor.com&sz=16) **Cursor** | [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=premiere&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBpbW1lcnNpdmUtbWVkaWEtdGVjaG5vbG9naWVzL3ByZW1pZXJlLW1jcC1pbXQiXX0=) — one click: Cursor opens and writes the config |
+| ![](https://www.google.com/s2/favicons?domain=antigravity.google&sz=16) **Google Antigravity** | Settings → Customizations → Installed MCP Servers → **View raw config** → add the snippet below. |
+| ![](https://www.google.com/s2/favicons?domain=chatgpt.com&sz=16) **ChatGPT** (remote servers only) | on the Premiere machine: `npx -p @immersive-media-technologies/premiere-mcp-imt premiere-mcp-imt-chatgpt` — it starts the server behind a tunnel and prints the URL to paste into ChatGPT. |
 | **Any MCP client** | the snippet below in its `mcpServers`. |
 
 ```json
@@ -88,8 +88,7 @@ The installer checks Premiere, Node and FFmpeg, builds, installs the connector (
 running Premiere whether the connector answers, and — after asking — writes the entry into Claude
 Desktop's, Cursor's and Antigravity's configs, backing them up.
 
-<details>
-<summary>If something does not connect</summary>
+**If something does not connect**
 
 - `pr_verify` says the connector does not answer: quit Premiere **completely** after the connector
   was installed and open it again; close any open Premiere dialog (a modal dialog blocks scripting).
@@ -105,7 +104,6 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
   `powershell -ExecutionPolicy Bypass -File scripts\install-cep.ps1` once from a normal PowerShell in a
   source checkout (or use `install.ps1`).
 - `premiere-mcp-imt --doctor` checks the local install without reading a project.
-</details>
 
 ## How it stays safe
 
@@ -168,23 +166,15 @@ Clients with their own skill support can load the folder directly (e.g. copy `sk
 Several Premiere MCP servers exist; they differ in what the model sees, what it knows and what it
 sends home. As of 2026-10-26:
 
-<table>
-<tr>
-<th width="120"></th>
-<th width="150">Premiere-MCP-IMT</th>
-<th><a href="https://github.com/leancoderkavy/premiere-pro-mcp">premiere-<br>pro-mcp</a><br>(upstream)</th>
-<th><a href="https://github.com/ayushozha/AdobePremiereProMCP">AdobePremiere<br>ProMCP</a></th>
-<th><a href="https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP">Adobe_Premiere<br>_Pro_MCP</a></th>
-<th><a href="https://github.com/sfkislev/flue">flue</a></th>
-</tr>
-<tr><td>Tools the model sees by default</td><td>9, over ~380 operations</td><td>the whole catalog (~440 tools)</td><td>74 (profile <code>standard</code>) of ~1,060</td><td>5, over 283 operations</td><td>none — the agent pipes ExtendScript</td></tr>
-<tr><td>Knowledge of Premiere's AI tools</td><td>skill with 8 references + recipes</td><td>2 skills (editing, development)</td><td>7 workflow skills</td><td>1 skill</td><td>1 skill (scripting)</td></tr>
-<tr><td>Non-English Premiere</td><td>every UI language (all ten), verified live</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
-<tr><td>Telemetry</td><td>none</td><td>PostHog, off unless a key is set</td><td>none found</td><td>on by default (opt-out)</td><td>none mentioned</td></tr>
-<tr><td>Connector install</td><td>by the agent, with consent; installers with a live self-test</td><td>CLI flag</td><td>build from source (Go, Rust, Python)</td><td>CLI flag</td><td><code>pip</code> + setup</td></tr>
-<tr><td>Clients</td><td>Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client</td><td>npm, .mcpb, Codex / Claude Code plugins</td><td>build from source</td><td>npm, plugins, .mcpb</td><td>CLI + skill</td></tr>
-<tr><td>License</td><td>Apache-2.0</td><td>MIT</td><td>MIT</td><td>MIT</td><td>MIT</td></tr>
-</table>
+|  | Premiere-MCP-IMT | [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp) (upstream) | [AdobePremiereProMCP](https://github.com/ayushozha/AdobePremiereProMCP) | [Adobe_Premiere_Pro_MCP](https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP) | [flue](https://github.com/sfkislev/flue) |
+| --- | --- | --- | --- | --- | --- |
+| Tools the model sees by default | 9, over ~380 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
+| Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
+| Non-English Premiere | every UI language (all ten), verified live | English and es-ES measured | not stated | not stated | not stated |
+| Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
+| Connector install | by the agent, with consent; installers with a live self-test | CLI flag | build from source (Go, Rust, Python) | CLI flag | `pip` + setup |
+| Clients | Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client | npm, .mcpb, Codex / Claude Code plugins | build from source | npm, plugins, .mcpb | CLI + skill |
+| License | Apache-2.0 | MIT | MIT | MIT | MIT |
 
 What we changed in the upstream code, besides the skill and the packaging: component and property
 lookup by matchName and English names translated through Premiere's own UI dictionaries (on a

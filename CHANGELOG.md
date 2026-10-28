@@ -7,6 +7,10 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Changed
+
+- README in plain Markdown — Glama and other catalogs strip raw HTML: the «Add to Cursor» button, client icons and the «Why this one» comparison table now show there too.
+
 ## [1.0.2] - 2026-10-28
 
 ### Changed
