@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/banner.jpg" alt="PR-MCP-IMT + SKILLS — Premiere Pro for AI agents" width="1280"></p>
+![PR-MCP-IMT + SKILLS — Premiere Pro for AI agents](https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/assets/banner.jpg)
 
 # PR-MCP-IMT + SKILLS — Premiere Pro for AI agents
 
