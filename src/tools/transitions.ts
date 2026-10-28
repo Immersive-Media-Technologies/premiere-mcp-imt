@@ -46,19 +46,17 @@ export function getTransitionsTools(bridgeOptions: BridgeOptions) {
           var transitionQE = null;
 
           // Resolution path 1: getVideoTransitionByName (works on PPro 2026 where
-          // getVideoTransitionList() returns an empty list).
-          try {
-            if (qe.project.getVideoTransitionByName) {
-              transitionQE = qe.project.getVideoTransitionByName(transitionName);
-            }
-          } catch(e1) {}
+          // getVideoTransitionList() returns an empty list), English or UI-language
+          // name; QE answers an unknown name with an empty placeholder.
+          var transitionLookup = __qeLookup("videoTransition", transitionName);
+          if (transitionLookup) transitionQE = transitionLookup.item;
 
           // Resolution path 2: scan getVideoTransitionList (legacy).
           if (!transitionQE) {
             try {
               var transitions = qe.project.getVideoTransitionList();
               for (var i = 0; i < transitions.numItems; i++) {
-                if (transitions[i].name === transitionName) {
+                if (__nameIn(transitions[i].name, transitionName)) {
                   transitionQE = transitions[i];
                   break;
                 }
@@ -66,7 +64,7 @@ export function getTransitionsTools(bridgeOptions: BridgeOptions) {
             } catch(e2) {}
           }
 
-          if (!transitionQE) return __error("Transition not found: " + transitionName);
+          if (!transitionQE) return __error("Transition not found: " + transitionName + ". Names follow Premiere's UI language; English names are translated automatically.");
 
           var domTrack = app.project.activeSequence.videoTracks[${args.track_index}];
           if (!domTrack) return __error("Track not found in the Premiere DOM");
@@ -178,16 +176,17 @@ export function getTransitionsTools(bridgeOptions: BridgeOptions) {
           
           var transitionName = "${escapeForExtendScript(args.transition_name)}";
           var transitionQE = null;
-          try { if (qe.project.getVideoTransitionByName) transitionQE = qe.project.getVideoTransitionByName(transitionName); } catch(e1) {}
+          var transitionLookup = __qeLookup("videoTransition", transitionName);
+          if (transitionLookup) transitionQE = transitionLookup.item;
           if (!transitionQE) {
             try {
               var transitions = qe.project.getVideoTransitionList();
               for (var i = 0; i < transitions.numItems; i++) {
-                if (transitions[i].name === transitionName) { transitionQE = transitions[i]; break; }
+                if (__nameIn(transitions[i].name, transitionName)) { transitionQE = transitions[i]; break; }
               }
             } catch(e2) {}
           }
-          if (!transitionQE) return __error("Transition not found: " + transitionName);
+          if (!transitionQE) return __error("Transition not found: " + transitionName + ". Names follow Premiere's UI language; English names are translated automatically.");
 
           var qeTrack = qeSeq.getVideoTrackAt(result.trackIndex);
           if (!qeTrack) return __error("QE video track not found");
@@ -294,16 +293,17 @@ export function getTransitionsTools(bridgeOptions: BridgeOptions) {
           
           var transitionName = "${escapeForExtendScript(args.transition_name)}";
           var transitionQE = null;
-          try { if (qe.project.getVideoTransitionByName) transitionQE = qe.project.getVideoTransitionByName(transitionName); } catch(e1) {}
+          var transitionLookup = __qeLookup("videoTransition", transitionName);
+          if (transitionLookup) transitionQE = transitionLookup.item;
           if (!transitionQE) {
             try {
               var transitions = qe.project.getVideoTransitionList();
               for (var i = 0; i < transitions.numItems; i++) {
-                if (transitions[i].name === transitionName) { transitionQE = transitions[i]; break; }
+                if (__nameIn(transitions[i].name, transitionName)) { transitionQE = transitions[i]; break; }
               }
             } catch(e2) {}
           }
-          if (!transitionQE) return __error("Transition not found: " + transitionName);
+          if (!transitionQE) return __error("Transition not found: " + transitionName + ". Names follow Premiere's UI language; English names are translated automatically.");
 
           var track = seq.videoTracks[${trackIndex}];
           var qeTrack = qeSeq.getVideoTrackAt(${trackIndex});
@@ -384,11 +384,8 @@ export function getTransitionsTools(bridgeOptions: BridgeOptions) {
           if (list.length === 0 && qe.project.getVideoTransitionByName) {
             var names = ["Cross Dissolve","Dip to Black","Dip to White","Film Dissolve","Additive Dissolve","Morph Cut","Push","Slide","Wipe","Iris Round","Iris Box"];
             for (var n = 0; n < names.length; n++) {
-              try {
-                if (qe.project.getVideoTransitionByName(names[n])) {
-                  list.push({ name: names[n], source: "byName" });
-                }
-              } catch(e2) {}
+              var probe = __qeLookup("videoTransition", names[n]);
+              if (probe) list.push({ name: probe.name, englishName: names[n], source: "byName" });
             }
           }
           return __result(list);

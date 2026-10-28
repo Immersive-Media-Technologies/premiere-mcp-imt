@@ -18,7 +18,7 @@ Effect Controls (UI).
 ## Morph Cut — hides a jump cut in a talking head
 UI: Effects › Video Transitions › Dissolve › **Morph Cut** on the jump cut → wait until "Analyzing in
 background" clears.
-- Script (untested for Morph Cut): `add_transition {transition_name:"Morph Cut", track_index, cut_point_seconds, duration_seconds}`; on a localized UI the name is localized (SKILL.md §3). Confirm with `get_full_sequence_info`; if refused, the user applies it from the Effects panel.
+- Script (untested for Morph Cut): `add_transition {transition_name:"Morph Cut", track_index, cut_point_seconds, duration_seconds}`; the English name works on any UI language (SKILL.md). Confirm with `get_full_sequence_info`; if refused, the user applies it from the Effects panel.
 - Works with one talking head, static camera and background, short clips. Moving camera or background → a cutaway or a punch-in instead.
 - Failures: the banner never clears; preview is right but the export is a plain dissolve. Fixes: sequence frame rate = source frame rate; nest clips scaled differently from the sequence; transcode long-GOP media; Render and Replace before export.
 - Check after the analysis finished: `set_work_area` around the cut → `export_sequence {output_path, work_area_only:true}` → look at the file.

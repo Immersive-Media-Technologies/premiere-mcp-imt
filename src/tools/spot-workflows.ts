@@ -327,8 +327,9 @@ function buildApplyScript(plan: SpotWorkflowPlan): string {
         app.enableQE();
         var qeSequence = qe.project.getActiveSequence();
         qeTrack = qeSequence ? qeSequence.getVideoTrackAt(${plan.video_track_index}) : null;
-        if (qeTrack && qe.project.getVideoTransitionByName) {
-          transitionQE = qe.project.getVideoTransitionByName(transitionName);
+        if (qeTrack) {
+          var transitionLookup = __qeLookup("videoTransition", transitionName);
+          transitionQE = transitionLookup ? transitionLookup.item : null;
         }
         transitionReady = !!qeTrack && !!transitionQE;
         transitionPreflight = transitionReady

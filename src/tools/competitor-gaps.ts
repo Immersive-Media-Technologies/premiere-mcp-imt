@@ -303,13 +303,18 @@ export function getCompetitorGapTools(
 
           var effectAdded = false;
           if (!crop) {
-            var catalog = __getQeEffectCatalog("video");
-            if (!catalog.ok) return __error(catalog.error + " Crop was not added.");
-            var cropEffect = null;
-            for (i = 0; i < catalog.effects.numItems; i++) {
-              if (catalog.effects[i].name === "Crop") { cropEffect = catalog.effects[i]; break; }
+            // English or UI-language name; QE's catalog is empty on Premiere 26
+            var cropLookup = __qeLookup("video", "Crop");
+            if (!cropLookup) {
+              var catalog = __getQeEffectCatalog("video");
+              if (catalog.ok) {
+                for (i = 0; i < catalog.effects.numItems; i++) {
+                  if (__nameIn(catalog.effects[i].name, "Crop")) { cropLookup = { item: catalog.effects[i], name: String(catalog.effects[i].name) }; break; }
+                }
+              }
             }
-            if (!cropEffect) return __error("The legacy QE video-effect catalog does not contain Crop. No effect was added.");
+            if (!cropLookup) return __error("Premiere did not resolve the Crop effect. No effect was added.");
+            var cropEffect = cropLookup.item;
             var qeSeq = qe.project.getActiveSequence();
             if (!qeSeq) return __error("No active sequence is available through QE. Crop was not added.");
             var qeTrack = qeSeq.getVideoTrackAt(found.trackIndex);
@@ -325,6 +330,8 @@ export function getCompetitorGapTools(
             }
             if (!qeClip || typeof qeClip.addVideoEffect !== "function") return __error("QE could not address the target video clip for Crop. Crop was not added.");
             try { qeClip.addVideoEffect(cropEffect); } catch (addError) { return __error("Premiere rejected the Crop effect addition: " + addError.toString()); }
+            var refreshedCrop = __findClip("${escapeForExtendScript(args.node_id)}");
+            if (refreshedCrop) clip = refreshedCrop.clip;
             for (i = 0; i < clip.components.numItems; i++) {
               component = clip.components[i];
               if (component && (__compIs(component, "Crop") || component.matchName === "AE.ADBE AECrop")) {
@@ -343,7 +350,7 @@ export function getCompetitorGapTools(
             var request = requests[i];
             var property = null;
             for (var p = 0; p < crop.properties.numItems; p++) {
-              if (String(crop.properties[p].displayName) === request.name) { property = crop.properties[p]; break; }
+              if (__propIs(crop.properties[p], request.name, crop)) { property = crop.properties[p]; break; }
             }
             if (!property) return __error("Crop does not expose the '" + request.name + "' property on this host. No requested crop value was written.");
             resolved.push({ name: request.name, requested: request.value, property: property });

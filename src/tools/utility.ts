@@ -208,6 +208,12 @@ export function getUtilityTools(bridgeOptions: BridgeOptions) {
           // the active sequence, then insert into the requested track at the
           // playhead. qe.project.newAdjustmentLayer() returns a QE project item.
           try {
+            // The new item's name is localized ("Корректирующий слой"), so find it
+            // as the root item that did not exist before the call.
+            var rootBefore = {};
+            for (var b = 0; b < app.project.rootItem.children.numItems; b++) {
+              try { rootBefore[String(app.project.rootItem.children[b].nodeId)] = true; } catch (eBefore) {}
+            }
             var adjQE = qe.project.newAdjustmentLayer ? qe.project.newAdjustmentLayer() : null;
             if (adjQE) {
               // Find the matching public ProjectItem to insert.
@@ -215,7 +221,7 @@ export function getUtilityTools(bridgeOptions: BridgeOptions) {
               var adjItem = null;
               for (var c = rootChildren.numItems - 1; c >= 0; c--) {
                 var it = rootChildren[c];
-                if (it && it.name && it.name.toLowerCase().indexOf("adjustment") !== -1) {
+                if (it && !rootBefore[String(it.nodeId)]) {
                   adjItem = it;
                   break;
                 }

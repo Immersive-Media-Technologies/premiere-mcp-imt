@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp follows below them.
 
+## [Unreleased]
+
+### Added
+
+- **Every Premiere UI language** (Premiere 2026 ships ten: English, German, Spanish, French, Italian,
+  Japanese, Korean, Brazilian Portuguese, Russian, Simplified Chinese). English effect, transition,
+  component and parameter names are translated through Premiere's own UI dictionaries (read from the
+  installed app; a generated table covers the names the tools use when the dictionaries are not found,
+  `scripts/generate-premiere-ui-names.mjs`). Every script gets the translations of its names as
+  `__L10N`; the helpers `__nameIn` and `__qeLookup` and the existing `__compIs` / `__propIs` accept the
+  English name or its spelling in the running UI language. Results report the host's name next to the
+  requested one. `PREMIERE_DICTIONARIES_DIR` points at another dictionary folder (`off` disables it).
+- The UXP effect workflows resolve an English or localized display name to the host's audio display
+  name or video matchName through the effect catalog.
+
+### Fixed
+
+- `apply_effect`, `apply_audio_effect`, `batch_apply_effect`, `copy_effects_between_clips`, `stabilize_clip`,
+  `color_correct`, `apply_lut`, `crop_clip` and the transition tools no longer treat QE's empty placeholder
+  for an unknown name as a found effect, and check that the effect actually landed on the clip — an unknown
+  name used to report `applied: true` with nothing added.
+- `color_correct` reports an error when no Lumetri control was changed (it reported success on every
+  non-English Premiere); `apply_lut` reports that Premiere's scripting API rejects a LUT file for Input LUT
+  instead of `lutApplied: true`.
+- Clip volume, channel volume, Warp Stabilizer, Crop and Gaussian Blur are recognised by their real
+  Premiere 26 matchNames (`Internal Volume Mono/Stereo`, `AE.ADBE SubspaceStabilizer`, `AE.ADBE AECrop`,
+  `AE.Impact_Blur_FX`) — volume tools failed on every non-English Premiere.
+- `stabilize_clip` sets Method by its list index (Premiere ignored the label) and accepts "Perspective".
+- Effect tools address the QE clip by its timeline start (QE item indexes include gaps).
+- `add_adjustment_layer` finds the new project item by node id, not by an English name.
+- MOGRT authoring links the accent colour by parameter index (`effect("Accent Color")(1)`); the parameter
+  name is localized in After Effects.
+
 ## [0.1.0] - 2026-10-26 — Immersive Media Technologies fork
 
 First release of PR-MCP-IMT, based on [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp)

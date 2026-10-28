@@ -1,4 +1,5 @@
 import type { UxpWebSocketBridge } from "../bridge/uxp-websocket-bridge.js";
+import { premiereUiNameTranslations } from "../locale/premiere-ui-names.js";
 
 type WorkflowArgs = {
   action?: string;
@@ -91,6 +92,40 @@ function invoke(
     }));
 }
 
+/**
+ * Video effects are added by matchName and audio effects by display name, which
+ * Premiere localizes. A name the host does not list as-is is resolved through
+ * the host catalog: the English name or its UI-language spelling (display name)
+ * maps to the listed audio name, or to the matchName at the same catalog index.
+ */
+export async function resolveUxpEffectId(bridge: UxpWebSocketBridge, mediaType: string | undefined, effectId: string | undefined): Promise<string | undefined> {
+  if (!effectId || (mediaType !== "audio" && mediaType !== "video")) return effectId;
+  // a matchName ("AE.ADBE Lumetri", "PR.…") needs no lookup
+  if (mediaType === "video" && /^[A-Za-z][A-Za-z0-9_]*\.\S/.test(effectId)) return effectId;
+  const translations = premiereUiNameTranslations(effectId);
+  // an audio name that is not a known English UI name is passed through as given
+  if (mediaType === "audio" && !translations) return effectId;
+  let catalog: { video?: { matchNames?: unknown[]; displayNames?: unknown[] }; audio?: { displayNames?: unknown[] } };
+  try {
+    catalog = (await bridge.request("effects.catalog", { mediaType })) as typeof catalog;
+  } catch {
+    return effectId; // the add itself reports an unknown name
+  }
+  const candidates = [effectId, ...Object.values(translations ?? {}).flat()];
+  if (mediaType === "audio") {
+    const names = (catalog?.audio?.displayNames ?? []).map(String);
+    return candidates.find((name) => names.includes(name)) ?? effectId;
+  }
+  const matchNames = (catalog?.video?.matchNames ?? []).map(String);
+  const displayNames = (catalog?.video?.displayNames ?? []).map(String);
+  if (matchNames.includes(effectId) || matchNames.length !== displayNames.length) return effectId;
+  for (const name of candidates) {
+    const index = displayNames.indexOf(name);
+    if (index >= 0) return matchNames[index];
+  }
+  return effectId;
+}
+
 function target(args: WorkflowArgs): Record<string, unknown> {
   return {
     ...(args.project_item_id !== undefined ? { projectItemId: args.project_item_id } : {}),
@@ -144,7 +179,7 @@ export function getUxpWorkflowTools(bridge: UxpWebSocketBridge) {
         };
         if (args.action === "inspect") return invoke(bridge, "effects.chain.get", coordinates);
         if (args.action === "add") return invoke(bridge, "effects.chain.add", {
-          ...coordinates, effectId: args.effect_id,
+          ...coordinates, effectId: await resolveUxpEffectId(bridge, args.media_type, args.effect_id),
           ...(args.insertion_index === undefined ? {} : { insertionIndex: args.insertion_index }),
           ...operation(args),
         });
@@ -193,7 +228,7 @@ export function getUxpWorkflowTools(bridge: UxpWebSocketBridge) {
       handler: async (args: WorkflowArgs) => {
         if (args.action === "inspect") return invoke(bridge, "selection.inspect");
         if (args.action === "add_effect") return invoke(bridge, "effects.selection.add", {
-          mediaType: args.media_type, effectId: args.effect_id,
+          mediaType: args.media_type, effectId: await resolveUxpEffectId(bridge, args.media_type, args.effect_id),
           ...(args.insertion_index === undefined ? {} : { insertionIndex: args.insertion_index }),
           ...operation(args),
         });

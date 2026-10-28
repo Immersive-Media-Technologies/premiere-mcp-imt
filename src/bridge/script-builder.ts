@@ -3,6 +3,7 @@
  * All generated code must be ES3-compatible (var, no arrow functions, no let/const).
  */
 import { createHash } from "node:crypto";
+import { premiereL10nPrelude } from "../locale/premiere-ui-names.js";
 
 const HELPERS = `
 // === MCP Bridge Helpers (auto-prepended) ===
@@ -129,40 +130,110 @@ function __findProjectItem(nodeIdOrName, rootItem) {
   return null;
 }
 
-// Deep Artisan (20.09.2026, ru_RU Premiere 26.5): components and properties are
-// localized — displayName is "Непрозрачность", not "Opacity" — so every lookup by the
-// English display name failed on a non-English Premiere ("Effect not found: Opacity").
-// Components carry a stable matchName ("AE.ADBE Opacity"); properties carry none, so the
-// intrinsic components fall back to a fixed property order (verified on 26.5.1 ru_RU).
+// Premiere localizes every name a script sees — components ("Непрозрачность", not
+// "Opacity"), their properties, effects and transitions — so lookups by an English
+// display name failed on every non-English Premiere ("Effect not found: Opacity").
+// Components carry a stable matchName; properties carry none. buildScript() puts the
+// translations of the script's string literals into the global __L10N (from
+// Premiere's own UI dictionaries, src/locale/premiere-ui-names.ts), and every
+// name lookup below accepts the English name or its spelling in the running UI
+// language ($.locale). The intrinsic components keep a fixed property order as a
+// last resort (verified on Premiere 26.5 ru_RU).
+if (typeof __L10N === "undefined") { __L10N = {}; }
+function __namesFor(name) {
+  var wanted = String(name);
+  var out = [wanted];
+  var table = null;
+  try { table = __L10N && __L10N.hasOwnProperty(wanted) ? __L10N[wanted] : null; } catch (eTable) { table = null; }
+  if (!table) return out;
+  var locale = "";
+  try { locale = String($.locale || ""); } catch (eLocale) {}
+  var own = table.hasOwnProperty(locale) ? table[locale] : null;
+  if (own) {
+    for (var i = 0; i < own.length; i++) out.push(own[i]);
+    return out;
+  }
+  // unknown UI language: accept the name in any language Premiere ships
+  for (var loc in table) {
+    if (!table.hasOwnProperty(loc)) continue;
+    for (var j = 0; j < table[loc].length; j++) out.push(table[loc][j]);
+  }
+  return out;
+}
+function __nameIn(actual, name) {
+  if (actual === undefined || actual === null || name === undefined || name === null) return false;
+  var value = String(actual);
+  var names = __namesFor(name);
+  for (var i = 0; i < names.length; i++) {
+    if (names[i] === value) return true;
+  }
+  return false;
+}
+// QE effect / transition by name (English or localized). QE returns a truthy
+// placeholder with an empty name for a name it does not know, so only a
+// non-empty name counts as found.
+function __qeLookup(kind, name) {
+  if (typeof qe === "undefined" || !qe.project) return null;
+  var names = __namesFor(name);
+  for (var i = 0; i < names.length; i++) {
+    var item = null;
+    try {
+      if (kind === "audio") item = qe.project.getAudioEffectByName(names[i]);
+      else if (kind === "videoTransition") item = qe.project.getVideoTransitionByName ? qe.project.getVideoTransitionByName(names[i]) : null;
+      else if (kind === "audioTransition") item = qe.project.getAudioTransitionByName ? qe.project.getAudioTransitionByName(names[i]) : null;
+      else item = qe.project.getVideoEffectByName(names[i]);
+    } catch (eLookup) { item = null; }
+    if (!item) continue;
+    var resolved = "";
+    try { resolved = String(item.name || ""); } catch (eName) { resolved = ""; }
+    if (resolved !== "") return { item: item, name: resolved, requested: String(name) };
+  }
+  return null;
+}
 var __COMP_MATCH = {
-  "Opacity": "AE.ADBE Opacity",
-  "Motion": "AE.ADBE Motion",
-  "Time Remapping": "AE.ADBE Time Remapping",
-  "Volume": "AE.ADBE Audio Levels",
-  "Channel Volume": "AE.ADBE Audio Channel Volume",
-  "Panner": "AE.ADBE Audio Pan",
-  "Lumetri Color": "AE.ADBE Lumetri",
-  "Crop": "AE.ADBE Crop",
-  "Warp Stabilizer": "AE.ADBE Warp Stabilizer"
+  "Opacity": ["AE.ADBE Opacity"],
+  "Motion": ["AE.ADBE Motion"],
+  "Time Remapping": ["AE.ADBE Time Remapping"],
+  "Volume": ["Internal Volume Mono", "Internal Volume Stereo", "Internal Volume 5.1", "Internal Volume Adaptive", "AE.ADBE Audio Levels", "audioVolume"],
+  "Channel Volume": ["Internal Channel Volume Mono", "Internal Channel Volume Stereo", "Internal Channel Volume 5.1", "AE.ADBE Audio Channel Volume"],
+  "Panner": ["AE.ADBE Audio Pan"],
+  "Lumetri Color": ["AE.ADBE Lumetri"],
+  "Crop": ["AE.ADBE AECrop", "AE.ADBE Crop"],
+  "Warp Stabilizer": ["AE.ADBE SubspaceStabilizer", "AE.ADBE Warp Stabilizer"],
+  "Gaussian Blur": ["AE.Impact_Blur_FX", "AE.ADBE Gaussian Blur 2"]
 };
 var __PROP_INDEX = {
   "AE.ADBE Opacity": { "Opacity": 0, "Blend Mode": 1 },
-  "AE.ADBE Motion": { "Position": 0, "Scale": 1, "Scale Width": 2, "Uniform Scale": 3, "Rotation": 4, "Anchor Point": 5, "Anti-flicker Filter": 6 },
-  "AE.ADBE Audio Levels": { "Bypass": 0, "Level": 1 },
-  "AE.ADBE Audio Channel Volume": { "Bypass": 0, "Left": 1, "Right": 2 },
+  "AE.ADBE Motion": { "Position": 0, "Scale": 1, "Scale Height": 1, "Scale Width": 2, "Uniform Scale": 3, "Rotation": 4, "Anchor Point": 5, "Anti-flicker Filter": 6, "Crop Left": 7, "Crop Top": 8, "Crop Right": 9, "Crop Bottom": 10 },
+  "Volume": { "Bypass": 0, "Level": 1 },
+  "Channel Volume": { "Bypass": 0, "Left": 1, "Right": 2 },
   "AE.ADBE Audio Pan": { "Balance": 0 },
-  "AE.ADBE Time Remapping": { "Speed": 0 }
+  "AE.ADBE Time Remapping": { "Speed": 0 },
+  "AE.ADBE AECrop": { "Left": 0, "Top": 1, "Right": 2, "Bottom": 3, "Zoom": 4, "Edge Feather": 5 }
 };
+function __compMatchList(name) {
+  return __COMP_MATCH.hasOwnProperty(String(name)) ? __COMP_MATCH[String(name)] : null;
+}
+function __propIndexTable(matchName) {
+  var mn = String(matchName || "");
+  if (__PROP_INDEX.hasOwnProperty(mn)) return __PROP_INDEX[mn];
+  var volume = __COMP_MATCH["Volume"], channel = __COMP_MATCH["Channel Volume"];
+  for (var i = 0; i < volume.length; i++) if (volume[i] === mn) return __PROP_INDEX["Volume"];
+  for (var j = 0; j < channel.length; j++) if (channel[j] === mn) return __PROP_INDEX["Channel Volume"];
+  return null;
+}
 function __compIs(comp, name) {
   if (!comp || name === undefined || name === null) return false;
   var wanted = String(name);
-  try { if (comp.displayName === wanted) return true; } catch (eD) {}
+  try { if (__nameIn(comp.displayName, wanted)) return true; } catch (eD) {}
   var mn = "";
   try { mn = String(comp.matchName || ""); } catch (eM) {}
   if (!mn) return false;
   if (mn === wanted) return true;
-  var alias = __COMP_MATCH[wanted];
-  if (alias && mn === alias) return true;
+  var aliases = __compMatchList(wanted);
+  if (aliases) {
+    for (var i = 0; i < aliases.length; i++) if (mn === aliases[i]) return true;
+  }
   // effects: matchName is usually "AE.ADBE <English display name>"
   if (mn === "AE.ADBE " + wanted) return true;
   return false;
@@ -177,28 +248,28 @@ function __findComp(clip, name) {
 function __propIs(prop, name, comp) {
   if (!prop || name === undefined || name === null) return false;
   var wanted = String(name);
-  try { if (prop.displayName === wanted) return true; } catch (eD) {}
+  try { if (__nameIn(prop.displayName, wanted)) return true; } catch (eD) {}
   if (!comp || !comp.properties) return false;
   var mn = "";
   try { mn = String(comp.matchName || ""); } catch (eM) {}
-  var table = __PROP_INDEX[mn];
-  if (!table || table[wanted] === undefined) return false;
+  var table = __propIndexTable(mn);
+  if (!table || !table.hasOwnProperty(wanted)) return false;
   var idx = table[wanted];
   if (idx >= comp.properties.numItems) return false;
-  // a localized property is identified by its position inside its component: the
-  // caller's prop matches when it carries the display name found at that position
+  // a property is identified by its position inside its component: the caller's
+  // prop matches when it carries the display name found at that position
   try { return comp.properties[idx].displayName === prop.displayName; } catch (eP) { return false; }
 }
 function __findProp(comp, name) {
   if (!comp || !comp.properties) return null;
   var wanted = String(name);
   for (var i = 0; i < comp.properties.numItems; i++) {
-    try { if (comp.properties[i].displayName === wanted) return comp.properties[i]; } catch (eD) {}
+    try { if (__nameIn(comp.properties[i].displayName, wanted)) return comp.properties[i]; } catch (eD) {}
   }
   var mn = "";
   try { mn = String(comp.matchName || ""); } catch (eM) {}
-  var table = __PROP_INDEX[mn];
-  if (table && table[wanted] !== undefined && table[wanted] < comp.properties.numItems) return comp.properties[table[wanted]];
+  var table = __propIndexTable(mn);
+  if (table && table.hasOwnProperty(wanted) && table[wanted] < comp.properties.numItems) return comp.properties[table[wanted]];
   return null;
 }
 
@@ -1085,7 +1156,8 @@ export function buildBootstrap(helpersPath: string): string {
  * Helper functions are loaded by the bootstrap the file bridge prepends.
  */
 export function buildScript(code: string): string {
-  return `(function() {
+  return `${premiereL10nPrelude(code)}
+(function() {
   try {
     ${code}
   } catch(e) {

@@ -246,7 +246,7 @@ export function buildFacade(
         "Two forms: (a) a plain expression or statements — the value of the LAST expression comes back as {value, type}; " +
         "(b) a function body that ends with `return __result({...})` or `return __error(\"msg\")` — returned as is. " +
         "Helpers in scope: __findSequence(idOrName), __findProjectItem(nodeIdOrName), __findClip(nodeId) → {clip, trackIndex, clipIndex, trackType}, __getAllClips(seq), " +
-        "__compIs(comp, name)/__propIs(prop, name, comp) (localized matchName lookup), __ticksToSeconds/__secondsToTicks, TICKS_PER_SECOND. " +
+        "__compIs(comp, name)/__propIs(prop, name, comp)/__nameIn(displayName, name) (English names on any UI language), __qeLookup(\"video\"|\"audio\"|\"videoTransition\", name) → {item, name} or null, __ticksToSeconds/__secondsToTicks, TICKS_PER_SECOND. " +
         "Runtime errors come back as errors. No scripting undo in Premiere 26 — pr_save_project before destructive scripts. Only for what pr_catalog does not cover.",
       {
         type: "object",

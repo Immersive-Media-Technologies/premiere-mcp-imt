@@ -331,7 +331,8 @@ export function buildMogrtRecipeScript(plan: MogrtPlan): string {
       accentControl.name = "Accent Color";
       var accentProperty = accentControl.property(1);
       accentProperty.setValue([${accent}]);
-      try { fillColor.expression = 'effect("Accent Color")("Color")'; } catch (expressionError) {}
+      // the Color Control's parameter name is localized ("Цвет", "Farbe"); its index is not
+      try { fillColor.expression = 'effect("Accent Color")(1)'; } catch (expressionError) {}
       var headlineLayer = comp.layers.addText("${escapeForAfterEffects(plan.headline)}");
       headlineLayer.name = "Headline";
       var headlineSource = headlineLayer.property("ADBE Text Properties").property("ADBE Text Document");

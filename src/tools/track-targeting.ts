@@ -950,7 +950,7 @@ export function getTrackTargetingTools(bridgeOptions: BridgeOptions) {
             if (only && !wanted[c]) continue;
             var clip = track.clips[c], set = false;
             for (var i = 0; i < clip.components.numItems; i++) {
-              if (clip.components[i].displayName !== "Volume") continue;
+              if (!__compIs(clip.components[i], "Volume")) continue;
               for (var p = 0; p < clip.components[i].properties.numItems; p++) {
                 if (__propIs(clip.components[i].properties[p], "Level", clip.components[i])) {
                   clip.components[i].properties[p].setValue(${level}, true);
@@ -1540,8 +1540,7 @@ export function getTrackTargetingTools(bridgeOptions: BridgeOptions) {
           for (var i = 0; i < clip.components.numItems; i++) {
             if (__compIs(clip.components[i], "Motion")) {
               for (var p = 0; p < clip.components[i].properties.numItems; p++) {
-                var pName = clip.components[i].properties[p].displayName;
-                if (pName === "Anti-flicker Filter") {
+                if (__propIs(clip.components[i].properties[p], "Anti-flicker Filter", clip.components[i])) {
                   antiFlicker = clip.components[i].properties[p];
                   break;
                 }
@@ -1659,9 +1658,8 @@ export function getTrackTargetingTools(bridgeOptions: BridgeOptions) {
 
           var setW = false, setH = false;
           for (var p = 0; p < motion.properties.numItems; p++) {
-            var pName = motion.properties[p].displayName;
-            if (pName === "Scale Width") { motion.properties[p].setValue(${args.scale_width}, true); setW = true; }
-            if (pName === "Scale Height") { motion.properties[p].setValue(${args.scale_height}, true); setH = true; }
+            if (__propIs(motion.properties[p], "Scale Width", motion)) { motion.properties[p].setValue(${args.scale_width}, true); setW = true; }
+            else if (__propIs(motion.properties[p], "Scale Height", motion)) { motion.properties[p].setValue(${args.scale_height}, true); setH = true; }
           }
 
           return __result({ clip: clip.name, scaleWidth: ${args.scale_width}, scaleHeight: ${args.scale_height}, widthSet: setW, heightSet: setH });

@@ -408,13 +408,12 @@ export function getLiveContextResources(
       if (!videoStatus.available && qe.project.getVideoTransitionByName) {
         var fallbackNames = ["Cross Dissolve", "Dip to Black", "Dip to White", "Film Dissolve", "Additive Dissolve", "Morph Cut", "Push", "Slide", "Wipe", "Iris Round", "Iris Box"];
         for (var f = 0; f < fallbackNames.length && rows.length < ${MAX_CATALOG_ITEMS}; f++) {
-          try {
-            if (qe.project.getVideoTransitionByName(fallbackNames[f])) {
-              rows.push({ name: fallbackNames[f], type: "video", source: "by-name-probe" });
-              videoStatus.available = true;
-              videoStatus.source = "by-name-probe";
-            }
-          } catch (probeError) {}
+          var probe = __qeLookup("videoTransition", fallbackNames[f]);
+          if (probe) {
+            rows.push({ name: probe.name, englishName: fallbackNames[f], type: "video", source: "by-name-probe" });
+            videoStatus.available = true;
+            videoStatus.source = "by-name-probe";
+          }
         }
       }
       try {

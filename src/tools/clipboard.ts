@@ -43,33 +43,29 @@ export function getClipboardTools(bridgeOptions: BridgeOptions) {
           var tgtTrack = tgtTrackType === "video" 
             ? qeSeq.getVideoTrackAt(tgtResult.trackIndex) 
             : qeSeq.getAudioTrackAt(tgtResult.trackIndex);
-          var qeTgtClip = tgtTrack.getItemAt(tgtResult.clipIndex);
+          var qeTgtClip = __findQeClipByDomClip(tgtTrack, tgt);
+          if (!qeTgtClip) return __error("QE target clip not found");
 
           for (var i = 0; i < src.components.numItems; i++) {
             var comp = src.components[i];
             var name = comp.displayName;
 
-            if (effectFilter && name !== effectFilter) continue;
+            // component names are localized: compare through matchName / UI-language names
+            if (effectFilter && !__compIs(comp, effectFilter)) continue;
             if (!effectFilter) {
               var skip = false;
               for (var k = 0; k < intrinsic.length; k++) {
-                if (name === intrinsic[k]) { skip = true; break; }
+                if (__compIs(comp, intrinsic[k])) { skip = true; break; }
               }
               if (skip) continue;
             }
 
-            // Apply effect via QE
+            // Apply effect via QE (the source's display name is already in the UI language)
             try {
-              var qeEffect = tgtTrackType === "video"
-                ? qe.project.getVideoEffectByName(name)
-                : qe.project.getAudioEffectByName(name);
-              if (qeEffect) {
-                if (tgtTrackType === "video") {
-                  qeTgtClip.addVideoEffect(qeEffect);
-                } else {
-                  qeTgtClip.addAudioEffect(qeEffect);
-                }
-                copied++;
+              var lookup = __qeLookup(tgtTrackType === "video" ? "video" : "audio", name);
+              if (lookup) {
+                var addResult = tgtTrackType === "video" ? qeTgtClip.addVideoEffect(lookup.item) : qeTgtClip.addAudioEffect(lookup.item);
+                if (addResult !== false) copied++;
               }
             } catch(e) {}
           }
@@ -248,13 +244,16 @@ export function getClipboardTools(bridgeOptions: BridgeOptions) {
           if (!qeSeq) return __error("No active sequence (QE)");
 
           var effectName = "${escapeForExtendScript(args.effect_name)}";
-          var qeEffect = qe.project.getVideoEffectByName(effectName);
+          // QE answers an unknown name with an empty placeholder, so resolve the
+          // English or UI-language name explicitly
+          var lookup = __qeLookup("video", effectName);
           var effectType = "video";
-          if (!qeEffect) {
-            qeEffect = qe.project.getAudioEffectByName(effectName);
+          if (!lookup) {
+            lookup = __qeLookup("audio", effectName);
             effectType = "audio";
           }
-          if (!qeEffect) return __error("Effect not found: " + effectName);
+          if (!lookup) return __error("Effect not found: " + effectName + ". Names follow Premiere's UI language; English names are translated automatically.");
+          var qeEffect = lookup.item;
 
           var target = "${args.target}";
           var targets = [];

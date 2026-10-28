@@ -276,8 +276,9 @@ describe("PR #3 follow-ups — color_correct and export_sequence", () => {
   it("color_correct only emits setters for the controls it was given", async () => {
     const code = await codeFor(effects.color_correct, { node_id: "clip1", exposure: 1.5 });
 
-    expect(code).toContain('name === "Exposure"');
-    expect(code).not.toContain('name === "Saturation"');
+    // labels match in the UI language (__nameIn) — Lumetri's controls are localized
+    expect(code).toContain('__nameIn(name, "Exposure")');
+    expect(code).not.toContain('__nameIn(name, "Saturation")');
   });
 
   it("export_sequence finds its default preset without hardcoding a version year", async () => {
@@ -418,9 +419,10 @@ describe("issue #196 — empty Premiere 26.x QE effect catalogs", () => {
       effect_name: "Transform",
     });
 
-    expect(script).toContain("qe.project.getVideoEffectByName(effectName)");
+    // __qeLookup probes getVideoEffectByName with the English and UI-language names
+    expect(script).toContain('__qeLookup("video", effectName)');
     expect(script).toContain('var effectCatalog = __getQeEffectCatalog("video")');
-    expect(script).toContain("Direct QE lookup for");
+    expect(script).toContain("Names follow Premiere's UI language");
     expect(script).toContain('lookupSource: lookupSource');
 
     const listScript = await scriptFor(effects.list_available_effects, {});

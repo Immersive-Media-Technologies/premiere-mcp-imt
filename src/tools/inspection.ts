@@ -1216,7 +1216,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                       if (component.displayName !== "Motion" && component.matchName !== "AE.ADBE Motion") continue;
                       for (var p = 0; p < component.properties.numItems; p++) {
                         var property = component.properties[p];
-                        if (property.displayName !== "Scale" && property.matchName !== "ADBE Scale") continue;
+                        if (!__propIs(property, "Scale", component)) continue;
                         var scale = Number(property.getValue());
                         if (!isNaN(scale) && scale > ${maximumScale}) {
                           counts.excessiveScaleClips++;
