@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Release tag ↔ versioned files of PR-MCP-IMT. RELEASE_TAG must be v<package.json version>, and every
+// Release tag ↔ versioned files of Premiere-MCP-IMT. RELEASE_TAG must be v<package.json version>, and every
 // distributable manifest must carry that version (the .mcpb manifest gets it at pack time).
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

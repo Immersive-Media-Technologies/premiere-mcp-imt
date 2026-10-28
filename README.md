@@ -1,6 +1,6 @@
-![PR-MCP-IMT + SKILLS — Premiere Pro for AI agents](https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/assets/banner.jpg)
+![Premiere-MCP-IMT + SKILLS — Premiere Pro for AI agents](https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/assets/banner.jpg)
 
-# PR-MCP-IMT + SKILLS — Premiere Pro for AI agents
+# Premiere-MCP-IMT + SKILLS — Premiere Pro for AI agents
 
 Let an AI assistant (Claude Desktop, Cursor, ChatGPT, Google Antigravity or any MCP client) work
 inside your running **Adobe Premiere Pro**: read the project and its sequences, cut, trim, move and
@@ -19,7 +19,7 @@ Two parts, made to work together:
 
 **Built for localized Premiere, not just English.** Most Premiere MCP servers and agent skills assume
 the English UI — on a German, Chinese or Russian install their effect, transition and parameter names
-stop matching. PR-MCP-IMT finds components by matchName and translates English effect, transition and
+stop matching. Premiere-MCP-IMT finds components by matchName and translates English effect, transition and
 parameter names through Premiere's own UI dictionaries, so the same agent and the same skill work on
 all ten UI languages Premiere ships — verified live.
 
@@ -169,7 +169,7 @@ sends home. As of 2026-10-26:
 <table>
 <tr>
 <th width="120"></th>
-<th width="150">PR-MCP-IMT</th>
+<th width="150">Premiere-MCP-IMT</th>
 <th><a href="https://github.com/leancoderkavy/premiere-pro-mcp">premiere-<br>pro-mcp</a><br>(upstream)</th>
 <th><a href="https://github.com/ayushozha/AdobePremiereProMCP">AdobePremiere<br>ProMCP</a></th>
 <th><a href="https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP">Adobe_Premiere<br>_Pro_MCP</a></th>
@@ -196,7 +196,7 @@ Each version is described on the
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
 - [v1.0.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.1) · 2026-10-28 —
-  the MCP Registry entry also lists the npm package; the package is on npm from 1.0.0.
+  product name Premiere-MCP-IMT (was PR-MCP-IMT); the MCP Registry entry also lists the npm package; the package is on npm from 1.0.0.
 - [v1.0.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.0) · 2026-10-28 —
   every Premiere UI language (English names translated through Premiere's own dictionaries; verified
   live), honest results for unknown effects, colour correction and LUTs, Apache-2.0.
@@ -213,7 +213,7 @@ change is in [`CHANGELOG.md`](CHANGELOG.md).
 - Free to use, modify and distribute, commercial use included.
 - **Attribution is required.** Every redistribution of this software or of a work derived from it
   must carry the notice from [`NOTICE`](NOTICE):
-  `PR-MCP-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies`.
+  `Premiere-MCP-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies`.
 - No warranty.
 
 Third-party notices (upstream MIT code): [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Adobe, Premiere Pro and Firefly are trademarks of Adobe Inc.; this project is not affiliated with or endorsed by Adobe.

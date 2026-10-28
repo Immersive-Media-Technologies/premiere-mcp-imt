@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = join(ROOT, "dist", "index.js");
-const PRODUCT = "PR-MCP-IMT";
+const PRODUCT = "Premiere-MCP-IMT";
 const SERVER_ENV = {};
 
 const args = process.argv.slice(2);

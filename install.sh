@@ -1,5 +1,5 @@
 #!/bin/bash
-# PR-MCP-IMT — install on macOS.
+# Premiere-MCP-IMT — install on macOS.
 #   ./install.sh               check → build → Premiere connector (asks) → live self-test → client configs (asks)
 #   ./install.sh --yes         same, without questions
 #   ./install.sh --no-config   check, build, connector and self-test only; print the config instead
@@ -19,7 +19,7 @@ bad()  { printf '%s FAIL %s%s\n' "$RED" "$OFF" "$*"; FAIL=1; }
 ask()  { [ "$YES" = "1" ] && return 0; printf '%s [y/N] ' "$1"; read -r r; [ "$r" = "y" ] || [ "$r" = "Y" ]; }
 premiere_running() { pgrep -f "Adobe Premiere Pro" >/dev/null 2>&1; }
 
-say ""; say "PR-MCP-IMT — environment check"; say "─────────────────────────────────────────────"
+say ""; say "Premiere-MCP-IMT — environment check"; say "─────────────────────────────────────────────"
 if [ "$(uname -s)" != "Darwin" ]; then bad "this script is for macOS (found: $(uname -s)); on Windows run install.ps1"; else ok "macOS $(sw_vers -productVersion)"; fi
 
 PR_APP=""

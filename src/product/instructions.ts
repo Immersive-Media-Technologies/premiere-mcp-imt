@@ -3,7 +3,7 @@
 // facade sends these lines and leaves the detail to pr_skill.
 export function facadeInstructions(): string {
   return [
-    "PR-MCP-IMT controls a running Adobe Premiere Pro.",
+    "Premiere-MCP-IMT controls a running Adobe Premiere Pro.",
     'Start with pr_verify. Connector does not answer → pr_install_connector {action:"status"}; install only with the user\'s consent.',
     "Before any task beyond a single read or edit, read pr_skill (no arguments): order of work, what scripts cannot do in Premiere " +
       "(most AI features are UI-only), and which reference to read for each AI tool.",

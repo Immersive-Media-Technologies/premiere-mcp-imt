@@ -2,10 +2,10 @@
   "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
   "manifest_version": "0.4",
   "name": "premiere-mcp-imt",
-  "display_name": "PR-MCP-IMT + SKILLS — Premiere Pro for AI agents",
+  "display_name": "Premiere-MCP-IMT + SKILLS — Premiere Pro for AI agents",
   "version": "0.0.0",
   "description": "Drive a running Adobe Premiere Pro from Claude: sequences, cuts, clips, effects, keyframes, markers, captions, exports and frames — plus the Premiere agent skill for its AI tools.",
-  "long_description": "PR-MCP-IMT by Immersive Media Technologies. About 380 Premiere Pro operations behind nine MCP tools (catalog, do, batch, verify, sequence, save, frame, connector, skill; raw ExtendScript only when you allow it), readback-verified writes, no telemetry; ships the Premiere agent skill: how to drive the program, and when and how to use Premiere's AI tools (Generative Extend, Generative Media, Object Mask, text-based editing, captions, Enhance Speech, Search, the AI Assistant) and their combinations. Built for localized Premiere, not just English: works on every UI language Premiere ships. Requires Adobe Premiere Pro 2024+ running on this computer; the agent installs the Premiere connector on first use, with your consent (pr_install_connector). Apache-2.0 license; unofficial, not affiliated with Adobe Inc.",
+  "long_description": "Premiere-MCP-IMT by Immersive Media Technologies. About 380 Premiere Pro operations behind nine MCP tools (catalog, do, batch, verify, sequence, save, frame, connector, skill; raw ExtendScript only when you allow it), readback-verified writes, no telemetry; ships the Premiere agent skill: how to drive the program, and when and how to use Premiere's AI tools (Generative Extend, Generative Media, Object Mask, text-based editing, captions, Enhance Speech, Search, the AI Assistant) and their combinations. Built for localized Premiere, not just English: works on every UI language Premiere ships. Requires Adobe Premiere Pro 2024+ running on this computer; the agent installs the Premiere connector on first use, with your consent (pr_install_connector). Apache-2.0 license; unofficial, not affiliated with Adobe Inc.",
   "author": {
     "name": "Immersive Media Technologies",
     "url": "https://github.com/Immersive-Media-Technologies"

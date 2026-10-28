@@ -1,6 +1,6 @@
 # Recipes that combine tools
 
-[S] = by script through PR-MCP-IMT, [U] = UI step (SKILL.md §5). Safety net and verification:
+[S] = by script through Premiere-MCP-IMT, [U] = UI step (SKILL.md §5). Safety net and verification:
 SKILL.md §2. Feature details live in the reference section named in each step.
 
 ## 1. Generated shot between two clips (first/last frame)

@@ -5,7 +5,7 @@ edit in Premiere read `skills/pr/SKILL.md` — served at runtime by the `pr_skil
 
 ## What this is
 
-PR-MCP-IMT — a local stdio MCP server that controls a running Adobe Premiere Pro, by Immersive
+Premiere-MCP-IMT — a local stdio MCP server that controls a running Adobe Premiere Pro, by Immersive
 Media Technologies; a fork of [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp)
 (MIT). Production path: Node.js server ↔ CEP extension `MCPBridgeCEP` inside Premiere through
 file-based IPC (`.jsx` command files, `.json` responses). The UXP bridge (`PREMIERE_UXP_TOKEN`,

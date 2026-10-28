@@ -11,6 +11,7 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ### Changed
 
+- **Product name Premiere-MCP-IMT** (was PR-MCP-IMT) in the README, `.mcpb`, MCP Registry title, NOTICE, skill, installers and messages — the Adobe program name is spelled out so search finds it.
 - The MCP Registry entry lists the npm package `@immersive-media-technologies/premiere-mcp-imt` next to the `.mcpb`.
 
 ## [1.0.0] - 2026-10-28

@@ -1,4 +1,4 @@
-# PR-MCP-IMT - install on Windows (PowerShell 5.1+).
+# Premiere-MCP-IMT - install on Windows (PowerShell 5.1+).
 #   .\install.ps1              check -> build -> Premiere connector (asks) -> live self-test -> client configs (asks)
 #   .\install.ps1 -Yes         same, without questions
 #   .\install.ps1 -NoConfig    check, build, connector and self-test only; print the config instead
@@ -20,7 +20,7 @@ function Cep($diag) {
   return ($LASTEXITCODE -eq 0)
 }
 
-Write-Host "`nPR-MCP-IMT - environment check`n-----------------------------------------------"
+Write-Host "`nPremiere-MCP-IMT - environment check`n-----------------------------------------------"
 $PrExe = $null
 foreach ($y in 2026, 2025, 2024) {
   $c = "$env:ProgramFiles\Adobe\Adobe Premiere Pro $y\Adobe Premiere Pro.exe"

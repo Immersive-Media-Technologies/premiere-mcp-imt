@@ -1,8 +1,8 @@
 // FACADE over the upstream tool catalog.
 //
 // Upstream advertises ~380 tools; their definitions travel to the model on EVERY turn
-// (~150K tokens of context). Like the other IMT servers (AE-MCP-IMT: ae_catalog + ae_do,
-// PS-MCP-IMT: ps_catalog + ps_do), with
+// (~150K tokens of context). Like the other IMT servers (AfterEffects-MCP-IMT: ae_catalog + ae_do,
+// Photoshop-MCP-IMT: ps_catalog + ps_do), with
 // PR_MCP_FACADE=1 the client sees only:
 //   pr_catalog(category?)          — operations by category / with parameters
 //   pr_do(operation, args)         — any upstream operation by name

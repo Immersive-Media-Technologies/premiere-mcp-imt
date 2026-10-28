@@ -20,7 +20,7 @@ Open: Window › Assistant. Prompt bar; **+** starts a new chat; tabs switch cha
 - Undo: each action goes into History; **Undo** reverts its whole last turn. Edits made while it runs interleave with its steps in History → raise the undo (History) limit first and do not edit concurrently.
 - Credits: beta credits separate from Creative Cloud credits. Sources conflict: daily reset at midnight GMT (Adobe announcement) vs a rolling 7-day task limit (staff reply). One user spent them in ~20 min on a 17-min project.
 - Chat content goes to Adobe's cloud; optimised for English; Adobe advises a duplicate project and no client work.
-- With PR-MCP-IMT on the same project: never run both at once; after an Assistant turn re-read with `pr_get_sequence` before scripting. Delegate to it what it does well (slates, multicam sync, bin organisation) when the user has the beta.
+- With Premiere-MCP-IMT on the same project: never run both at once; after an Assistant turn re-read with `pr_get_sequence` before scripting. Delegate to it what it does well (slates, multicam sync, bin organisation) when the user has the beta.
 
 Sources: helpx.adobe.com/premiere/desktop/organize-media/file-organization/media-intelligence-and-search-panel;
 Adobe Community «Search panel updates: audio search and search similar frames», «Meet your new

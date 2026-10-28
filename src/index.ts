@@ -149,7 +149,7 @@ try {
 
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`
-PR-MCP-IMT — MCP server for Adobe Premiere Pro (facade: 9 tools over ~380 operations; PR_MCP_FACADE=0 lists all)
+Premiere-MCP-IMT — MCP server for Adobe Premiere Pro (facade: 9 tools over ~380 operations; PR_MCP_FACADE=0 lists all)
 
 Usage:
   premiere-mcp-imt              Start the MCP server (stdio transport)
