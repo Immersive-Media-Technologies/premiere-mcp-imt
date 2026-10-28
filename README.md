@@ -10,7 +10,9 @@ frames and export — from plain language.
 Two parts, made to work together:
 
 - **The MCP server** — about 380 Premiere operations behind nine tools; writes are verified by
-  reading Premiere back; works on a non-English Premiere; no telemetry.
+  reading Premiere back; **works on every Premiere UI language** — English effect, transition and
+  parameter names are translated through Premiere's own dictionaries (verified live in English,
+  Russian, German, Chinese, French and Spanish); no telemetry.
 - **The skill** (`skills/pr`, also served by the `pr_skill` tool, so it works in any client) — how
   to drive Premiere safely, where scripting ends, and how to use **Premiere's own AI tools**:
   Generative Extend, the Generative Media Tool (video, sound effects, music), Object Mask, Speech to
@@ -171,16 +173,16 @@ sends home. As of 2026-10-26:
 </tr>
 <tr><td>Tools the model sees by default</td><td>9, over ~380 operations</td><td>the whole catalog (~440 tools)</td><td>74 (profile <code>standard</code>) of ~1,060</td><td>5, over 283 operations</td><td>none — the agent pipes ExtendScript</td></tr>
 <tr><td>Knowledge of Premiere's AI tools</td><td>skill with 8 references + recipes</td><td>2 skills (editing, development)</td><td>7 workflow skills</td><td>1 skill</td><td>1 skill (scripting)</td></tr>
-<tr><td>Non-English Premiere</td><td>matchName lookup, verified on Russian</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
+<tr><td>Non-English Premiere</td><td>all 10 UI languages; verified live in en, ru, de, zh, fr, es</td><td>English and es-ES measured</td><td>not stated</td><td>not stated</td><td>not stated</td></tr>
 <tr><td>Telemetry</td><td>none</td><td>PostHog, off unless a key is set</td><td>none found</td><td>on by default (opt-out)</td><td>none mentioned</td></tr>
 <tr><td>Connector install</td><td>by the agent, with consent; installers with a live self-test</td><td>CLI flag</td><td>build from source (Go, Rust, Python)</td><td>CLI flag</td><td><code>pip</code> + setup</td></tr>
 <tr><td>Clients</td><td>Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client</td><td>npm, .mcpb, Codex / Claude Code plugins</td><td>build from source</td><td>npm, plugins, .mcpb</td><td>CLI + skill</td></tr>
-<tr><td>License</td><td>IMT Non-Commercial</td><td>MIT</td><td>MIT</td><td>MIT</td><td>MIT</td></tr>
+<tr><td>License</td><td>Apache-2.0</td><td>MIT</td><td>MIT</td><td>MIT</td><td>MIT</td></tr>
 </table>
 
 What we changed in the upstream code, besides the skill and the packaging: component and property
-lookup by matchName (on a Russian Premiere every opacity, motion, keyframe and volume operation of
-upstream failed), `split_clip` that cuts the clip you name (upstream cut track 0), no telemetry, stdio
+lookup by matchName and English names translated through Premiere's own UI dictionaries (on a
+Russian Premiere every opacity, motion, keyframe and volume operation of upstream failed), `split_clip` that cuts the clip you name (upstream cut track 0), no telemetry, stdio
 only, and a compact tool surface.
 
 ## Releases
@@ -189,6 +191,9 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.0.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.0) · 2026-10-28 —
+  every Premiere UI language (English names translated through Premiere's own dictionaries; verified
+  live in six languages), honest results for unknown effects, colour correction and LUTs, Apache-2.0.
 - [v0.1.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v0.1.0) · 2026-10-26 —
   first public release: the Premiere agent skill, nine-tool surface, `pr_skill`, connector install by
   the agent, Claude Desktop extension, installers with a live self-test, ChatGPT gateway.
@@ -197,14 +202,12 @@ change is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
-**[IMT Non-Commercial License](LICENSE)** — © Immersive Media Technologies.
+**[Apache License 2.0](LICENSE)** — © Immersive Media Technologies.
 
-- **Non-commercial use only.** Selling this software, offering it as or inside a paid product or
-  service, or using it in commercial client work requires a separate written license.
-- **Attribution is mandatory.** Every use, copy, fork or derived product must credit the creator,
-  visibly to its users: `PR-MCP-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies`.
+- Free to use, modify and distribute, commercial use included.
+- **Attribution is required.** Every redistribution of this software or of a work derived from it
+  must carry the notice from [`NOTICE`](NOTICE):
+  `PR-MCP-IMT by Immersive Media Technologies — https://github.com/Immersive-Media-Technologies`.
 - No warranty.
 
-Full terms: [`LICENSE`](LICENSE). Third-party notices (upstream MIT code):
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Adobe, Premiere Pro and Firefly are trademarks of
-Adobe Inc.; this project is not affiliated with or endorsed by Adobe.
+Third-party notices (upstream MIT code): [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Adobe, Premiere Pro and Firefly are trademarks of Adobe Inc.; this project is not affiliated with or endorsed by Adobe.

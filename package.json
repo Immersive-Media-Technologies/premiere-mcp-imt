@@ -1,6 +1,7 @@
 {
   "name": "@immersive-media-technologies/premiere-mcp-imt",
-  "version": "0.1.0",
+  "mcpName": "io.github.Immersive-Media-Technologies/premiere-mcp-imt",
+  "version": "1.0.0",
   "description": "PR-MCP-IMT + SKILLS — MCP server and agent skill for Adobe Premiere Pro, built for AI agents (macOS + Windows): ~380 readback-verified operations behind nine tools, works on localized Premiere, no telemetry, connector installer and live self-test; the skill covers Premiere's AI tools (Generative Extend, Generative Media, Object Mask, transcripts, captions, Enhance Speech, Search, AI Assistant) and how to combine them. By Immersive Media Technologies (fork of leancoderkavy/premiere-pro-mcp).",
   "main": "dist/index.js",
   "types": "./dist/index.d.ts",
@@ -184,7 +185,7 @@
     "uxp",
     "agent-skill"
   ],
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Apache-2.0",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

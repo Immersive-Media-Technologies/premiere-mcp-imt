@@ -7,6 +7,8 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-28
+
 ### Added
 
 - **Every Premiere UI language** (Premiere 2026 ships ten: English, German, Spanish, French, Italian,
@@ -40,6 +42,10 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ### Changed
 
+- License: **Apache-2.0** (was the IMT Non-Commercial License); attribution through `NOTICE`. Upstream MIT
+  notices stay in `THIRD-PARTY-NOTICES.md`.
+- README, `.mcpb` manifest and registry description state the UI-language independence (verified
+  live on Premiere 26.5.2 in English, Russian, German, Chinese, French and Spanish).
 - The product layer lives in `src/product/` (was `src/da/`); internal references to the private client
   the server came from are gone from code, docs and README, and a one-off patch script was removed.
 
