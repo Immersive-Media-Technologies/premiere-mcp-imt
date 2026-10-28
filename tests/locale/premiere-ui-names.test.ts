@@ -188,12 +188,17 @@ describe("ExtendScript name helpers", () => {
     return (code: string) => runInNewContext(`${premiereL10nPrelude(code)}\n${code}`, sandbox);
   }
 
-  it("matches English, the running UI language, and any language when the locale is unknown", () => {
+  it("matches English and every UI language, the system locale's spelling first", () => {
+    // $.locale is the OS locale: a Russian Mac reports ru_RU under a German Premiere
     const ru = engine("ru_RU");
     expect(ru('__nameIn("Движение", "Motion")')).toBe(true);
     expect(ru('__nameIn("Motion", "Motion")')).toBe(true);
-    expect(ru('__nameIn("Bewegung", "Motion")')).toBe(false);
+    expect(ru('__nameIn("Bewegung", "Motion")')).toBe(true);
+    expect(ru('__nameIn("Something else", "Motion")')).toBe(false);
     expect(ru("__nameIn(null, 'Motion')")).toBe(false);
+    expect(ru('__namesFor("Motion")[1]')).toBe("Движение");
+    const de = engine("de_DE");
+    expect(de('__namesFor("Motion")[1]')).toBe("Bewegung");
     const unknown = engine("xx_XX");
     expect(unknown('__nameIn("Bewegung", "Motion")')).toBe(true);
     expect(unknown('__namesFor("no such name 42").length')).toBe(1);

@@ -15,7 +15,7 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
   installed app; a generated table covers the names the tools use when the dictionaries are not found,
   `scripts/generate-premiere-ui-names.mjs`). Every script gets the translations of its names as
   `__L10N`; the helpers `__nameIn` and `__qeLookup` and the existing `__compIs` / `__propIs` accept the
-  English name or its spelling in the running UI language. Results report the host's name next to the
+  English name or its spelling in any Premiere UI language. Results report the host's name next to the
   requested one. `PREMIERE_DICTIONARIES_DIR` points at another dictionary folder (`off` disables it).
 - The UXP effect workflows resolve an English or localized display name to the host's audio display
   name or video matchName through the effect catalog.

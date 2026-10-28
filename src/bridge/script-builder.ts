@@ -136,8 +136,8 @@ function __findProjectItem(nodeIdOrName, rootItem) {
 // Components carry a stable matchName; properties carry none. buildScript() puts the
 // translations of the script's string literals into the global __L10N (from
 // Premiere's own UI dictionaries, src/locale/premiere-ui-names.ts), and every
-// name lookup below accepts the English name or its spelling in the running UI
-// language ($.locale). The intrinsic components keep a fixed property order as a
+// name lookup below accepts the English name or its spelling in any UI language
+// Premiere ships (the system locale's spelling first). The intrinsic components keep a fixed property order as a
 // last resort (verified on Premiere 26.5 ru_RU).
 if (typeof __L10N === "undefined") { __L10N = {}; }
 function __namesFor(name) {
@@ -146,17 +146,23 @@ function __namesFor(name) {
   var table = null;
   try { table = __L10N && __L10N.hasOwnProperty(wanted) ? __L10N[wanted] : null; } catch (eTable) { table = null; }
   if (!table) return out;
+  // $.locale is the system locale, not necessarily Premiere's UI language (a
+  // Russian macOS reports ru_RU under an English or German Premiere), so its
+  // names only go first; every other UI language follows.
   var locale = "";
   try { locale = String($.locale || ""); } catch (eLocale) {}
-  var own = table.hasOwnProperty(locale) ? table[locale] : null;
-  if (own) {
-    for (var i = 0; i < own.length; i++) out.push(own[i]);
-    return out;
+  var seen = {};
+  seen[wanted] = true;
+  function add(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (seen.hasOwnProperty(list[i])) continue;
+      seen[list[i]] = true;
+      out.push(list[i]);
+    }
   }
-  // unknown UI language: accept the name in any language Premiere ships
+  if (table.hasOwnProperty(locale)) add(table[locale]);
   for (var loc in table) {
-    if (!table.hasOwnProperty(loc)) continue;
-    for (var j = 0; j < table[loc].length; j++) out.push(table[loc][j]);
+    if (table.hasOwnProperty(loc) && loc !== locale) add(table[loc]);
   }
   return out;
 }
