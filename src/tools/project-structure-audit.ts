@@ -342,7 +342,7 @@ export function projectStructureCaptureScript(maxItems: number = MAX_STRUCTURE_A
   const limit = Math.max(1, Math.min(MAX_STRUCTURE_AUDIT_ITEMS, Math.floor(maxItems)));
   return buildToolScript(`
     var project = app.project;
-    if (!project || !project.rootItem) return __error("No project is open");
+    if (!__projectIsOpen()) return __error("No project is open");
     var maximumItems = ${limit};
     var items = [];
     var truncated = false;
@@ -407,7 +407,7 @@ export function projectStructureApplyScript(plan: StructurePlan): string {
   const targetLiteral = targets.map((path) => `[${path.split("/").map(quote).join(",")}]`).join(",");
   const moveLiteral = plan.moves.map((move) => `{itemId:${quote(move.item_id)},name:${quote(move.item_name)},fromParentId:${quote(move.from_parent_id)},target:${targetIndex.get(move.target_bin_path)}}`).join(",\n");
   return buildToolScript(`
-    if (!app.project || !app.project.rootItem) return __error("No project is open");
+    if (!__projectIsOpen()) return __error("No project is open");
     var root = app.project.rootItem;
     var targets = [${targetLiteral}];
     var moves = [${moveLiteral}];

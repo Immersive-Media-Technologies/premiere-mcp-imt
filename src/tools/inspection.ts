@@ -25,7 +25,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
           : -1;
         const script = buildToolScript(`
           var project = app.project;
-          if (!project) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
 
           function walkBin(bin, depth) {
             var items = [];
@@ -162,7 +162,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
         const limit = Number.isInteger(args.limit) && (args.limit as number) > 0 ? Math.min(args.limit as number, 500) : -1;
         const maxDepth = Number.isInteger(args.max_depth) ? Math.min(Math.max(args.max_depth as number, 0), 10) : -1;
         const script = buildToolScript(`
-          if (!app.project || !app.project.rootItem) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           var requestedBin = "${escapeForExtendScript(args.bin_id)}";
           // The project root is a bin too, but list_project_items never lists it:
           // accept "/", "root", or its node ID. Otherwise node ID, then bin

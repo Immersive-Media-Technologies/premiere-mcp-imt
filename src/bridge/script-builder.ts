@@ -3443,6 +3443,17 @@ function __jsonStringify(obj) {
 // undo exactly that call.
 var __undoStart = null;
 var __markerWriteAttempted = false;
+// IMT: whether a project was open when the command started (set by buildScript before any guard).
+var __projectOpenAtStart = null;
+// IMT: on Premiere's home screen app.project is a placeholder (name "", path "", rootItem null),
+// so "!app.project" and "typeof app.project.name" both say "open". A real project has a root bin.
+// Only that placeholder signature (rootItem === null) counts as "no project".
+function __projectIsOpen() {
+  try { return !!(app && app.project) && app.project.rootItem !== null; } catch (eProjOpen) { return false; }
+}
+function __onHomeScreen() {
+  try { return !!(app && app.project) && app.project.rootItem === null; } catch (eHome) { return false; }
+}
 // IMT: wording of a refusal raised before the command wrote anything (see __error).
 var __PREWRITE_REFUSAL = /nothing was (changed|added|removed|moved|created|written)|no changes were made/i;
 var __stillFrameRecoveryRequired = false;
@@ -3529,6 +3540,22 @@ function __error(msg, extraData) {
       if (!data) data = {};
       data.mutationOutcome = "not_applied";
       data.refusedBeforeWrite = true;
+    }
+  }
+  // IMT 1.1.1: no project was open when the command started and none is open now (Premiere's home
+  // screen) — there was no project to change. The refusal says so and, for an edit, is not_applied
+  // instead of an unknown outcome that would pause every later edit.
+  if (__projectOpenAtStart === false && !__markerWriteAttempted && (!data || data.refusedBeforeWrite === true ||
+      (data.mutationOutcome === undefined && data.outcome === undefined && data.timelineChanged !== true && data.mutationAttempted !== true && data.undoSteps === undefined)) &&
+      __onHomeScreen()) {
+    message = /^No project is open\\.?$/.test(message)
+      ? "No project is open: Premiere is on its home screen. Open or create a project first (open_project / create_project); nothing was changed."
+      : message + " (No project is open: Premiere is on its home screen. Open or create a project first; nothing was changed.)";
+    if (__undoStart !== null) {
+      if (!data) data = {};
+      data.mutationOutcome = "not_applied";
+      data.refusedBeforeWrite = true;
+      data.noProjectOpen = true;
     }
   }
   return data ? __jsonStringify({ success: false, error: message, data: data }) : __jsonStringify({ success: false, error: message });
@@ -3628,6 +3655,7 @@ export function buildScript(code: string): string {
   return `${premiereL10nPrelude(code, HELPER_UI_NAMES)}
 (function() {
   try {
+    __projectOpenAtStart = typeof __projectIsOpen === "function" ? __projectIsOpen() : null;
     ${projectGuard}
     ${targetGuard}
     ${undoStart}
@@ -3636,6 +3664,8 @@ export function buildScript(code: string): string {
     ${code}
   } catch(e) {
     return __error(e.toString());
+  } finally {
+    __projectOpenAtStart = null;
   }
 })();`;
 }

@@ -265,7 +265,7 @@ export function getMediaTools(bridgeOptions: BridgeOptions) {
         }
 
         const script = buildToolScript(`
-          if (!app.project || !app.project.rootItem) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           ${parentLookup}
           var parentNodeId = parentIsRoot ? __nodeIdOf(app.project.rootItem) : __nodeIdOf(parent);
           var parentPath = null;

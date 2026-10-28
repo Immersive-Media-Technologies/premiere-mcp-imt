@@ -281,7 +281,7 @@ export function getHealthTools(
         } else {
           try {
             const script = buildToolScript(`
-              var projectOpen = !!(app && app.project && typeof app.project.name !== "undefined");
+              var projectOpen = __projectIsOpen();
               // Use the same simple check the panel uses rather than __getCurrentActiveSequence(),
               // which validates sequence presence in the project collection. The panel (which shares
               // this host.jsx) and headless extension contexts can diverge on that stricter check

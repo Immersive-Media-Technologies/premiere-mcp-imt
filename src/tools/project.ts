@@ -21,7 +21,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
       handler: async () => {
         const script = buildToolScript(`
           var project = app.project;
-          if (!project) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           var projectPath = String(project.path || "");
           if (!projectPath) {
             return __error("This project has no saved path; use save_project_as. Premiere was not asked to save.");
@@ -82,7 +82,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         const target = escapeForExtendScript(args.path.trim());
         const script = buildToolScript(`
           var project = app.project;
-          if (!project) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           var previousPath = String(project.path || "");
           if (__normProjectPath(previousPath) === __normProjectPath("${target}")) {
             return __error("That is the current project's own path; use save_project instead.");
@@ -418,7 +418,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         const save = args.save_first !== false;
         const lookup = args.project_path
           ? `var project = __findOpenProject("${escapeForExtendScript(args.project_path)}"); if (!project) return __error("No open project at ${escapeForExtendScript(args.project_path)}; open projects: " + __openProjectPaths().join(", "));`
-          : `var project = app.project; if (!project) return __error("No project is open");`;
+          : `var project = app.project; if (!__projectIsOpen()) return __error("No project is open");`;
         const script = buildToolScript(`
           ${lookup}
           var name = String(project.name || "");

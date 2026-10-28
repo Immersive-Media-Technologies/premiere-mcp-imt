@@ -79,7 +79,7 @@ export function getProjectManagerTools(bridgeOptions: BridgeOptions) {
           var pm = app.projectManager;
           if (!pm || !pm.options) return __error("Project Manager not available");
           var project = app.project;
-          if (!project) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           ${args.include_all_sequences === false ? `if (!project.activeSequence) return __error("include_all_sequences is false but there is no active sequence");` : ""}
 
           var destination = new Folder("${destination}");

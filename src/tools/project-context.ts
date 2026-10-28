@@ -154,7 +154,7 @@ function safeName(value: unknown, fallback: string): string {
 function captureScript(): string {
   return buildToolScript(`
     var project = app.project;
-    if (!project) return __error("No project is open");
+    if (!__projectIsOpen()) return __error("No project is open");
     var sequence = project.activeSequence;
     if (!sequence) return __error("No active sequence; nothing was changed.");
     var clips = [];

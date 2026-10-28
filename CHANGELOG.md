@@ -7,6 +7,14 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Fixed
+
+- Premiere's home screen (no project open): `pr_verify` reported that a project was open — Premiere keeps a
+  placeholder `app.project` there, so the check now requires a project with a root bin. Operations that need a
+  project answer «No project is open: Premiere is on its home screen. Open or create a project first; nothing
+  was changed» instead of `TypeError: null is not an object`, and an edit refused this way is `not_applied`:
+  before, it was an unknown outcome that paused every later edit until recovery was acknowledged.
+
 ## [1.1.0] - 2026-10-28
 
 ### Changed

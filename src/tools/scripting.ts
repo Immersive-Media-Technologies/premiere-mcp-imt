@@ -393,7 +393,7 @@ Examples:
           
           // Project info
           var project = app.project;
-          if (!project) return __error("No project is open");
+          if (!__projectIsOpen()) return __error("No project is open");
           state.project = {
             name: project.name,
             path: project.path,

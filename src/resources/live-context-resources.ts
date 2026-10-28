@@ -106,7 +106,7 @@ export function getLiveContextResources(
   const projectInfo = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var active = project.activeSequence;
       return __result({
         project: {
@@ -131,7 +131,7 @@ export function getLiveContextResources(
   const sequences = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var allCount = project.sequences.numSequences;
       var rows = [];
       for (var i = 0; i < allCount && i < ${MAX_SEQUENCES}; i++) {
@@ -162,7 +162,7 @@ export function getLiveContextResources(
   const media = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var rows = [];
       var scannedItems = 0;
       var truncated = false;
@@ -211,7 +211,7 @@ export function getLiveContextResources(
   const bins = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var rows = [];
       var scannedItems = 0;
       var truncated = false;
@@ -248,7 +248,7 @@ export function getLiveContextResources(
   const activeTimeline = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var sequence = project.activeSequence;
       if (!sequence) return __result({ activeSequence: null, tracks: [], clips: [], markers: [] });
       var tracks = [];
@@ -346,7 +346,7 @@ export function getLiveContextResources(
   const appliedEffects = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var sequence = project.activeSequence;
       if (!sequence) return __result({ activeSequence: null, appliedEffects: [], returnedCount: 0, truncated: false, maximumAppliedEffects: ${MAX_APPLIED_EFFECTS} });
       var rows = [];
@@ -461,7 +461,7 @@ export function getLiveContextResources(
   const projectMetadata = createReader(
     `
       var project = app.project;
-      if (!project) return __error("No project is open");
+      if (!__projectIsOpen()) return __error("No project is open");
       var sequence = project.activeSequence;
       var summary = { trackCount: 0, clipCount: 0, transitionCount: 0 };
       if (sequence) {
