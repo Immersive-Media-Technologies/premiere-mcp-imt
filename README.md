@@ -7,6 +7,8 @@ inside your running **Adobe Premiere Pro**: read the project and its sequences, 
 ripple clips, apply effects, transitions and keyframes, add markers and captions, reframe, check
 frames and export — from plain language.
 
+**Every Adobe UI language · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
+
 Two parts, made to work together:
 
 - **The MCP server** — about 380 Premiere operations behind nine tools; writes are verified by
@@ -195,6 +197,8 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.0.2](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.2) · 2026-10-28 —
+  descriptions everywhere: every Adobe UI language, a large skills library, built for Adobe's generative features.
 - [v1.0.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.1) · 2026-10-28 —
   product name Premiere-MCP-IMT (was PR-MCP-IMT); the MCP Registry entry also lists the npm package; the package is on npm from 1.0.0.
 - [v1.0.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.0) · 2026-10-28 —

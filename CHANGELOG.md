@@ -7,6 +7,12 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-28
+
+### Changed
+
+- Descriptions (README, npm, `.mcpb`, MCP Registry, GitHub) say what sets the product apart: it works with every UI language Adobe ships, comes with a large skills library and is built for Adobe's generative features (Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant).
+
 ## [1.0.1] - 2026-10-28
 
 ### Changed

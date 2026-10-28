@@ -1,14 +1,14 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Immersive-Media-Technologies/premiere-mcp-imt",
-  "title": "Premiere-MCP-IMT — Premiere Pro for AI agents",
-  "description": "Adobe Premiere Pro for AI agents on any UI language: ~380 verified operations, 9 tools, AI skill",
+  "title": "Premiere-MCP-IMT + SKILLS — Premiere Pro for AI agents",
+  "description": "Premiere Pro for AI agents: every Adobe UI language, large skills library, generative AI tools",
   "repository": {
     "url": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt",
     "source": "github"
   },
   "websiteUrl": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt#readme",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "icons": [
     {
       "src": "https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/mcpb/icon.png",
@@ -23,15 +23,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@immersive-media-technologies/premiere-mcp-imt",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/download/v1.0.1/premiere-mcp-imt-1.0.1.mcpb",
-      "fileSha256": "54d8df747ab9d0dbe1e4c72d4aba19d6b5066bd399bfe03184d98100122012c4",
+      "identifier": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/download/v1.0.2/premiere-mcp-imt-1.0.2.mcpb",
+      "fileSha256": "e1bfbd7842a0924a9a8485c73d642c61c250dc4783e6526cc8824a6a96eda5fb",
       "transport": {
         "type": "stdio"
       }
