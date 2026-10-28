@@ -1,4 +1,4 @@
-// Deep Artisan fork (20.09.2026): telemetry stub. The upstream file sends tool names, outcomes
+// IMT fork: telemetry stub. The upstream file sends tool names, outcomes
 // and durations to PostHog (posthog-node); this server sends nothing anywhere. The interface
 // is kept intact so that server.ts / tools/health.ts merge cleanly with upstream.
 

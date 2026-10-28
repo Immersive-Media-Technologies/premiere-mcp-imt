@@ -38,6 +38,11 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 - MOGRT authoring links the accent colour by parameter index (`effect("Accent Color")(1)`); the parameter
   name is localized in After Effects.
 
+### Changed
+
+- The product layer lives in `src/product/` (was `src/da/`); internal references to the private client
+  the server came from are gone from code, docs and README, and a one-off patch script was removed.
+
 ## [0.1.0] - 2026-10-26 — Immersive Media Technologies fork
 
 First release of PR-MCP-IMT, based on [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp)

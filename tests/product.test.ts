@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { facadeInstructions } from "../src/da/instructions.js";
-import { extendGuiPath } from "../src/da/pathfix.js";
-import { listSkillDocs, readSkillDoc, skillTool } from "../src/da/skill.js";
-import { envFlag } from "../src/da/envflag.js";
-import { buildFacade, categorize, facadeEnabled, mapExecuteScriptArgs } from "../src/da/facade.js";
-import { connectorCommand } from "../src/da/connector.js";
+import { facadeInstructions } from "../src/product/instructions.js";
+import { extendGuiPath } from "../src/product/pathfix.js";
+import { listSkillDocs, readSkillDoc, skillTool } from "../src/product/skill.js";
+import { envFlag } from "../src/product/envflag.js";
+import { buildFacade, categorize, facadeEnabled, mapExecuteScriptArgs } from "../src/product/facade.js";
+import { connectorCommand } from "../src/product/connector.js";
 import { isToolPermitted, resolveCapabilities } from "../src/security/capabilities.js";
 
 const saved = { ...process.env };

@@ -288,7 +288,7 @@ describe("Tool Handler Behavior", () => {
       expect(mockedSendCommand.mock.calls[0][1]?.failFastOnUnreadyHeartbeat).toBe(true);
       expect(script).not.toContain("projectName");
       expect(script).not.toContain("project.path");
-      // Deep Artisan: captureActivationEvent is a no-op (telemetry stub) — nothing is emitted by design
+      // captureActivationEvent is a no-op (telemetry stub) — nothing is emitted by design
       expect(events).toEqual([]);
       expect(JSON.stringify(events)).not.toMatch(/prompt|path|token|project|media|argument|result|profile/i);
     });
@@ -621,7 +621,7 @@ describe("Tool Handler Behavior", () => {
       const script = mockedSendCommand.mock.calls[0][0];
       expect(script).toContain('result.trackType !== "audio"');
       expect(script).toContain("component.properties");
-      // Deep Artisan: localized lookup — property matched via __propIs (matchName/index fallback)
+      // Localized lookup — property matched via __propIs (matchName/index fallback)
       expect(script).toContain('__propIs(property, "Balance", component)');
       expect(script).toContain("panProperty.getValue()");
       expect(script).toContain("Premiere did not apply the requested pan");

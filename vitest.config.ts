@@ -7,7 +7,7 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     testTimeout: 10000,
     maxWorkers: 1,
-    // Upstream suites exercise the full catalog; tests/da-product.test.ts covers the facade default.
+    // Upstream suites exercise the full catalog; tests/product.test.ts covers the facade default.
     // Tests use the generated fallback name table, never the dictionaries of a
     // locally installed Premiere (tests/locale covers the dictionary reader).
     env: { PR_MCP_FACADE: "0", PREMIERE_DICTIONARIES_DIR: "off" },

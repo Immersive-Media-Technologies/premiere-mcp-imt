@@ -618,7 +618,7 @@ export function getTimelineTools(bridgeOptions: BridgeOptions) {
         if (!Number.isFinite(args.time_seconds) || args.time_seconds < 0) {
           return { success: false, error: "time_seconds must be finite, non-negative seconds." };
         }
-        // Deep Artisan (20.09): with node_id the track comes from the clip, never from a
+        // With node_id the track comes from the clip, never from a
         // default track 0 — a razor on the wrong track is a silent edit of the wrong clip.
         const nodeId = typeof args.node_id === "string" && args.node_id.trim() ? escapeForExtendScript(args.node_id.trim()) : null;
         if (args.track_index !== undefined && (!Number.isInteger(args.track_index) || args.track_index < 0)) {

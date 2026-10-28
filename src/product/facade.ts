@@ -1,8 +1,8 @@
-// Deep Artisan (20.09.2026): FACADE over the upstream tool catalog.
+// FACADE over the upstream tool catalog.
 //
 // Upstream advertises ~380 tools; their definitions travel to the model on EVERY turn
-// (~150K tokens of context). Deep Artisan runs every DCC through a dispatcher
-// (After Effects: ae_catalog + ae_do, Photoshop: ps_catalog + ps_do), so with
+// (~150K tokens of context). Like the other IMT servers (AE-MCP-IMT: ae_catalog + ae_do,
+// PS-MCP-IMT: ps_catalog + ps_do), with
 // PR_MCP_FACADE=1 the client sees only:
 //   pr_catalog(category?)          — operations by category / with parameters
 //   pr_do(operation, args)         — any upstream operation by name

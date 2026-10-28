@@ -17,8 +17,7 @@ Two parts, made to work together:
   Text and Paper Edit, captions, Enhance Speech and stem separation, Search, the AI Assistant, Auto
   Reframe, Scene Edit Detection, Morph Cut — plus recipes that combine them and the gotchas.
 
-By **[Immersive Media Technologies](https://github.com/Immersive-Media-Technologies)** — the Premiere
-layer of our Deep Artisan agent system, released for other agent builders.
+By **[Immersive Media Technologies](https://github.com/Immersive-Media-Technologies)**.
 
 **macOS and Windows · Premiere Pro 2024–2026 — verified live on macOS (26.5.1, Russian UI) and on
 Windows 11 ARM (26.5.2, English UI, Claude Desktop from the Microsoft Store) · Node.js 20.19+ (none

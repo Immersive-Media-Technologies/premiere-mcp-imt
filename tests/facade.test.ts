@@ -1,8 +1,8 @@
-// Deep Artisan facade (src/da/facade.ts): pr_execute_script → execute_extendscript.
+// Facade (src/product/facade.ts): pr_execute_script → execute_extendscript.
 // 28.09: the facade passed {script} where upstream reads args.code — every
 // pr_execute_script ran an empty script («empty result from evalScript»).
 import { describe, expect, it, vi } from "vitest";
-import { buildFacade, categorize, mapExecuteScriptArgs, type FacadeToolDef } from "../src/da/facade.js";
+import { buildFacade, categorize, mapExecuteScriptArgs, type FacadeToolDef } from "../src/product/facade.js";
 
 describe("mapExecuteScriptArgs", () => {
   it("passes a __result/__error body through as `code`", () => {

@@ -18,7 +18,7 @@ import {
 import { applyDoctorRepairPlan } from "./doctor-repairs.js";
 import { compareVersions, fetchLatestNpmVersion } from "./update.js";
 import { parseClientConfigAction, renderClientConfig } from "./client-config.js";
-import { extendGuiPath } from "./da/pathfix.js";
+import { extendGuiPath } from "./product/pathfix.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -187,7 +187,7 @@ describe("issue #243 — copy_effect_values refuses unsafe Blend Mode writes", (
       source_node_id: "source-clip", target_node_id: "target-clip", effect_name: "Opacity",
     });
 
-    // Deep Artisan: localized lookup — property matched via __propIs (matchName/index fallback)
+    // Localized lookup — property matched via __propIs (matchName/index fallback)
     expect(script).toContain('__propIs(srcProp, "Blend Mode", srcComp)');
     expect(script).toContain("Legacy CEP enum writes can corrupt Blend Mode; no write was attempted.");
     expect(script).toContain("var readback = tgtComp.properties[q].getValue(0, 0)");

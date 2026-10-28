@@ -1,7 +1,7 @@
 // pr_skill — serves the Premiere agent skill (skills/pr) from the server itself, so clients that
 // cannot load skill folders (a Claude Desktop extension, Cursor, ChatGPT through the gateway) still
 // get it. Layouts: source checkout and npm package → <root>/skills/pr; .mcpb → server/skills/pr
-// (dist/da/../.. is the package root in all three).
+// (dist/product/../.. is the package root in all three).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

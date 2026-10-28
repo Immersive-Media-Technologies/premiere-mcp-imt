@@ -16,7 +16,7 @@ file-based IPC (`.jsx` command files, `.json` responses). The UXP bridge (`PREMI
 | path | what |
 |---|---|
 | `src/tools/*.ts` | the ~380 operations (upstream), grouped into categories in `src/server.ts` |
-| `src/da/` | IMT layer: `facade.ts` (nine tools over the catalog), `skill.ts` (`pr_skill`), `connector.ts` (`pr_install_connector`), `instructions.ts`, `envflag.ts`, `pathfix.ts` |
+| `src/product/` | IMT layer: `facade.ts` (nine tools over the catalog), `skill.ts` (`pr_skill`), `connector.ts` (`pr_install_connector`), `instructions.ts`, `envflag.ts`, `pathfix.ts` |
 | `src/bridge/` | CEP file bridge, UXP WebSocket bridge, ExtendScript builder (`__compIs` / `__propIs`: localized matchName lookup) |
 | `src/security/capabilities.ts` | capability profiles (inspect, edit, export, filesystem, unsafe-script) |
 | `skills/pr/` | the agent skill: `SKILL.md` router + `references/*.md` |
@@ -44,7 +44,7 @@ file-based IPC (`.jsx` command files, `.json` responses). The UXP bridge (`PREMI
   `displayName`.
 - No telemetry, no network calls from the server except the explicit update check.
 - The skill: SKILL.md stays a router; facts live in exactly one reference; every operation name it
-  mentions must exist (tests/da-product.test.ts checks the reference links).
+  mentions must exist (tests/product.test.ts checks the reference links).
 - Versions: `package.json`, `cep-plugin/CSXS/manifest.xml`, `cep-plugin/index.html`,
   `cep-plugin/updater.cjs`, `after-effects-cep-plugin/CSXS/manifest.xml`, `uxp-plugin/manifest.json`
   move together; `npm test` checks them. Add a `CHANGELOG.md` section for every release.

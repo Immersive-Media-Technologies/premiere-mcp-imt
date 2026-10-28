@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { envFlag } from "../da/envflag.js";
+import { envFlag } from "../product/envflag.js";
 
 export const CAPABILITIES = ["inspect", "edit", "export", "filesystem", "unsafe-script"] as const;
 

@@ -85,9 +85,9 @@ import {
   type ToolPackSelection,
 } from "./workflows/tool-packs.js";
 import { getTelemetry, type Telemetry } from "./telemetry.js";
-// Deep Artisan (20.09): pr_catalog/pr_do facade over the catalog (PR_MCP_FACADE=1)
-import { buildFacade, categorize, facadeEnabled } from "./da/facade.js";
-import { facadeInstructions } from "./da/instructions.js";
+// pr_catalog/pr_do facade over the catalog (PR_MCP_FACADE=1)
+import { buildFacade, categorize, facadeEnabled } from "./product/facade.js";
+import { facadeInstructions } from "./product/instructions.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -364,7 +364,7 @@ export function createServer(
     },
   );
 
-  // Deep Artisan: the result formatting is shared by the per-tool registration and the
+  // The result formatting is shared by the per-tool registration and the
   // pr_do facade, so both return identical structuredContent / image blocks / isError.
   const invokeTool = async (
     name: string,
