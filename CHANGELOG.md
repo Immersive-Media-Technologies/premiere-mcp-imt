@@ -7,6 +7,12 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-28
+
+### Changed
+
+- The MCP Registry entry lists the npm package `@immersive-media-technologies/premiere-mcp-imt` next to the `.mcpb`.
+
 ## [1.0.0] - 2026-10-28
 
 ### Added

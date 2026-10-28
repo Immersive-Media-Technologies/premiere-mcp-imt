@@ -8,7 +8,7 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt#readme",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "icons": [
     {
       "src": "https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/mcpb/icon.png",
@@ -20,9 +20,18 @@
   ],
   "packages": [
     {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@immersive-media-technologies/premiere-mcp-imt",
+      "version": "1.0.1",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
       "registryType": "mcpb",
-      "identifier": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/download/v1.0.0/premiere-mcp-imt-1.0.0.mcpb",
-      "fileSha256": "ce2ade6fda8b26dc6167728e4c0a57a6ecc2f06cd4b48c137f6ce78db496f1b8",
+      "identifier": "https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/download/v1.0.1/premiere-mcp-imt-1.0.1.mcpb",
+      "fileSha256": "1009568d55e088485a8b2107d6e62eaa071fbc76365ca2d40998d49839b73e0f",
       "transport": {
         "type": "stdio"
       }

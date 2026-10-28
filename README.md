@@ -195,6 +195,8 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.0.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.1) · 2026-10-28 —
+  the MCP Registry entry also lists the npm package; the package is on npm from 1.0.0.
 - [v1.0.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.0) · 2026-10-28 —
   every Premiere UI language (English names translated through Premiere's own dictionaries; verified
   live), honest results for unknown effects, colour correction and LUTs, Apache-2.0.

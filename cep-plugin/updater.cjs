@@ -7,7 +7,7 @@
 })(this, function () {
   "use strict";
 
-  var CURRENT_VERSION = "1.0.0";
+  var CURRENT_VERSION = "1.0.1";
   var PACKAGE_NAME = "@immersive-media-technologies/premiere-mcp-imt";
   var LATEST_PACKAGE_API = "https://registry.npmjs.org/" + PACKAGE_NAME.replace("/", "%2F");
   var LATEST_RELEASE_API =
