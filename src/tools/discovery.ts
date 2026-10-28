@@ -1,3 +1,4 @@
+import { sequenceReadProperties, sequenceReadScript, type SequenceReadArgs } from "./sequence-read.js";
 import { buildToolScript, escapeForExtendScript } from "../bridge/script-builder.js";
 import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
 
@@ -64,7 +65,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
                   break;
                 }
               }
-              if (!found) return __error("Bin not found: " + binPath);
+              if (!found) return __error("Bin not found: " + binPath + "; nothing was changed.");
             }
           }
           
@@ -74,7 +75,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
             var entry = {
               nodeId: item.nodeId,
               name: item.name,
-              type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 3 ? "sequence" : "unknown",
+              type: __projectItemKind(item),
               mediaPath: ""
             };
             try {
@@ -105,7 +106,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
               id: seq.sequenceID,
               videoTracks: seq.videoTracks.numTracks,
               audioTracks: seq.audioTracks.numTracks,
-              inPoint: __ticksToSeconds(seq.zeroPoint.ticks),
+              inPoint: __ticksToSeconds(seq.zeroPoint), // zeroPoint is a ticks string, not a Time
               end: __ticksToSeconds(seq.end)
             });
           }
@@ -117,12 +118,14 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
     },
 
     get_active_sequence: {
-      description: "Get detailed information about the currently active sequence",
-      parameters: {},
-      handler: async () => {
+      description: "Get bounded, paged information about the currently active sequence (50 clips by default). Follow pagination.nextOffset for more",
+      parameters: { type: "object" as const, properties: sequenceReadProperties },
+      handler: async (args: SequenceReadArgs = {}) => {
+        const bounds = sequenceReadScript(args);
         const script = buildToolScript(`
+          ${bounds}
           var seq = __getCurrentActiveSequence();
-          if (!seq) return __error("No active sequence in the current project");
+          if (!seq) return __error("No active sequence in the current project; nothing was changed.");
           
           var videoTracks = [];
           for (var t = 0; t < seq.videoTracks.numTracks; t++) {
@@ -130,7 +133,8 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
             var clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
-              clips.push({
+              if (!__readInclude(clip, "video", t)) continue;
+              __readPush(clips, {
                 nodeId: clip.nodeId,
                 name: clip.name,
                 start: __ticksToSeconds(clip.start.ticks),
@@ -154,7 +158,8 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
             var clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
-              clips.push({
+              if (!__readInclude(clip, "audio", t)) continue;
+              __readPush(clips, {
                 nodeId: clip.nodeId,
                 name: clip.name,
                 start: __ticksToSeconds(clip.start.ticks),
@@ -170,7 +175,9 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
             });
           }
           
-          return __result({
+          if (__readError) return __error(__readError);
+          return __readResult({
+            pagination: __readReceipt(),
             name: seq.name,
             id: seq.sequenceID,
             frameSizeHorizontal: seq.frameSizeHorizontal,
@@ -247,7 +254,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { node_id: string }) => {
         const script = buildToolScript(`
           var result = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}; nothing was changed.");
           
           var clip = result.clip;
           var props = {
@@ -300,12 +307,12 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { name: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.name)}");
-          if (!item) return __error("Project item not found: ${escapeForExtendScript(args.name)}");
+          if (!item) return __error("Project item not found: ${escapeForExtendScript(args.name)}; nothing was changed.");
           
           var info = {
             nodeId: item.nodeId,
             name: item.name,
-            type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 3 ? "sequence" : "unknown",
+            type: __projectItemKind(item),
             mediaPath: ""
           };
           try {
@@ -355,6 +362,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
               settings.audioChannelType = seqSettings.audioChannelType;
               settings.audioDisplayFormat = seqSettings.audioDisplayFormat;
               settings.audioSampleRate = seqSettings.audioSampleRate;
+              settings.audioSampleRateHz = __sampleRateHz(seqSettings.audioSampleRate);
               settings.videoDisplayFormat = seqSettings.videoDisplayFormat;
               settings.videoFieldType = seqSettings.videoFieldType;
               settings.videoFrameRate = seqSettings.videoFrameRate;
@@ -373,7 +381,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
       handler: async () => {
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           
           var selection = seq.getSelection();
           var clips = [];
@@ -419,7 +427,7 @@ export function getDiscoveryTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { time_seconds: number; track_index: number; track_type: string }) => {
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           
           var tracks = ${args.track_type === "video" ? "seq.videoTracks" : "seq.audioTracks"};
           if (${args.track_index} >= tracks.numTracks) return __error("Track index out of range");

@@ -39,7 +39,7 @@ describe("direct UXP CCX packaging", () => {
     expect(built.status, built.stderr || built.stdout).toBe(0);
 
     const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
-    const archive = readFileSync(path.join("artifacts", `premiere-pro-mcp-uxp-${packageJson.version}-direct.ccx`));
+    const archive = readFileSync(path.join("artifacts", `premiere-mcp-imt-uxp-${packageJson.version}-direct.ccx`));
     const entries = readZipEntries(archive);
     const bundleRoot = `${PLUGIN_ID}/`;
     const directory = entries.find((entry) => entry.name === bundleRoot);

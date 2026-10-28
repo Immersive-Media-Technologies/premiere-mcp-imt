@@ -1,7 +1,7 @@
 // FACADE over the upstream tool catalog.
 //
-// Upstream advertises ~380 tools; their definitions travel to the model on EVERY turn
-// (~150K tokens of context). Like the other IMT servers (AfterEffects-MCP-IMT: ae_catalog + ae_do,
+// Upstream advertises ~440 tools; their definitions travel to the model on EVERY turn
+// (more than 600K tokens of context). Like the other IMT servers (AfterEffects-MCP-IMT: ae_catalog + ae_do,
 // Photoshop-MCP-IMT: ps_catalog + ps_do), with
 // PR_MCP_FACADE=1 the client sees only:
 //   pr_catalog(category?)          — operations by category / with parameters
@@ -67,6 +67,27 @@ export function mapExecuteScriptArgs(a: Record<string, unknown>): Record<string,
   return out;
 }
 
+const RECOVERY_STEPS =
+  "look at the project first (pr_get_sequence, or the read operation for what this edit touches) — never repeat an edit before checking whether it already happened; " +
+  'then pr_do inspect_operation_recovery {"backend":"cep"} and pr_do acknowledge_operation_recovery {"backend":"cep","expected_recovery_revision":…,"expected_host_state_revision":…,"reviewed":true} with the revisions that inspection returned.';
+
+/**
+ * IMT: an edit whose outcome is unknown pauses every later edit until recovery is
+ * acknowledged (upstream's fail-closed host lease). Say so in the result, with the way out.
+ */
+export function withRecoveryHint(result: CallToolResult): CallToolResult {
+  if (!result.isError) return result;
+  const body = result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+  const receipt = (result.structuredContent as { receipt?: { outcome?: string } } | undefined)?.receipt;
+  let hint = "";
+  if (/HOST_RECOVERY_REQUIRED/.test(body)) {
+    hint = `Premiere edits are paused because an earlier edit ended with an unknown outcome. To resume: ${RECOVERY_STEPS}`;
+  } else if (receipt?.outcome === "unknown") {
+    hint = `This edit's outcome is unknown, so further edits are paused. To resume: ${RECOVERY_STEPS}`;
+  }
+  return hint ? { ...result, content: [...result.content, { type: "text", text: hint }] } : result;
+}
+
 function text(t: string, isError = false): CallToolResult {
   return isError
     ? { content: [{ type: "text", text: t }], isError: true }
@@ -93,7 +114,8 @@ export interface FacadeSpec {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  run: (args: Record<string, unknown>) => Promise<CallToolResult>;
+  /** ctx — the MCP request context (abort signal, progress); passed through to the catalog call. */
+  run: (args: Record<string, unknown>, ctx?: unknown) => Promise<CallToolResult>;
 }
 
 /**
@@ -103,12 +125,12 @@ export interface FacadeSpec {
  */
 export function buildFacade(
   tools: Record<string, FacadeToolDef>,
-  invoke: (name: string, args: Record<string, unknown>) => Promise<CallToolResult>,
+  invoke: (name: string, args: Record<string, unknown>, ctx?: unknown) => Promise<CallToolResult>,
 ): FacadeSpec[] {
   const catOf = (name: string): string => TOOL_CATEGORY.get(name) ?? "other";
   const names = (): string[] => Object.keys(tools).sort();
 
-  const run = async (op: string, args: Record<string, unknown>): Promise<CallToolResult> => {
+  const run = async (op: string, args: Record<string, unknown>, ctx?: unknown): Promise<CallToolResult> => {
     const name = String(op || "").trim();
     if (!tools[name]) {
       const stem = name.split("_")[0];
@@ -119,14 +141,14 @@ export function buildFacade(
         true,
       );
     }
-    return invoke(name, args ?? {});
+    return withRecoveryHint(await (ctx === undefined ? invoke(name, args ?? {}) : invoke(name, args ?? {}, ctx)));
   };
 
   const direct = (name: string, description: string, parameters: Record<string, unknown>, map?: (a: Record<string, unknown>) => Record<string, unknown>): FacadeSpec => ({
     name,
     description,
     parameters,
-    run: (a) => run(parameters._op as string, map ? map(a) : a),
+    run: (a, ctx) => run(parameters._op as string, map ? map(a) : a, ctx),
   });
 
   return [
@@ -167,8 +189,9 @@ export function buildFacade(
       name: "pr_do",
       description:
         'Run one Premiere Pro operation by name (see pr_catalog), e.g. {"operation":"add_marker","args":{"time_seconds":1.5,"name":"Intro"}}. ' +
-        "Returns the operation result JSON. Writes are verified by readback where Premiere allows it; there is no scripting undo in Premiere 26 — " +
-        "ask the user to use Edit > Undo if a change must be reverted. Prefer this over writing ExtendScript.",
+        "Returns the operation result JSON. Writes are verified by readback where Premiere allows it. A result with undoSteps / undoStackIndex " +
+        "can be reverted with the undo operation {expected_undo_stack_index}; property and marker writes record no undo step — checkpoint the " +
+        "sequence before them. Prefer this over writing ExtendScript.",
       parameters: {
         type: "object",
         properties: {
@@ -177,7 +200,7 @@ export function buildFacade(
         },
         required: ["operation"],
       },
-      run: (args: Record<string, unknown>) => run(String(args.operation ?? ""), (args.args as Record<string, unknown>) ?? {}),
+      run: (args: Record<string, unknown>, ctx?: unknown) => run(String(args.operation ?? ""), (args.args as Record<string, unknown>) ?? {}, ctx),
     },
     {
       name: "pr_batch",
@@ -198,12 +221,12 @@ export function buildFacade(
         },
         required: ["ops"],
       },
-      run: async (args: Record<string, unknown>) => {
+      run: async (args: Record<string, unknown>, ctx?: unknown) => {
         const ops = Array.isArray(args.ops) ? (args.ops as { operation: string; args?: Record<string, unknown> }[]) : [];
         const stop = args.stopOnError !== false;
         const out: unknown[] = [];
         for (const op of ops) {
-          const r = await run(op.operation, op.args ?? {});
+          const r = await run(op.operation, op.args ?? {}, ctx);
           const body = r.structuredContent ?? r.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
           out.push({ operation: op.operation, ok: !r.isError, result: body });
           if (r.isError && stop) break;
@@ -247,7 +270,7 @@ export function buildFacade(
         "(b) a function body that ends with `return __result({...})` or `return __error(\"msg\")` — returned as is. " +
         "Helpers in scope: __findSequence(idOrName), __findProjectItem(nodeIdOrName), __findClip(nodeId) → {clip, trackIndex, clipIndex, trackType}, __getAllClips(seq), " +
         "__compIs(comp, name)/__propIs(prop, name, comp)/__nameIn(displayName, name) (English names on any UI language), __qeLookup(\"video\"|\"audio\"|\"videoTransition\", name) → {item, name} or null, __ticksToSeconds/__secondsToTicks, TICKS_PER_SECOND. " +
-        "Runtime errors come back as errors. No scripting undo in Premiere 26 — pr_save_project before destructive scripts. Only for what pr_catalog does not cover.",
+        "Runtime errors come back as errors. pr_save_project before destructive scripts. Only for what pr_catalog does not cover.",
       {
         type: "object",
         properties: {

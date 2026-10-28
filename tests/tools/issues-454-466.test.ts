@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../../src/tools/media-evidence.js", () => ({ probeMediaDurationTicks: vi.fn().mockResolvedValue(100 * 254016000000) }));
+
 vi.mock("../../src/bridge/file-bridge.js", () => ({
   sendCommand: vi.fn().mockResolvedValue({ success: true, data: {} }),
 }));
@@ -27,8 +29,8 @@ const trackTargeting = getTrackTargetingTools(bridgeOptions);
 async function scriptFor(tool: { handler: (args: any) => Promise<unknown> }, args: unknown) {
   mockedSendCommand.mockClear();
   await tool.handler(args);
-  expect(mockedSendCommand).toHaveBeenCalledTimes(1);
-  return String(mockedSendCommand.mock.calls[0][0]);
+  expect(mockedSendCommand).toHaveBeenCalled();
+  return String(mockedSendCommand.mock.calls[mockedSendCommand.mock.calls.length - 1][0]);
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -36,6 +38,7 @@ beforeEach(() => vi.clearAllMocks());
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/457
 describe("issue #457 — roll_edit must move source in/out with the visible cut", () => {
   it("writes the matching outPoint and inPoint alongside the rolled edges", async () => {
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { projectDocumentId: "project", sequenceId: "seq", linkedNodeIds: [], entries: [{ nodeId: "clip-1", mediaPath: "/tmp/clip.mp4", position: "0|1|0|1", trackType: "video", trackIndex: 0, clipIndex: 0 }] } });
     const script = await scriptFor(advanced.roll_edit, { node_id: "clip-1", offset_seconds: 1 });
 
     expect(script).toContain("result.clip.outPoint = expectedOut;");
@@ -44,6 +47,7 @@ describe("issue #457 — roll_edit must move source in/out with the visible cut"
   });
 
   it("fails when the source in/out metadata does not follow the visible cut", async () => {
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { projectDocumentId: "project", sequenceId: "seq", linkedNodeIds: [], entries: [{ nodeId: "clip-1", mediaPath: "/tmp/clip.mp4", position: "0|1|0|1", trackType: "video", trackIndex: 0, clipIndex: 0 }] } });
     const script = await scriptFor(advanced.roll_edit, { node_id: "clip-1", offset_seconds: 1 });
 
     expect(script).toContain("afterOut !== expectedOut || afterIncomingIn !== expectedIncomingIn");
@@ -55,7 +59,7 @@ describe("issue #457 — roll_edit must move source in/out with the visible cut"
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/458
 describe("issue #458 — import_fcp_xml supplies both openFCPXML arguments", () => {
   it("requires the destination project path openFCPXML needs", async () => {
-    expect(project.import_fcp_xml.parameters.required).toEqual(["path", "project_path"]);
+    expect(project.import_fcp_xml.parameters.required).toEqual(["path"]);
 
     const result = await project.import_fcp_xml.handler({ path: "/tmp/edit.xml", project_path: "  " });
     expect(result).toMatchObject({ success: false, error: expect.stringContaining("Not Enough Parameters") });
@@ -68,11 +72,11 @@ describe("issue #458 — import_fcp_xml supplies both openFCPXML arguments", () 
       project_path: "/tmp/imported.prproj",
     });
 
-    expect(script).toContain('app.openFCPXML("/tmp/edit.xml", "/tmp/imported.prproj");');
+    expect(script).toContain('app.openFCPXML("/tmp/edit.xml", "/tmp/");');
     expect(script).toContain('var xmlFile = new File("/tmp/edit.xml");');
     expect(script).toContain("if (!xmlFile.exists)");
     expect(script).toContain("A project already exists at /tmp/imported.prproj");
-    expect(script).toContain("verified: destExistsAsFile && openedMatches");
+    expect(script).toContain("imported.saveAs(\"/tmp/imported.prproj\")");
   });
 });
 
@@ -101,31 +105,26 @@ describe("issue #460 — attach_custom_property verifies the XMP packet", () => 
 });
 
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/462
-describe("issue #462 — undo and redo fail closed like multiple_undo", () => {
-  it("does not call app.project.undo, which is not a function on current builds", async () => {
-    const result = await project.undo.handler({});
-
-    expect(result).toMatchObject({
-      success: false,
-      error: expect.stringContaining("app.project.undo is not a function"),
-    });
-    expect(mockedSendCommand).not.toHaveBeenCalled();
+// app.project.undo is not a function, but QE's qe.project.undo()/redo() work
+// and qe.project.undoStackIndex() verifies them (live 25.2): see qe-undo.test.ts.
+describe("issue #462 — undo and redo never use app.project.undo", () => {
+  it("steps QE's undo stack instead of app.project.undo", async () => {
+    await project.undo.handler({ expected_undo_stack_index: 0 });
+    const script = mockedSendCommand.mock.calls[0][0] as string;
+    expect(script).toContain('__qeUndoSteps("undo"');
+    expect(script).not.toContain("app.project.undo");
   });
 
-  it("validates count before reporting the capability gap", async () => {
+  it("validates count before touching the host", async () => {
     await expect(project.undo.handler({ count: 0 }))
       .resolves.toMatchObject({ success: false, error: expect.stringContaining("count must be an integer") });
     expect(mockedSendCommand).not.toHaveBeenCalled();
   });
 
-  it("never reports an unverifiable redo success", async () => {
-    const result = await trackTargeting.redo.handler({});
-
-    expect(result).toMatchObject({
-      success: false,
-      error: expect.stringContaining("no supported redo API"),
-    });
-    expect(mockedSendCommand).not.toHaveBeenCalled();
+  it("redoes through QE with undo-stack verification", async () => {
+    await trackTargeting.redo.handler({ expected_undo_stack_index: 0 });
+    const script = mockedSendCommand.mock.calls[0][0] as string;
+    expect(script).toContain('__qeUndoSteps("redo"');
   });
 });
 

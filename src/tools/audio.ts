@@ -1,8 +1,8 @@
 import { buildToolScript, escapeForExtendScript } from "../bridge/script-builder.js";
 import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { existsSync, renameSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -12,11 +12,38 @@ const FFMPEG_TIMEOUT_MS = 300_000;
 
 // Premiere stores Volume > Level as a normalized value, not a linear gain.
 // Its maximum value (1) represents +15 dB, so 0 dB is 10^(-15/20).
-const PREMIERE_MAX_LEVEL_DB = 15;
+export const PREMIERE_MAX_LEVEL_DB = 15;
 
-function dbToPremiereLevel(db: number): number {
+export function dbToPremiereLevel(db: number): number {
   return Math.pow(10, (db - PREMIERE_MAX_LEVEL_DB) / 20);
 }
+
+/** ES3 key storage readback shared by audio automation tools. */
+export const AUDIO_KEYFRAME_READBACK = `
+  function audioTick(value) {
+    if (typeof value !== "number" && (typeof value !== "string" || !/^[0-9]+$/.test(value))) throw new Error("Unreadable key clock");
+    var tick = Number(value);
+    if (!isFinite(tick) || tick < 0 || tick > 9007199254740991 || Math.floor(tick) !== tick) throw new Error("Unsafe key clock");
+    return tick;
+  }
+  function audioKeys(prop) {
+    var keys = prop.getKeys();
+    if (__isEmptyKeyList(prop, keys)) return [];
+    if (!keys || typeof keys.length !== "number" || !isFinite(keys.length) || keys.length < 0 || Math.floor(keys.length) !== keys.length) throw new Error("Unreadable key storage");
+    var ticks = [];
+    for (var k = 0; k < keys.length; k++) ticks.push(audioTick(keys[k].ticks));
+    return ticks;
+  }
+  function audioVerify(prop, time, expected) {
+    var ticks = audioKeys(prop);
+    var target = audioTick(time.ticks);
+    var found = false;
+    for (var k = 0; k < ticks.length; k++) if (ticks[k] === target) found = true;
+    var actual = prop.getValueAtTime(time);
+    if (!found || typeof actual !== "number" || !isFinite(actual) || Math.abs(actual - expected) > expected * 0.000001) throw new Error("Stored audio key or Level differed");
+    return actual;
+  }
+`;
 
 export interface SilenceInterval {
   start: number;
@@ -51,22 +78,34 @@ export interface BeatMeasurement {
   durationSeconds: number;
 }
 
+/** The decoded audio holds no usable beat (too short, or no repeating pulse). */
+export class NoBeatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoBeatError";
+  }
+}
+
 /** Estimate a steady beat grid from signed 16-bit mono samples at a low analysis rate. */
 export function analyzeBeatPcm(samples: Int16Array, sampleRate: number): BeatMeasurement {
   if (!Number.isFinite(sampleRate) || sampleRate < 20 || samples.length < sampleRate * 2) {
-    throw new Error("Beat analysis requires at least two seconds of finite-rate audio");
+    throw new NoBeatError("Beat analysis requires at least two seconds of finite-rate audio");
   }
-  const hop = Math.max(1, Math.round(sampleRate / 20));
+  // A 100 Hz onset envelope: at 20 Hz the period could only take 50 ms steps,
+  // so 73 BPM (0.822 s) snapped to 75 BPM (0.8 s) and the grid drifted.
+  const hop = Math.max(1, Math.round(sampleRate / 100));
   const envelope: number[] = [];
   for (let offset = 0; offset + hop <= samples.length; offset += hop) {
     let energy = 0;
     for (let index = offset; index < offset + hop; index++) energy += Math.abs(samples[index]);
     envelope.push(energy / hop);
   }
+  // Half-second moving baseline either side, whatever the envelope rate.
+  const baselineHalfWidth = Math.max(1, Math.round((sampleRate / hop) * 0.5));
   const onset = envelope.map((value, index) => {
     let baseline = 0;
     let count = 0;
-    for (let at = Math.max(0, index - 10); at <= Math.min(envelope.length - 1, index + 10); at++) {
+    for (let at = Math.max(0, index - baselineHalfWidth); at <= Math.min(envelope.length - 1, index + baselineHalfWidth); at++) {
       baseline += envelope[at]; count++;
     }
     return Math.max(0, value - baseline / count);
@@ -98,19 +137,41 @@ export function analyzeBeatPcm(samples: Int16Array, sampleRate: number): BeatMea
   selfScore /= onset.length;
   const confidence = Math.max(0, Math.min(1, selfScore > 0 ? bestScore / selfScore : 0));
   if (!Number.isFinite(confidence) || confidence < 0.05) {
-    throw new Error("No repeating beat evidence was detected in the decoded media");
+    throw new NoBeatError("No repeating beat evidence was detected in the decoded media");
   }
-  const bpm = 60 * envelopeRate / bestLag;
-  let bestOffset = 0;
-  let phaseScore = -1;
-  for (let offset = 0; offset < bestLag; offset++) {
-    let score = 0;
-    for (let index = offset; index < onset.length; index += bestLag) score += onset[index];
-    if (score > phaseScore) { phaseScore = score; bestOffset = offset; }
+  // Refine the whole-sample lag to a fractional period with a comb over the
+  // full file, so the beat grid does not drift on long material.
+  const onsetAt = (position: number) => {
+    const whole = Math.floor(position);
+    if (whole < 0 || whole + 1 >= onset.length) return 0;
+    const fraction = position - whole;
+    return onset[whole] * (1 - fraction) + onset[whole + 1] * fraction;
+  };
+  const comb = (period: number) => {
+    let bestScore = -1;
+    let bestPhase = 0;
+    for (let phase = 0; phase < period; phase += 0.5) {
+      let score = 0;
+      for (let position = phase; position < onset.length - 1; position += period) score += onsetAt(position);
+      if (score > bestScore) { bestScore = score; bestPhase = phase; }
+    }
+    return { score: bestScore, phase: bestPhase };
+  };
+  const candidates: Array<{ period: number; score: number }> = [];
+  for (let step = -100; step <= 100; step++) {
+    const candidate = bestLag + step / 100;
+    if (candidate <= 0 || candidate < minLag - 1) continue;
+    candidates.push({ period: candidate, score: comb(candidate).score });
   }
+  // Wide onsets give a plateau of equally scoring periods; take its centre.
+  const topScore = Math.max(...candidates.map((entry) => entry.score));
+  const tied = candidates.filter((entry) => entry.score >= topScore * 0.999).map((entry) => entry.period);
+  const period = (Math.min(...tied) + Math.max(...tied)) / 2;
+  const best = comb(period);
+  const bpm = 60 * envelopeRate / period;
   const beatTimesSeconds: number[] = [];
-  for (let index = bestOffset; index < onset.length; index += bestLag) {
-    beatTimesSeconds.push(Number((index / envelopeRate).toFixed(3)));
+  for (let position = best.phase; position < onset.length; position += period) {
+    beatTimesSeconds.push(Number((position / envelopeRate).toFixed(3)));
   }
   return {
     bpm: Number(bpm.toFixed(1)),
@@ -135,6 +196,36 @@ export function parseEbur128Summary(stderr: string): LoudnessMeasurement {
     loudnessRangeLu: finiteMetric(summary.match(/Loudness range:[\s\S]*?\bLRA:\s*(-?(?:inf|\d+(?:\.\d+)?))\s+LU/i)?.[1]),
     truePeakDbfs: finiteMetric(summary.match(/True peak:[\s\S]*?\bPeak:\s*(-?(?:inf|\d+(?:\.\d+)?))\s+dBFS/i)?.[1]),
   };
+}
+
+export interface LoudnormStats {
+  input_i: string; input_tp: string; input_lra: string; input_thresh: string; target_offset: string;
+  normalization_type?: string;
+}
+
+/** The JSON block loudnorm prints to stderr with print_format=json. */
+export function parseLoudnormJson(stderr: string): LoudnormStats {
+  const start = stderr.lastIndexOf("{");
+  const end = stderr.lastIndexOf("}");
+  if (start < 0 || end < start) throw new Error("loudnorm printed no measurement");
+  const stats = JSON.parse(stderr.slice(start, end + 1)) as LoudnormStats;
+  for (const key of ["input_i", "input_tp", "input_lra", "input_thresh", "target_offset"] as const) {
+    if (!Number.isFinite(Number(stats[key]))) throw new Error(`loudnorm measurement is missing ${key} (silent input?)`);
+  }
+  return stats;
+}
+
+async function probeAudioStream(path: string): Promise<{ sampleRate: number | null; bitRate: number | null } | null> {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate,bit_rate", "-of", "json", path], { timeout: 15000 });
+    const stream = JSON.parse(stdout).streams?.[0];
+    if (!stream) return null;
+    const rate = Number(stream.sample_rate);
+    const bits = Number(stream.bit_rate);
+    return { sampleRate: Number.isFinite(rate) && rate > 0 ? rate : null, bitRate: Number.isFinite(bits) && bits > 0 ? bits : null };
+  } catch {
+    return { sampleRate: null, bitRate: null };
+  }
 }
 
 /**
@@ -385,26 +476,36 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           };
         }
         const normalizedLevel = dbToPremiereLevel(args.level_db);
+        if (normalizedLevel <= 0) return { success: false, error: "level_db is too small to represent as a nonzero normalized level" };
         const script = buildToolScript(`
           var result = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!result) return __error("Clip not found");
+          if (!result) return __error("Clip not found; nothing was changed.");
           
           var clip = result.clip;
           // Find the Volume component
           for (var i = 0; i < clip.components.numItems; i++) {
             var comp = clip.components[i];
-            if (__compIs(comp, "Volume") || comp.matchName === "audioVolume") {
+            var __m = String(comp.matchName || "");
+            if (__compIs(comp, "Volume") || __m.indexOf("Internal Volume") === 0 || __m === "audioVolume") {
               for (var p = 0; p < comp.properties.numItems; p++) {
-                if (__propIs(comp.properties[p], "Level", comp)) {
+                if (__propIs(comp.properties[p], "Level", comp) || String(comp.properties[p].displayName) === "Nivel") {
                   var levelProp = comp.properties[p];
                   var requestedLevel = ${normalizedLevel};
-                  var writeResult = levelProp.setValue(requestedLevel, true);
-                  var appliedLevel = Number(levelProp.getValue());
+                  var beforeLevel;
+                  try { beforeLevel = levelProp.getValue(); } catch (e) { return __error("Cannot read audio level; nothing was changed."); }
+                  if (typeof beforeLevel !== "number" || !isFinite(beforeLevel)) return __error("Cannot read audio level; nothing was changed.");
+                  var writeResult = null;
+                  var writeError = "";
+                  try { writeResult = levelProp.setValue(requestedLevel, true); } catch (e) { writeError = String(e); }
+                  var appliedLevel = NaN;
+                  try { var observedLevel = levelProp.getValue(); if (typeof observedLevel === "number") appliedLevel = observedLevel; } catch (e) {}
+                  var data = { verified: false, outcome: "committed_unverified", requestedLevel: requestedLevel, normalizedLevel: isFinite(appliedLevel) ? appliedLevel : null };
+                  if (isFinite(appliedLevel) && appliedLevel !== beforeLevel) data.timelineChanged = true;
                   var appliedDb = appliedLevel > 0 ? (20 * (Math.log(appliedLevel) / Math.LN10) + ${PREMIERE_MAX_LEVEL_DB}) : null;
-                  if (isNaN(appliedLevel) || Math.abs(appliedLevel - requestedLevel) > 0.0001 || appliedDb === null || Math.abs(appliedDb - ${args.level_db}) > 0.01) {
-                    return __error("Premiere did not apply the requested audio level (requested ${args.level_db} dB / normalized " + requestedLevel + ", read back " + appliedLevel + " / " + appliedDb + " dB). Effect-property writes are known to no-op on some Premiere Pro 26.3 installations.");
+                  if (writeError || !isFinite(appliedLevel) || Math.abs(appliedLevel - requestedLevel) > 0.0001 || appliedDb === null || Math.abs(appliedDb - ${args.level_db}) > 0.01) {
+                    return __jsonStringify({ success: false, error: "Premiere did not apply the requested audio level or could not confirm it. Inspect Volume > Level before retrying. " + writeError, data: data });
                   }
-                  return __result({ adjusted: true, verified: true, clipName: clip.name, levelDb: ${args.level_db}, normalizedLevel: appliedLevel, writeResult: writeResult });
+                  return __result({ adjusted: true, verified: true, outcome: "verified", clipName: clip.name, levelDb: ${args.level_db}, normalizedLevel: appliedLevel, writeResult: writeResult });
                 }
               }
             }
@@ -427,11 +528,12 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           },
           keyframes: {
             type: "array",
+            minItems: 1,
             items: {
               type: "object",
               properties: {
-                time_seconds: { type: "number", description: "Time in seconds relative to clip start" },
-                level_db: { type: "number", description: "Audio level in dB" },
+                time_seconds: { type: "number", minimum: 0, description: "Time in seconds relative to clip start" },
+                level_db: { type: "number", maximum: 15, description: "Audio level in dB (maximum +15 dB)" },
               },
               required: ["time_seconds", "level_db"],
             },
@@ -441,41 +543,27 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
         required: ["node_id", "keyframes"],
       },
       handler: async (args: { node_id: string; keyframes: Array<{ time_seconds: number; level_db: number }> }) => {
-        // Premiere stores audio Level as amplitude ratio (0-1+), not dB.
-        // Convert: amp = 10^(dB/20). Clamp very low values to a small epsilon
-        // so AddKey accepts them (a true 0 sometimes silently fails).
-        const keyframeCode = args.keyframes
-          .map((kf) => {
-            const amp = Math.max(Math.pow(10, kf.level_db / 20), 0.0000001);
-            return `
-            (function() {
-              var t = new Time();
-              t.ticks = __secondsToTicks(${kf.time_seconds}).toString();
-              var wrote = false;
-              try { levelProp.addKey(t); } catch(e1) {}
-              try { levelProp.setValueAtKey(t, ${amp}, 1); wrote = true; }
-              catch(e2) { try { levelProp.setValueAtTime(t, ${amp}, 1); wrote = true; } catch(e3) {} }
-              var readBack = NaN;
-              try { readBack = Number(levelProp.getValueAtTime(t)); } catch(e4) {}
-              if (!wrote || isNaN(readBack) || Math.abs(readBack - ${amp}) > 0.0001) {
-                verificationErrors.push("${kf.time_seconds}s requested ${amp}, read back " + readBack);
-              }
-            })();`;
-          })
-          .join("\n");
+        if (!Array.isArray(args.keyframes) || args.keyframes.length === 0 || args.keyframes.some((kf) =>
+          !kf || !Number.isFinite(kf.time_seconds) || kf.time_seconds < 0 || !Number.isFinite(kf.level_db) || kf.level_db > PREMIERE_MAX_LEVEL_DB || !Number.isFinite(dbToPremiereLevel(kf.level_db)) || dbToPremiereLevel(kf.level_db) <= 0 || !Number.isSafeInteger(Math.round(kf.time_seconds * 254016000000)))) {
+          return { success: false, error: "keyframes must contain finite non-negative times and level_db must be at most +15 dB (Premiere's maximum clip level)" };
+        }
+        const offsets = args.keyframes.map((kf) => Math.round(kf.time_seconds * 254016000000));
+        if (new Set(offsets).size !== offsets.length) return { success: false, error: "keyframe times must be distinct in Premiere ticks" };
+        const plannedKeys = args.keyframes.map((kf, index) => `{ offset: ${offsets[index]}, amplitude: ${dbToPremiereLevel(kf.level_db)} }`).join(",");
 
         const script = buildToolScript(`
           var result = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!result) return __error("Clip not found");
+          if (!result) return __error("Clip not found; nothing was changed.");
 
           var clip = result.clip;
           var levelProp = null;
 
           for (var i = 0; i < clip.components.numItems; i++) {
             var comp = clip.components[i];
-            if (__compIs(comp, "Volume") || comp.matchName === "audioVolume") {
+            var __m = String(comp.matchName || "");
+            if (__compIs(comp, "Volume") || __m.indexOf("Internal Volume") === 0 || __m === "audioVolume") {
               for (var p = 0; p < comp.properties.numItems; p++) {
-                if (__propIs(comp.properties[p], "Level", comp)) {
+                if (__propIs(comp.properties[p], "Level", comp) || String(comp.properties[p].displayName) === "Nivel") {
                   levelProp = comp.properties[p];
                   break;
                 }
@@ -484,15 +572,35 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           }
 
           if (!levelProp) return __error("Could not find audio Level property");
+          var base = __clipKeyframeBase(clip);
+          if (!base.ok) return __error(base.error);
+          if (${Math.max(...args.keyframes.map((kf) => kf.time_seconds))} > base.durationSeconds) return __error("Keyframe time exceeds clip duration; nothing was changed.");
 
-          var verificationErrors = [];
-          try { levelProp.setTimeVarying(true); } catch(e) {}
-          ${keyframeCode}
-
-          if (verificationErrors.length) {
-            return __error("Premiere did not apply one or more audio keyframes: " + verificationErrors.join("; ") + ". Effect-property writes are known to no-op on some Premiere Pro 26.3 installations.");
+          ${AUDIO_KEYFRAME_READBACK}
+          var keys = [${plannedKeys}];
+          try {
+            audioKeys(levelProp);
+            var inTicks = audioTick(clip.inPoint.ticks);
+            var durationTicks = audioTick(clip.end.ticks) - audioTick(clip.start.ticks);
+            for (var k = 0; k < keys.length; k++) {
+              if (keys[k].offset > durationTicks) throw new Error("Key exceeds clip duration");
+              keys[k].time = new Time();
+              keys[k].time.ticks = String(audioTick(inTicks + keys[k].offset));
+            }
+          } catch (preflightError) { return __error("Audio keyframe storage or clock could not be read; nothing was changed. " + String(preflightError)); }
+          try {
+            levelProp.setTimeVarying(true);
+            for (var k = 0; k < keys.length; k++) {
+              var key = keys[k];
+              try { levelProp.addKey(key.time); } catch (addError) {}
+              try { levelProp.setValueAtKey(key.time, key.amplitude, 1); }
+              catch (writeError) { levelProp.setValueAtTime(key.time, key.amplitude, 1); }
+            }
+            for (var k = 0; k < keys.length; k++) audioVerify(levelProp, keys[k].time, keys[k].amplitude);
+          } catch (verificationError) {
+            return __jsonStringify({ success: false, error: "Audio keyframes could not be verified; inspect the clip before retrying. " + String(verificationError), data: { outcome: "committed_unverified", verified: false, mutationAttempted: true, timelineChanged: null } });
           }
-          return __result({ keyframesAdded: ${args.keyframes.length}, verified: true, clipName: clip.name });
+          return __result({ keyframesAdded: ${args.keyframes.length}, verified: true, renderVerified: false, outcome: "verified", clipName: clip.name });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -515,16 +623,35 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
         required: ["track_index", "muted"],
       },
       handler: async (args: { track_index: number; muted: boolean }) => {
+        if (!Number.isInteger(args.track_index) || args.track_index < 0 || typeof args.muted !== "boolean") {
+          return { success: false, error: "track_index must be a non-negative integer and muted must be a boolean" };
+        }
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
 
           if (${args.track_index} >= seq.audioTracks.numTracks) return __error("Track index out of range");
 
           var track = seq.audioTracks[${args.track_index}];
-          track.setMute(${args.muted ? 1 : 0});
-
-          return __result({ trackIndex: ${args.track_index}, muted: ${args.muted}, trackName: track.name });
+          function readMute() {
+            var state = track.isMuted();
+            if (state !== true && state !== false && state !== 0 && state !== 1) throw new Error("Unknown mute state");
+            return state === true || state === 1;
+          }
+          var before;
+          try { before = readMute(); } catch (e) { return __error("Cannot read track mute state; nothing was changed."); }
+          var writeError = "";
+          try { track.setMute(${args.muted ? 1 : 0}); } catch (e) { writeError = String(e); }
+          var after = null;
+          try { after = readMute(); } catch (e) {}
+          var data = { trackIndex: ${args.track_index}, muted: after, trackName: track.name, verified: false, outcome: "committed_unverified" };
+          if (after !== null && after !== before) data.timelineChanged = true;
+          if (after !== ${args.muted} || writeError) {
+            return __jsonStringify({ success: false, error: "Track mute could not be verified. Inspect the track before retrying. " + writeError, data: data });
+          }
+          data.verified = true;
+          data.outcome = "verified";
+          return __result(data);
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -596,7 +723,7 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           const lookup = await sendCommand(
             buildToolScript(`
               var item = __findProjectItem("${escaped}");
-              if (!item) return __error("Project item not found: ${escaped}");
+              if (!item) return __error("Project item not found: ${escaped}; nothing was changed.");
               var path = "";
               try { path = item.getMediaPath(); } catch(e) {}
               if (!path) return __error("Project item '${escaped}' has no media path — it may be a sequence, a bin, or a synthetic item such as a title or colour matte.");
@@ -781,28 +908,13 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
         if (!existsSync(mediaPath) || !statSync(mediaPath).isFile()) {
           return { success: false, error: `Media file not found on disk: ${mediaPath}` };
         }
+        let bytes: Buffer;
         try {
           const result = await execFileAsync("ffmpeg", [
             "-nostdin", "-hide_banner", "-loglevel", "error", "-i", mediaPath,
-            "-t", "1800", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "200", "-f", "s16le", "pipe:1",
+            "-t", "1800", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1",
           ], { encoding: "buffer", timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 128 * 1024 * 1024 }) as unknown as { stdout: Buffer };
-          const bytes = result.stdout;
-          const samples = new Int16Array(bytes.length >> 1);
-          for (let index = 0; index < samples.length; index++) samples[index] = bytes.readInt16LE(index * 2);
-          const measurement = analyzeBeatPcm(samples, 200);
-          const truncated = measurement.beatTimesSeconds.length > maxBeats;
-          return {
-            success: true,
-            data: {
-              ...measurement,
-              halfTimeBpm: Number((measurement.bpm / 2).toFixed(1)),
-              doubleTimeBpm: Number((measurement.bpm * 2).toFixed(1)),
-              reliable: measurement.confidence >= 0.35,
-              beatTimesSeconds: measurement.beatTimesSeconds.slice(0, maxBeats),
-              beatTimesTruncated: truncated,
-              verificationScope: "Local decoded-media estimate only. Low confidence and half/double-time ambiguity require human musical review; no markers, cuts, or Premiere changes are made.",
-            },
-          };
+          bytes = result.stdout;
         } catch (error) {
           const failure = error as { code?: string; killed?: boolean; stderr?: Buffer | string; message?: string };
           const detail = Buffer.isBuffer(failure.stderr) ? failure.stderr.toString("utf8") : (failure.stderr ?? failure.message ?? "");
@@ -812,6 +924,32 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
             ? `ffmpeg timed out after ${FFMPEG_TIMEOUT_MS / 1000}s during beat analysis.`
             : `ffmpeg could not decode media for beat analysis: ${String(detail).trim() || "unknown error"}` };
         }
+        let measurement: BeatMeasurement;
+        try {
+          const samples = new Int16Array(bytes.length >> 1);
+          for (let index = 0; index < samples.length; index++) samples[index] = bytes.readInt16LE(index * 2);
+          measurement = analyzeBeatPcm(samples, 4000);
+        } catch (error) {
+          // Only the analysis' own "no beat" outcomes are a musical result; any
+          // other exception is a real failure and is reported as one.
+          if (error instanceof NoBeatError) {
+            return { success: false, error: `No steady beat found: ${error.message}. The media decoded fine; it may be speech, a quiet or ambient bed, or free-tempo music.` };
+          }
+          return { success: false, error: `Beat analysis failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        const truncated = measurement.beatTimesSeconds.length > maxBeats;
+        return {
+          success: true,
+          data: {
+            ...measurement,
+            halfTimeBpm: Number((measurement.bpm / 2).toFixed(1)),
+            doubleTimeBpm: Number((measurement.bpm * 2).toFixed(1)),
+            reliable: measurement.confidence >= 0.35,
+            beatTimesSeconds: measurement.beatTimesSeconds.slice(0, maxBeats),
+            beatTimesTruncated: truncated,
+            verificationScope: "Local decoded-media estimate only. Low confidence and half/double-time ambiguity require human musical review; no markers, cuts, or Premiere changes are made.",
+          },
+        };
       },
     },
 
@@ -870,7 +1008,7 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           const escaped = escapeForExtendScript(args.project_item_id as string);
           const lookup = await sendCommand(buildToolScript(`
             var item = __findProjectItem("${escaped}");
-            if (!item) return __error("Project item not found: ${escaped}");
+            if (!item) return __error("Project item not found: ${escaped}; nothing was changed.");
             var path = "";
             try { path = item.getMediaPath(); } catch(e) {}
             if (!path) return __error("Project item has no local media path");
@@ -948,7 +1086,7 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
 
     normalize_loudness_file: {
       description:
-        "Create a new loudness-normalized media derivative with FFmpeg, then remeasure that exact output using EBU R128. Never overwrites the input or an existing output file.",
+        "Create a new loudness-normalized media derivative with FFmpeg, then remeasure that exact output using EBU R128. When the remeasured file misses the target or true-peak ceiling (AAC encoding can raise the true peak), it renders again with a lowered ceiling or offset target, up to max_attempts, keeps the best attempt and reports every attempt's measured I and TP. Never overwrites the input or an existing output file.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -957,61 +1095,170 @@ export function getAudioTools(bridgeOptions: BridgeOptions) {
           target_lufs: { type: "number", description: "Integrated loudness target from -70 through -5 LUFS (default: -16)" },
           max_true_peak_dbfs: { type: "number", description: "True-peak ceiling from -9 through 0 dBFS (default: -1.5)" },
           tolerance_lu: { type: "number", description: "Post-render integrated-loudness tolerance (default: 1 LU)" },
+          max_attempts: { type: "integer", minimum: 1, maximum: 4, description: "Renders allowed when the remeasured output misses the target or true-peak ceiling, for example after AAC encoding raises the true peak (default: 2; 1 disables retries)" },
         },
         required: ["input_path", "output_path"],
       },
-      handler: async (args: { input_path: string; output_path: string; target_lufs?: number; max_true_peak_dbfs?: number; tolerance_lu?: number }) => {
+      handler: async (args: { input_path: string; output_path: string; target_lufs?: number; max_true_peak_dbfs?: number; tolerance_lu?: number; max_attempts?: number }) => {
         const inputPath = resolve(args.input_path);
         const outputPath = resolve(args.output_path);
         const target = args.target_lufs ?? -16;
         const truePeak = args.max_true_peak_dbfs ?? -1.5;
         const tolerance = args.tolerance_lu ?? 1;
+        const maxAttempts = args.max_attempts ?? 2;
         if (!Number.isFinite(target) || target < -70 || target > -5) return { success: false, error: "target_lufs must be from -70 through -5" };
         if (!Number.isFinite(truePeak) || truePeak < -9 || truePeak > 0) return { success: false, error: "max_true_peak_dbfs must be from -9 through 0" };
         if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 5) return { success: false, error: "tolerance_lu must be from 0 through 5" };
+        if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 4) return { success: false, error: "max_attempts must be an integer from 1 through 4" };
         if (inputPath === outputPath) return { success: false, error: "output_path must differ from input_path" };
         if (!existsSync(inputPath) || !statSync(inputPath).isFile()) return { success: false, error: `Input file not found: ${inputPath}` };
         if (existsSync(outputPath)) return { success: false, error: `Output already exists and will not be overwritten: ${outputPath}` };
         if (!existsSync(dirname(outputPath)) || !statSync(dirname(outputPath)).isDirectory()) return { success: false, error: `Output directory does not exist: ${dirname(outputPath)}` };
 
-        try {
-          await execFileAsync("ffmpeg", [
-            "-nostdin", "-hide_banner", "-n", "-i", inputPath,
-            "-af", `loudnorm=I=${target}:TP=${truePeak}:LRA=11`,
-            "-c:v", "copy", outputPath,
-          ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
-        } catch (error) {
+        // Two-pass loudnorm: measure, then apply linearly with the measured values.
+        // Single-pass (dynamic) loudnorm undershot a dense, clipped music-video mix by
+        // 1.6 LU and resampled its audio to 96 kHz at a lower bitrate (live check).
+        const failureOf = (error: unknown): { success: false; error: string } => {
           const failure = error as { code?: string; killed?: boolean; stderr?: string; message?: string };
           if (failure.code === "ENOENT") return { success: false, error: "ffmpeg was not found on PATH" };
           if (failure.killed) return { success: false, error: "ffmpeg loudness normalization timed out after 300 seconds" };
           return { success: false, error: `ffmpeg normalization failed: ${(failure.stderr ?? failure.message ?? "unknown error").split(/\r?\n/).filter(Boolean).slice(-3).join(" ")}` };
-        }
-        if (!existsSync(outputPath) || !statSync(outputPath).isFile() || statSync(outputPath).size < 1) {
-          return { success: false, error: "ffmpeg reported completion but no non-empty output file exists" };
-        }
-
-        let measurement: LoudnessMeasurement;
+        };
+        const source = await probeAudioStream(inputPath);
+        if (!source) return { success: false, error: `No audio stream found in ${inputPath}` };
+        let firstPass: LoudnormStats;
         try {
           const measured = await execFileAsync("ffmpeg", [
-            "-nostdin", "-hide_banner", "-i", outputPath,
-            "-vn", "-sn", "-dn", "-af", "ebur128=peak=true", "-f", "null", "-",
+            "-nostdin", "-hide_banner", "-i", inputPath, "-vn", "-sn", "-dn",
+            "-af", `loudnorm=I=${target}:TP=${truePeak}:LRA=11:print_format=json`, "-f", "null", "-",
           ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
-          measurement = parseEbur128Summary(measured.stderr);
+          firstPass = parseLoudnormJson(measured.stderr);
         } catch (error) {
-          return { success: false, error: `Normalized output exists but EBU R128 verification failed: ${error instanceof Error ? error.message : String(error)}` };
+          return failureOf(error);
         }
-        if (measurement.integratedLufs === null) return { success: false, error: "Normalized output exists but integrated loudness was not measurable" };
-        const deltaLu = Number((measurement.integratedLufs - target).toFixed(1));
-        const loudnessPass = Math.abs(deltaLu) <= tolerance;
-        const truePeakPass = measurement.truePeakDbfs !== null && measurement.truePeakDbfs <= truePeak;
+        // A loudness-range target below the source's own range forces dynamic mode;
+        // allow the source's range so the gain can stay linear.
+        const lra = Math.min(50, Math.max(11, Math.ceil(Number(firstPass.input_lra)) + 1));
+        const extension = extname(outputPath).toLowerCase();
+        const aacContainer = [".mp4", ".m4a", ".mov", ".m4v", ".aac"].includes(extension);
+        const audioCodecArgs = aacContainer
+          ? ["-c:a", "aac", "-b:a", `${Math.max(192, Math.round((source.bitRate ?? 192000) / 1000))}k`]
+          : [];
+        type Attempt = { path: string; appliedTargetLufs: number; appliedTruePeakDbfs: number; measured: LoudnessMeasurement; deltaLu: number; loudnessPass: boolean; truePeakPass: boolean; normalizationType: string | null };
+        // Apply with the given targets to a new file, then remeasure that file.
+        const render = async (destination: string, appliedTarget: number, appliedTruePeak: number): Promise<Attempt | { success: false; error: string }> => {
+          const filter = [
+            `loudnorm=I=${appliedTarget}`, `TP=${appliedTruePeak}`, `LRA=${lra}`,
+            `measured_I=${firstPass.input_i}`, `measured_TP=${firstPass.input_tp}`, `measured_LRA=${firstPass.input_lra}`,
+            `measured_thresh=${firstPass.input_thresh}`, `offset=${firstPass.target_offset}`, "linear=true", "print_format=json",
+          ].join(":");
+          let secondPass: LoudnormStats;
+          try {
+            const applied = await execFileAsync("ffmpeg", [
+              "-nostdin", "-hide_banner", "-n", "-i", inputPath,
+              "-af", filter, "-ar", String(source.sampleRate ?? 48000), ...audioCodecArgs,
+              "-c:v", "copy", destination,
+            ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+            secondPass = parseLoudnormJson(applied.stderr);
+          } catch (error) {
+            return failureOf(error);
+          }
+          if (!existsSync(destination) || !statSync(destination).isFile() || statSync(destination).size < 1) {
+            return { success: false, error: "ffmpeg reported completion but no non-empty output file exists" };
+          }
+          let measurement: LoudnessMeasurement;
+          try {
+            const measured = await execFileAsync("ffmpeg", [
+              "-nostdin", "-hide_banner", "-i", destination,
+              "-vn", "-sn", "-dn", "-af", "ebur128=peak=true", "-f", "null", "-",
+            ], { timeout: FFMPEG_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+            measurement = parseEbur128Summary(measured.stderr);
+          } catch (error) {
+            return { success: false, error: `Normalized output exists but EBU R128 verification failed: ${error instanceof Error ? error.message : String(error)}` };
+          }
+          if (measurement.integratedLufs === null) return { success: false, error: "Normalized output exists but integrated loudness was not measurable" };
+          const deltaLu = Number((measurement.integratedLufs - target).toFixed(1));
+          return {
+            path: destination, appliedTargetLufs: appliedTarget, appliedTruePeakDbfs: appliedTruePeak, measured: measurement, deltaLu,
+            loudnessPass: Math.abs(deltaLu) <= tolerance,
+            truePeakPass: measurement.truePeakDbfs !== null && measurement.truePeakDbfs <= truePeak,
+            normalizationType: secondPass.normalization_type ?? null,
+          };
+        };
+        const first = await render(outputPath, target, truePeak);
+        if ("success" in first) return first;
+        const attempts: Attempt[] = [first];
+        let best = first;
+        // Lossy encoding (AAC) can push the true peak over the ceiling or move the
+        // integrated loudness. Each retry renders to a private file beside the
+        // output, lowering the ceiling by the measured overshoot and offsetting the
+        // target by the measured miss, and keeps whichever attempt passes.
+        while (attempts.length < maxAttempts && !(best.loudnessPass && best.truePeakPass)) {
+          const last = attempts[attempts.length - 1];
+          const overshoot = last.measured.truePeakDbfs === null ? 0.5 : Math.max(0, last.measured.truePeakDbfs - truePeak);
+          const nextTruePeak = Number(Math.max(-9, last.appliedTruePeakDbfs - (last.truePeakPass ? 0 : overshoot + 0.1)).toFixed(2));
+          const nextTarget = Number(Math.min(-5, Math.max(-70, last.appliedTargetLufs - (last.loudnessPass ? 0 : last.deltaLu))).toFixed(2));
+          const retryPath = join(dirname(outputPath), `.${basename(outputPath, extension)}.retry-${attempts.length + 1}-${process.pid}${extension}`);
+          const retry = await render(retryPath, nextTarget, nextTruePeak);
+          if ("success" in retry) {
+            rmSync(retryPath, { force: true });
+            break;
+          }
+          attempts.push(retry);
+          const passes = (attempt: Attempt) => Number(attempt.loudnessPass) + Number(attempt.truePeakPass);
+          if (passes(retry) >= passes(best)) {
+            // Keep the previous valid attempt recoverable until the better file
+            // is in place. A direct remove-then-rename could lose the only valid
+            // output when antivirus, permissions or another process blocks rename.
+            const previousPath = `${retryPath}.previous`;
+            let movedPrevious = false;
+            try {
+              renameSync(outputPath, previousPath);
+              movedPrevious = true;
+              renameSync(retryPath, outputPath);
+              rmSync(previousPath, { force: true });
+              best = retry;
+            } catch {
+              if (movedPrevious && !existsSync(outputPath) && existsSync(previousPath)) {
+                try { renameSync(previousPath, outputPath); } catch { /* reported below */ }
+              }
+              if (existsSync(outputPath)) {
+                rmSync(retryPath, { force: true });
+                rmSync(previousPath, { force: true });
+                break;
+              }
+              return {
+                success: false,
+                error: `Could not replace the first normalized output safely. The previous attempt remains at ${previousPath}; move it back to ${outputPath} before retrying.`,
+              };
+            }
+          } else {
+            rmSync(retryPath, { force: true });
+          }
+        }
+        const loudnessPass = best.loudnessPass;
+        const truePeakPass = best.truePeakPass;
         return {
           success: true,
           data: {
             inputPath, outputPath, outputSizeBytes: statSync(outputPath).size,
             target: { integratedLufs: target, maxTruePeakDbfs: truePeak, toleranceLu: tolerance },
-            measured: measurement, deltaLu,
+            measured: best.measured, deltaLu: best.deltaLu,
+            input: { integratedLufs: Number(firstPass.input_i), truePeakDbfs: Number(firstPass.input_tp), loudnessRangeLu: Number(firstPass.input_lra) },
+            normalizationType: best.normalizationType,
+            audio: { sampleRate: source.sampleRate ?? 48000, codec: aacContainer ? "aac" : "ffmpeg default for the container", bitrateKbps: aacContainer ? Math.max(192, Math.round((source.bitRate ?? 192000) / 1000)) : null },
             verified: loudnessPass && truePeakPass,
             loudnessPass, truePeakPass,
+            attempts: attempts.map((attempt, index) => ({
+              attempt: index + 1,
+              appliedTargetLufs: attempt.appliedTargetLufs,
+              appliedTruePeakDbfs: attempt.appliedTruePeakDbfs,
+              integratedLufs: attempt.measured.integratedLufs,
+              truePeakDbfs: attempt.measured.truePeakDbfs,
+              loudnessPass: attempt.loudnessPass,
+              truePeakPass: attempt.truePeakPass,
+              kept: attempt === best,
+            })),
             verificationScope: "The new output file exists and was remeasured locally. This does not prove subjective mix quality, rights, or Premiere timeline state.",
           },
         };

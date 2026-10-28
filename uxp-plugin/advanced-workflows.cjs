@@ -15,11 +15,13 @@
   const MAX_SEQUENCES = 1024;
   const MAX_BIN_CHILDREN = 1024;
   const MAX_TIMELINE_TRACKS = 64;
+  const MAX_TRACK_ITEMS_FOR_PLACEMENT = 2048;
   const MAX_TIMELINE_ITEMS = 512;
   const MAX_DISPLAY_FORMAT_CODE = 2147483647;
 
   function createAdvancedWorkflowDefinitions(deps) {
     const ppro = deps.ppro, Protocol = deps.Protocol, workspace = deps.workspace, events = deps.events;
+    const FrameTime = deps.FrameTime || (typeof require === "function" ? require("./frame-time.cjs") : globalThis.PremiereMcpFrameTime);
     const appendLocks = new Map();
     const parameterTimeVaryingLocks = new Map();
     const pointParameterLocks = new Map();
@@ -130,6 +132,14 @@
       return ppro.TickTime.createWithSeconds(value);
     }
 
+    async function sequenceFrameTime(sequence, seconds, name) {
+      let timebase;
+      try { timebase = String(await sequence.getTimebase()); } catch (_) { timebase = ""; }
+      if (!/^\d{1,18}$/.test(timebase) || BigInt(timebase) <= 0n) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not return a valid sequence ticksPerFrame timebase");
+      try { return { ...FrameTime.snapSeconds(finiteNumber(seconds, name || "seconds", -86400, 86400), timebase), ticksPerFrame: timebase }; }
+      catch (_) { throw commandError("UXP_INVALID_ARGUMENT", (name || "seconds") + " could not be snapped to the sequence frame grid"); }
+    }
+
     function tickSeconds(value) {
       const seconds = value && Number(value.seconds);
       return Number.isFinite(seconds) ? seconds : null;
@@ -148,9 +158,15 @@
 
     async function projectItemId(item) {
       if (!item) return "";
-      if (typeof item.getId === "function") {
+      // Premiere 26.5 returns the project root and other folder/clip views without
+      // getId; ProjectItem.cast exposes it, as in the sibling identity helpers.
+      let identity = typeof item.getId === "function" ? item : null;
+      if (!identity && ppro.ProjectItem && typeof ppro.ProjectItem.cast === "function") {
+        try { identity = ppro.ProjectItem.cast(item) || null; } catch (_) {}
+      }
+      if (identity && typeof identity.getId === "function") {
         try {
-          const value = await item.getId();
+          const value = await identity.getId();
           if (value != null && String(value)) return String(value);
         } catch (_) {}
       }
@@ -264,12 +280,16 @@
       return items;
     }
 
-    async function findProjectItem(project, wantedId) {
+    async function findProjectItem(project, wantedId, options) {
       const id = boundedString(wantedId, "projectItemId", 512);
-      try {
-        const selected = await selectedProjectItems(project);
-        for (const item of selected) if (await projectItemId(item) === id) return item;
-      } catch (_) {}
+      // The selection is a fast path for finding a live item, but it can still
+      // hold an item that was just removed, so absence checks skip it.
+      if (!(options && options.treeOnly)) {
+        try {
+          const selected = await selectedProjectItems(project);
+          for (const item of selected) if (await projectItemId(item) === id) return item;
+        } catch (_) {}
+      }
       const root = await project.getRootItem(), queue = root ? [root] : [];
       let visited = 0;
       while (queue.length) {
@@ -330,6 +350,15 @@
       const wanted = boundedString(sequenceId, "sequenceId", 128), sequences = await boundedSequences(project);
       for (const sequence of sequences) if (guidString(sequence.guid) === wanted) return sequence;
       throw commandError("UXP_TARGET_NOT_FOUND", "sequenceId was not found");
+    }
+
+    async function trackItemsOn(sequence, mediaType, trackIndex) {
+      const title = mediaType === "video" ? "Video" : "Audio";
+      const count = await sequence["get" + title + "TrackCount"]();
+      if (trackIndex >= count) throw commandError("UXP_TARGET_NOT_FOUND", mediaType + " trackIndex is out of range");
+      const track = await sequence["get" + title + "Track"](trackIndex), itemType = ppro.Constants && ppro.Constants.TrackItemType;
+      if (!track || !itemType || itemType.CLIP == null || typeof track.getTrackItems !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "Clip track-item APIs are unavailable");
+      return Array.from(await track.getTrackItems(itemType.CLIP, false) || []);
     }
 
     async function trackItemAt(sequence, mediaType, trackIndex, clipIndex) {
@@ -500,9 +529,10 @@
       const ownerType = args.ownerType == null ? "sequence" : enumValue(args.ownerType, "ownerType", ["sequence", "projectItem"]);
       const project = await activeProject(includeMutationFields);
       const owner = ownerType === "sequence" ? await resolveSequence(project, args.sequenceId) : asClip(await resolveProjectItem(project, args.projectItemId, true), "projectItemId");
+      const sequence = ownerType === "sequence" ? owner : (typeof project.getActiveSequence === "function" ? await project.getActiveSequence() : null);
       const collection = await ppro.Markers.getMarkers(owner);
       if (!collection || typeof collection.getMarkers !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "Premiere did not return a marker collection");
-      return { project, owner, ownerType, collection };
+      return { project, owner, ownerType, sequence: sequence || null, collection };
     }
 
     async function markerSnapshot(marker) {
@@ -548,16 +578,54 @@
     async function addMarker(args) {
       const context = await markerContext(args, true), name = boundedString(args.name, "name", 255);
       const markerType = args.markerType == null ? String(ppro.Marker && ppro.Marker.MARKER_TYPE_COMMENT || "Comment") : boundedString(args.markerType, "markerType", 128);
-      const start = tick(finiteNumber(args.startSeconds == null ? 0 : args.startSeconds, "startSeconds", 0, 86400), "startSeconds"), duration = tick(finiteNumber(args.durationSeconds == null ? 0 : args.durationSeconds, "durationSeconds", 0, 86400), "durationSeconds");
+      const requestedStart = finiteNumber(args.startSeconds == null ? 0 : args.startSeconds, "startSeconds", 0, 86400), requestedDuration = finiteNumber(args.durationSeconds == null ? 0 : args.durationSeconds, "durationSeconds", 0, 86400);
+      const startTime = context.sequence ? await sequenceFrameTime(context.sequence, requestedStart, "startSeconds") : { appliedSeconds: requestedStart };
+      const durationTime = context.sequence ? await sequenceFrameTime(context.sequence, requestedDuration, "durationSeconds") : { appliedSeconds: requestedDuration };
+      const start = tick(startTime.appliedSeconds, "startSeconds"), duration = tick(durationTime.appliedSeconds, "durationSeconds");
       const comments = args.comments == null ? "" : boundedStringAllowEmpty(args.comments, "comments", 4000);
+      const colorIndex = args.colorIndex == null ? null : boundedInt(args.colorIndex, "colorIndex", 0, 6);
       return withAppendLock(await markerLockKey(context), async () => {
         const before = await markerList(context.collection);
         assertAppendCapacity(before, MAX_MARKERS, "Marker creation");
         context.project.lockedAccess(() => {
           commitActions(context.project, "Add marker", [context.collection.createAddMarkerAction(name, markerType, start, duration, comments)]);
         });
-        const after = await markerList(context.collection), added = after.filter((value) => !before.some((old) => old.guid === value.guid));
-        return mutationResult(added.length === 1, { added: true, marker: added[0] || null, beforeCount: before.length, afterCount: after.length }, "marker_guid_readback", "Add marker");
+        let undoSteps = 1;
+        try {
+        let after = await markerList(context.collection), added = after.filter((value) => !before.some((old) => old.guid === value.guid));
+        // createAddMarkerAction takes no colour, so a requested colour is set on the new marker
+        // afterwards; without this the colour was dropped while the add still reported verified.
+        if (added.length === 1 && colorIndex != null) {
+          const created = await findMarker(context.collection, added[0].guid, null);
+          context.project.lockedAccess(() => {
+            commitActions(context.project, "Set marker color", [created.createSetColorByIndexAction(colorIndex)]);
+            undoSteps = 2;
+          });
+          after = await markerList(context.collection);
+          added = after.filter((value) => !before.some((old) => old.guid === value.guid));
+        }
+        const marker = added[0] || null, mismatches = [];
+        if (marker) {
+          if (marker.name !== name) mismatches.push("name");
+          if (marker.comments !== comments) mismatches.push("comments");
+          if (marker.type !== markerType) mismatches.push("markerType");
+          const startMatches = context.sequence ? FrameTime.withinHalfFrame(marker.startSeconds, startTime.appliedSeconds, startTime.ticksPerFrame) : numbersEqual(marker.startSeconds, startTime.appliedSeconds);
+          const durationMatches = context.sequence ? FrameTime.withinHalfFrame(marker.durationSeconds, durationTime.appliedSeconds, durationTime.ticksPerFrame) : numbersEqual(marker.durationSeconds, durationTime.appliedSeconds);
+          if (!startMatches) mismatches.push("startSeconds");
+          if (!durationMatches) mismatches.push("durationSeconds");
+          if (colorIndex != null && marker.colorIndex !== colorIndex) mismatches.push("colorIndex");
+        }
+        return mutationResult(added.length === 1 && mismatches.length === 0, {
+          added: added.length === 1, marker, beforeCount: before.length, afterCount: after.length, undoSteps,
+          requestedStartSeconds: requestedStart, appliedStartSeconds: startTime.appliedSeconds,
+          requestedDurationSeconds: requestedDuration, appliedDurationSeconds: durationTime.appliedSeconds,
+          ...(mismatches.length ? { mismatchedFields: mismatches } : {})
+        }, "marker_field_readback", "Add marker");
+        } catch (error) {
+          return mutationResult(false, { added: true, committed: true, partial: true, beforeCount: before.length, undoSteps,
+            readbackError: error && error.message ? error.message : String(error),
+            nextStep: "Inspect markers before retrying. Marker creation committed; the requested fields could not all be verified." }, "marker_field_readback", "Add marker");
+        }
       });
     }
 
@@ -571,18 +639,21 @@
       const prefix = args.namePrefix == null ? "Beat" : boundedString(args.namePrefix, "namePrefix", 64);
       const comments = args.comments == null ? "" : boundedStringAllowEmpty(args.comments, "comments", 1000);
       const markerType = args.markerType == null ? String(ppro.Marker && ppro.Marker.MARKER_TYPE_COMMENT || "Comment") : boundedString(args.markerType, "markerType", 128);
-      const times = [], seen = new Set();
+      const requestedTimes = [], seen = new Set();
       for (let index = 0; index < args.beatTimesSeconds.length; index++) {
         const value = finiteNumber(args.beatTimesSeconds[index], "beatTimesSeconds[" + index + "]", 0, 86400);
         const positioned = value + offset;
         if (positioned < 0 || positioned > 86400) throw commandError("UXP_INVALID_ARGUMENT", "offset beat times must remain between 0 and 86400 seconds");
         const key = positioned.toFixed(9);
         if (seen.has(key)) throw commandError("UXP_INVALID_ARGUMENT", "offset beat times must be unique");
-        seen.add(key); times.push(positioned);
+        seen.add(key); requestedTimes.push(positioned);
       }
-      for (let index = 1; index < times.length; index++) {
-        if (times[index] <= times[index - 1]) throw commandError("UXP_INVALID_ARGUMENT", "beatTimesSeconds must be strictly increasing");
+      for (let index = 1; index < requestedTimes.length; index++) {
+        if (requestedTimes[index] <= requestedTimes[index - 1]) throw commandError("UXP_INVALID_ARGUMENT", "beatTimesSeconds must be strictly increasing");
       }
+      const snappedTimes = await Promise.all(requestedTimes.map((value) => sequenceFrameTime(context.sequence, value, "beat time")));
+      const times = snappedTimes.map((value) => value.appliedSeconds);
+      if (times.some((value, index) => index > 0 && value <= times[index - 1])) throw commandError("UXP_INVALID_ARGUMENT", "beatTimesSeconds collapse to duplicate or unordered sequence frames after snapping");
       return withAppendLock(await markerLockKey(context), async () => {
         const before = boundedMarkers(context.collection);
         if (before.length + times.length > MAX_MARKERS) throw commandError("UXP_COLLECTION_LIMIT", "Beat marker creation would exceed the " + MAX_MARKERS + " marker limit");
@@ -603,13 +674,19 @@
         const addedGuids = new Set(added.map((marker) => marker.guid));
         const verified = added.length === times.length && addedGuids.size === added.length
           && added.every((marker, index) => Boolean(marker.guid) && marker.name === prefix + " " + (index + 1)
-            && marker.startSeconds != null && numbersEqual(marker.startSeconds, times[index]));
-        return mutationResult(verified, { added: added.length, markers: added, beforeCount: before.length, afterCount: afterMarkers.length, offsetSeconds: offset }, "beat_marker_guid_and_time_readback", "Add beat grid markers");
+            && marker.startSeconds != null && FrameTime.withinHalfFrame(marker.startSeconds, times[index], snappedTimes[index].ticksPerFrame));
+        return mutationResult(verified, { added: added.length, markers: added, beforeCount: before.length, afterCount: afterMarkers.length, offsetSeconds: offset, requestedBeatTimesSeconds: requestedTimes, appliedBeatTimesSeconds: times }, "beat_marker_guid_and_time_readback", "Add beat grid markers");
       });
     }
 
     async function updateMarker(args) {
       const context = await markerContext(args, true);
+      const requestedStart = args.startSeconds == null ? null : finiteNumber(args.startSeconds, "startSeconds", 0, 86400);
+      const requestedDuration = args.durationSeconds == null ? null : finiteNumber(args.durationSeconds, "durationSeconds", 0, 86400);
+      const startTime = requestedStart == null || !context.sequence ? null : await sequenceFrameTime(context.sequence, requestedStart, "startSeconds");
+      const durationTime = requestedDuration == null || !context.sequence ? null : await sequenceFrameTime(context.sequence, requestedDuration, "durationSeconds");
+      const appliedStart = startTime ? startTime.appliedSeconds : requestedStart;
+      const appliedDuration = durationTime ? durationTime.appliedSeconds : requestedDuration;
       const requested = [args.name, args.comments, args.markerType, args.durationSeconds, args.startSeconds, args.colorIndex].filter((value) => value != null);
       if (!requested.length) throw commandError("UXP_INVALID_ARGUMENT", "Provide at least one marker field to update");
       return withAppendLock(await markerLockKey(context), async () => {
@@ -619,8 +696,8 @@
           if (args.name != null) actions.push(marker.createSetNameAction(boundedString(args.name, "name", 255)));
           if (args.comments != null) actions.push(marker.createSetCommentsAction(boundedStringAllowEmpty(args.comments, "comments", 4000)));
           if (args.markerType != null) actions.push(marker.createSetTypeAction(boundedString(args.markerType, "markerType", 128)));
-          if (args.durationSeconds != null) actions.push(marker.createSetDurationAction(tick(finiteNumber(args.durationSeconds, "durationSeconds", 0, 86400), "durationSeconds")));
-          if (args.startSeconds != null) actions.push(context.collection.createMoveMarkerAction(marker, tick(finiteNumber(args.startSeconds, "startSeconds", 0, 86400), "startSeconds")));
+          if (args.durationSeconds != null) actions.push(marker.createSetDurationAction(tick(appliedDuration, "durationSeconds")));
+          if (args.startSeconds != null) actions.push(context.collection.createMoveMarkerAction(marker, tick(appliedStart, "startSeconds")));
           if (args.colorIndex != null) actions.push(marker.createSetColorByIndexAction(boundedInt(args.colorIndex, "colorIndex", 0, 6)));
           commitActions(context.project, "Update marker", actions);
         });
@@ -628,10 +705,10 @@
         const verified = (args.name == null || snapshot.name === args.name)
           && (args.comments == null || snapshot.comments === args.comments)
           && (args.markerType == null || snapshot.type === args.markerType)
-          && (args.durationSeconds == null || numbersEqual(snapshot.durationSeconds, args.durationSeconds))
-          && (args.startSeconds == null || numbersEqual(snapshot.startSeconds, args.startSeconds))
+          && (args.durationSeconds == null || (durationTime ? FrameTime.withinHalfFrame(snapshot.durationSeconds, appliedDuration, durationTime.ticksPerFrame) : numbersEqual(snapshot.durationSeconds, appliedDuration)))
+          && (args.startSeconds == null || (startTime ? FrameTime.withinHalfFrame(snapshot.startSeconds, appliedStart, startTime.ticksPerFrame) : numbersEqual(snapshot.startSeconds, appliedStart)))
           && (args.colorIndex == null || snapshot.colorIndex === args.colorIndex);
-        return mutationResult(verified, { updated: true, marker: snapshot }, "marker_field_readback", "Update marker");
+        return mutationResult(verified, { updated: true, marker: snapshot, ...(requestedStart == null ? {} : { requestedStartSeconds: requestedStart, appliedStartSeconds: appliedStart }), ...(requestedDuration == null ? {} : { requestedDurationSeconds: requestedDuration, appliedDurationSeconds: appliedDuration }) }, "marker_field_readback", "Update marker");
       });
     }
 
@@ -778,7 +855,9 @@
 
     async function removeProjectItem(args) {
       assertObject(args); assertOnlyKeys(args, ["projectItemId", "expectedName", "operationId"]);
-      const project = await activeProject(true), item = await resolveProjectItem(project, args.projectItemId, true), before = await projectItemSnapshot(item);
+      // Removal is destructive, so it never falls back to whatever is selected.
+      if (args.projectItemId == null) throw commandError("UXP_INVALID_ARGUMENT", "projectItemId is required to remove a project item");
+      const project = await activeProject(true), item = await findProjectItem(project, args.projectItemId), before = await projectItemSnapshot(item);
       assertExpected(before.name, args.expectedName, "UXP_STALE_PROJECT_ITEM", "Project item name");
       let parent = await project.getRootItem();
       try { if (typeof item.getParentBin === "function") parent = asFolder(await item.getParentBin(), "current parent"); } catch (_) {}
@@ -786,7 +865,7 @@
         commitActions(project, "Remove project item", [parent.createRemoveItemAction(item)]);
       });
       let verified = false;
-      try { await findProjectItem(project, before.id); } catch (error) { if (error && error.code === "UXP_TARGET_NOT_FOUND") verified = true; }
+      try { await findProjectItem(project, before.id, { treeOnly: true }); } catch (error) { if (error && error.code === "UXP_TARGET_NOT_FOUND") verified = true; }
       return mutationResult(verified, { removed: true, item: before }, "project_item_absence_readback", "Remove project item");
     }
 
@@ -1011,7 +1090,7 @@
     async function pointParameterSnapshot(context) {
       const projectId = guidString(context.project && context.project.guid), sequenceId = guidString(context.sequence && context.sequence.guid);
       if (!projectId || !sequenceId) throw commandError("UXP_INVALID_HOST_STATE", "Premiere did not provide stable project and sequence identities for the PointF parameter");
-      const point = pointValue(keyframeValue(await context.param.getStartValue()), "Premiere parameter start value");
+      const point = hostParameterValue(keyframeValue(await context.param.getStartValue()), "point");
       return {
         projectId, sequenceId, mediaType: context.mediaType, trackIndex: context.trackIndex, clipIndex: context.clipIndex,
         componentIndex: context.componentIndex, componentId: context.componentId, paramIndex: context.paramIndex,
@@ -1193,7 +1272,7 @@
     async function colorParameterSnapshot(context) {
       const projectId = guidString(context.project && context.project.guid), sequenceId = guidString(context.sequence && context.sequence.guid);
       if (!projectId || !sequenceId) throw commandError("UXP_INVALID_HOST_STATE", "Premiere did not provide stable project and sequence identities for the Color parameter");
-      const color = colorValue(keyframeValue(await context.param.getStartValue()), "Premiere parameter start value");
+      const color = hostParameterValue(keyframeValue(await context.param.getStartValue()), "color");
       return {
         projectId, sequenceId, mediaType: context.mediaType, trackIndex: context.trackIndex, clipIndex: context.clipIndex,
         componentIndex: context.componentIndex, componentId: context.componentId, paramIndex: context.paramIndex,
@@ -1518,7 +1597,11 @@
       });
       let verified = false, readback = null;
       try { const keyframe = context.param.getKeyframePtr(tick(timeSeconds)); readback = await keyframe.getTemporalInterpolationMode(); verified = readback === mode; } catch (_) {}
-      return mutationResult(verified, { updated: true, interpolation: modeName, interpolationValue: readback }, "keyframe_interpolation_readback", "Set keyframe interpolation");
+      return mutationResult(verified, {
+        updated: true, interpolation: modeName, interpolationValue: readback,
+        renderVerified: false,
+        renderHonesty: "Verification covers the stored interpolation mode only. Stored curves are not render proof. On Premiere 26.5.2 macOS, an actual H.264 export and QE PNG stills composited over black both distinguished linear, hold and bezier. Read without their alpha channel, those stills look identical across modes, which matches the earlier still-capture reports in #771. Verify curves with a short video export, or with PNG stills composited over black."
+      }, "keyframe_interpolation_readback", "Set keyframe interpolation");
     }
 
     async function trackItemContext(args, mutation) {
@@ -1617,25 +1700,31 @@
       if (args.moveBySeconds != null && (args.startSeconds != null || args.endSeconds != null)) throw commandError("UXP_INVALID_ARGUMENT", "moveBySeconds cannot be combined with startSeconds or endSeconds");
       const requested = [args.moveBySeconds, args.startSeconds, args.endSeconds, args.inSeconds, args.outSeconds, args.disabled, args.name].filter((value) => value != null);
       if (!requested.length) throw commandError("UXP_INVALID_ARGUMENT", "Provide at least one track-item field to update");
+      const moveTime = args.moveBySeconds == null ? null : await sequenceFrameTime(context.sequence, args.moveBySeconds, "moveBySeconds");
+      const startTime = args.startSeconds == null ? null : await sequenceFrameTime(context.sequence, finiteNumber(args.startSeconds, "startSeconds", 0, 86400), "startSeconds");
+      const endTime = args.endSeconds == null ? null : await sequenceFrameTime(context.sequence, finiteNumber(args.endSeconds, "endSeconds", 0, 86400), "endSeconds");
+      const appliedArgs = { ...args, ...(moveTime ? { moveBySeconds: moveTime.appliedSeconds } : {}), ...(startTime ? { startSeconds: startTime.appliedSeconds } : {}), ...(endTime ? { endSeconds: endTime.appliedSeconds } : {}) };
       context.project.lockedAccess(() => {
         const actions = [];
-        if (args.moveBySeconds != null) actions.push(context.item.createMoveAction(tick(args.moveBySeconds, "moveBySeconds")));
-        if (args.startSeconds != null) actions.push(context.item.createSetStartAction(tick(finiteNumber(args.startSeconds, "startSeconds", 0, 86400), "startSeconds")));
-        if (args.endSeconds != null) actions.push(context.item.createSetEndAction(tick(finiteNumber(args.endSeconds, "endSeconds", 0, 86400), "endSeconds")));
+        if (moveTime) actions.push(context.item.createMoveAction(tick(moveTime.appliedSeconds, "moveBySeconds")));
+        if (startTime) actions.push(context.item.createSetStartAction(tick(startTime.appliedSeconds, "startSeconds")));
+        if (endTime) actions.push(context.item.createSetEndAction(tick(endTime.appliedSeconds, "endSeconds")));
         if (args.inSeconds != null) actions.push(context.item.createSetInPointAction(tick(finiteNumber(args.inSeconds, "inSeconds", 0, 86400), "inSeconds")));
         if (args.outSeconds != null) actions.push(context.item.createSetOutPointAction(tick(finiteNumber(args.outSeconds, "outSeconds", 0, 86400), "outSeconds")));
         if (args.disabled != null) actions.push(context.item.createSetDisabledAction(requiredBoolean(args.disabled, "disabled")));
         if (args.name != null) actions.push(context.item.createSetNameAction(boundedString(args.name, "name", 255)));
         commitActions(context.project, "Update timeline item", actions);
       });
-      const after = await trackItemSnapshot(context), verified = trackItemUpdateMatches(before, after, args);
-      return mutationResult(verified, { updated: true, before, after, changedFields: requested.length }, "track_item_readback", "Update timeline item");
+      const after = await trackItemSnapshot(context), verified = trackItemUpdateMatches(before, after, appliedArgs, moveTime?.ticksPerFrame || startTime?.ticksPerFrame || endTime?.ticksPerFrame);
+      return mutationResult(verified, { updated: true, before, after, changedFields: requested.length, requestedTimelineTimes: { moveBySeconds: args.moveBySeconds, startSeconds: args.startSeconds, endSeconds: args.endSeconds }, appliedTimelineTimes: { moveBySeconds: moveTime && moveTime.appliedSeconds, startSeconds: startTime && startTime.appliedSeconds, endSeconds: endTime && endTime.appliedSeconds } }, "track_item_readback", "Update timeline item");
     }
 
     async function makeSplitEdit(args) {
       assertObject(args); assertOnlyKeys(args, ["kind", "audioTrackIndex", "audioClipIndex", "videoTrackIndex", "videoClipIndex", "extensionSeconds", "operationId"]);
-      const kind = enumValue(args.kind, "kind", ["j_cut", "l_cut"]), extension = finiteNumber(args.extensionSeconds, "extensionSeconds", 0.001, 60);
+      const kind = enumValue(args.kind, "kind", ["j_cut", "l_cut"]), requestedExtension = finiteNumber(args.extensionSeconds, "extensionSeconds", 0.001, 60);
       const context = await activeContext(true);
+      const extensionTime = await sequenceFrameTime(context.sequence, requestedExtension, "extensionSeconds"), extension = extensionTime.appliedSeconds;
+      if (extension <= 0) throw commandError("UXP_INVALID_ARGUMENT", "extensionSeconds is less than half a sequence frame and would snap to zero");
       const audioContext = { ...context, item: await trackItemAt(context.sequence, "audio", nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), nonNegativeInt(args.audioClipIndex, "audioClipIndex")), mediaType: "audio", trackIndex: args.audioTrackIndex, clipIndex: args.audioClipIndex };
       const videoContext = { ...context, item: await trackItemAt(context.sequence, "video", nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), nonNegativeInt(args.videoClipIndex, "videoClipIndex")), mediaType: "video", trackIndex: args.videoTrackIndex, clipIndex: args.videoClipIndex };
       const before = { audio: await trackItemSnapshot(audioContext), video: await trackItemSnapshot(videoContext) };
@@ -1645,21 +1734,47 @@
       const timelineValue = Number(before.audio[edge]) + (kind === "j_cut" ? -extension : extension);
       const sourceField = kind === "j_cut" ? "inSeconds" : "outSeconds", sourceValue = Number(before.audio[sourceField]) + (kind === "j_cut" ? -extension : extension);
       if (timelineValue < 0 || sourceValue < 0) throw commandError("UXP_TARGET_UNSUPPORTED", "The requested J-cut exceeds the available leading timeline or source handle");
+      // The extended audio must not run into another item on its own track. On Premiere 26.5.2
+      // an L-cut that overlapped the following audio clip left two items over the same range,
+      // and Premiere crashed (heap corruption) while drawing them.
+      const rangeStart = kind === "j_cut" ? timelineValue : Number(before.audio.endSeconds);
+      const rangeEnd = kind === "j_cut" ? Number(before.audio.startSeconds) : timelineValue;
+      const audioItems = await trackItemsOn(context.sequence, "audio", nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"));
+      for (let index = 0; index < audioItems.length; index++) {
+        if (index === args.audioClipIndex) continue;
+        const otherStart = tickSeconds(await audioItems[index].getStartTime()), otherEnd = tickSeconds(await audioItems[index].getEndTime());
+        if (otherStart < rangeEnd - 0.000001 && otherEnd > rangeStart + 0.000001) {
+          throw commandError("UXP_TARGET_UNSUPPORTED", "The " + (kind === "j_cut" ? "J-cut" : "L-cut") + " would overlap audio clip " + index +
+            " on the same track; trim that clip first or use a smaller extension. Nothing was changed.");
+        }
+      }
+      // Premiere 26.5 applies a start/end action like a trim, moving the source point with it;
+      // sending the source action as well extended the audio twice. Write the source point
+      // separately only when it did not follow the edge.
       context.project.lockedAccess(() => {
-        const actions = kind === "j_cut"
-          ? [audioContext.item.createSetStartAction(tick(timelineValue)), audioContext.item.createSetInPointAction(tick(sourceValue))]
-          : [audioContext.item.createSetEndAction(tick(timelineValue)), audioContext.item.createSetOutPointAction(tick(sourceValue))];
-        commitActions(context.project, kind === "j_cut" ? "Create J-cut" : "Create L-cut", actions);
+        const edgeAction = kind === "j_cut" ? audioContext.item.createSetStartAction(tick(timelineValue)) : audioContext.item.createSetEndAction(tick(timelineValue));
+        commitActions(context.project, kind === "j_cut" ? "Create J-cut" : "Create L-cut", [edgeAction]);
       });
-      const afterItem = await trackItemAt(context.sequence, "audio", nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), nonNegativeInt(args.audioClipIndex, "audioClipIndex"));
-      const after = await trackItemSnapshot({ ...audioContext, item: afterItem });
-      const timelineMatched = numbersEqual(after[edge], timelineValue);
-      const sourceMatched = numbersEqual(after[sourceField], sourceValue);
+      let afterItem = await trackItemAt(context.sequence, "audio", nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), nonNegativeInt(args.audioClipIndex, "audioClipIndex"));
+      let after = await trackItemSnapshot({ ...audioContext, item: afterItem });
+      let undoSteps = 1;
+      if (numbersEqual(after[edge], timelineValue) && !numbersEqual(after[sourceField], sourceValue)) {
+        context.project.lockedAccess(() => {
+          const sourceAction = kind === "j_cut" ? afterItem.createSetInPointAction(tick(sourceValue)) : afterItem.createSetOutPointAction(tick(sourceValue));
+          commitActions(context.project, kind === "j_cut" ? "Set J-cut source in" : "Set L-cut source out", [sourceAction]);
+        });
+        undoSteps = 2;
+        afterItem = await trackItemAt(context.sequence, "audio", nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), nonNegativeInt(args.audioClipIndex, "audioClipIndex"));
+        after = await trackItemSnapshot({ ...audioContext, item: afterItem });
+      }
+      const timelineMatched = FrameTime.withinHalfFrame(after[edge], timelineValue, extensionTime.ticksPerFrame);
+      const sourceMatched = FrameTime.withinHalfFrame(after[sourceField], sourceValue, extensionTime.ticksPerFrame);
       // The user-visible result is the audio timeline edge. Source-out readback
       // can lag or stay stale after a successful SetEnd; do not false-negative
       // a completed L/J-cut when that edge moved to the requested time.
       return mutationResult(timelineMatched, {
-        splitEdit: kind, extensionSeconds: extension, before, after, timelineMatched, sourceReadbackMatched: sourceMatched
+        splitEdit: kind, extensionSeconds: extension, requestedExtensionSeconds: requestedExtension, appliedExtensionSeconds: extension,
+        before, after, timelineMatched, sourceReadbackMatched: sourceMatched, undoSteps
       }, "split_edit_audio_edge_and_source_readback", kind === "j_cut" ? "Create J-cut" : "Create L-cut");
     }
 
@@ -1671,30 +1786,30 @@
 
     async function insertTimelineItem(args) {
       assertObject(args); assertOnlyKeys(args, ["projectItemId", "timeSeconds", "videoTrackIndex", "audioTrackIndex", "limitShift", "operationId"]);
-      const context = await editorContext(true), item = await resolveProjectItem(context.project, args.projectItemId, true), time = tick(finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), "timeSeconds"), video = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), audio = nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), limitShift = optionalBoolean(args.limitShift, false, "limitShift");
+      const context = await editorContext(true), item = await resolveProjectItem(context.project, args.projectItemId, true), requestedTime = finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), appliedTime = await sequenceFrameTime(context.sequence, requestedTime, "timeSeconds"), time = tick(appliedTime.appliedSeconds, "timeSeconds"), video = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), audio = nonNegativeInt(args.audioTrackIndex, "audioTrackIndex"), limitShift = optionalBoolean(args.limitShift, false, "limitShift");
       context.project.lockedAccess(() => {
         commitActions(context.project, "Insert timeline item", [context.editor.createInsertProjectItemAction(item, time, video, audio, limitShift)]);
       });
-      return mutationResult(false, { inserted: true, projectItemId: await projectItemId(item), timeSeconds: args.timeSeconds, videoTrackIndex: video, audioTrackIndex: audio }, "sequence_editor_transaction", "Insert timeline item");
+      return mutationResult(false, { inserted: true, projectItemId: await projectItemId(item), requestedTimeSeconds: requestedTime, appliedTimeSeconds: appliedTime.appliedSeconds, videoTrackIndex: video, audioTrackIndex: audio }, "sequence_editor_transaction", "Insert timeline item");
     }
 
     async function overwriteTimelineItem(args) {
       assertObject(args); assertOnlyKeys(args, ["projectItemId", "timeSeconds", "videoTrackIndex", "audioTrackIndex", "operationId"]);
-      const context = await editorContext(true), item = await resolveProjectItem(context.project, args.projectItemId, true), time = tick(finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), "timeSeconds"), video = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), audio = nonNegativeInt(args.audioTrackIndex, "audioTrackIndex");
+      const context = await editorContext(true), item = await resolveProjectItem(context.project, args.projectItemId, true), requestedTime = finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), appliedTime = await sequenceFrameTime(context.sequence, requestedTime, "timeSeconds"), time = tick(appliedTime.appliedSeconds, "timeSeconds"), video = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), audio = nonNegativeInt(args.audioTrackIndex, "audioTrackIndex");
       context.project.lockedAccess(() => {
         commitActions(context.project, "Overwrite timeline item", [context.editor.createOverwriteItemAction(item, time, video, audio)]);
       });
-      return mutationResult(false, { overwritten: true, projectItemId: await projectItemId(item), timeSeconds: args.timeSeconds, videoTrackIndex: video, audioTrackIndex: audio }, "sequence_editor_transaction", "Overwrite timeline item");
+      return mutationResult(false, { overwritten: true, projectItemId: await projectItemId(item), requestedTimeSeconds: requestedTime, appliedTimeSeconds: appliedTime.appliedSeconds, videoTrackIndex: video, audioTrackIndex: audio }, "sequence_editor_transaction", "Overwrite timeline item");
     }
 
     async function cloneTimelineSelection(args) {
       assertObject(args); assertOnlyKeys(args, ["timeOffsetSeconds", "videoTrackOffset", "audioTrackOffset", "alignToVideo", "insert", "operationId"]);
-      const context = await editorContext(true), selected = await selectedTrackItems(context.sequence), offset = tick(args.timeOffsetSeconds, "timeOffsetSeconds"), videoOffset = boundedInt(args.videoTrackOffset == null ? 0 : args.videoTrackOffset, "videoTrackOffset", -128, 128), audioOffset = boundedInt(args.audioTrackOffset == null ? 0 : args.audioTrackOffset, "audioTrackOffset", -128, 128), align = optionalBoolean(args.alignToVideo, true, "alignToVideo"), insert = optionalBoolean(args.insert, false, "insert");
+      const context = await editorContext(true), selected = await selectedTrackItems(context.sequence), requestedOffset = finiteNumber(args.timeOffsetSeconds, "timeOffsetSeconds", -86400, 86400), appliedOffset = await sequenceFrameTime(context.sequence, requestedOffset, "timeOffsetSeconds"), offset = tick(appliedOffset.appliedSeconds, "timeOffsetSeconds"), videoOffset = boundedInt(args.videoTrackOffset == null ? 0 : args.videoTrackOffset, "videoTrackOffset", -128, 128), audioOffset = boundedInt(args.audioTrackOffset == null ? 0 : args.audioTrackOffset, "audioTrackOffset", -128, 128), align = optionalBoolean(args.alignToVideo, true, "alignToVideo"), insert = optionalBoolean(args.insert, false, "insert");
       context.project.lockedAccess(() => {
         const actions = selected.items.map((item) => context.editor.createCloneTrackItemAction(item, offset, videoOffset, audioOffset, align, insert));
         commitActions(context.project, "Clone selected timeline items", actions);
       });
-      return mutationResult(false, { cloned: selected.items.length, timeOffsetSeconds: args.timeOffsetSeconds, videoTrackOffset: videoOffset, audioTrackOffset: audioOffset }, "sequence_editor_transaction", "Clone selected timeline items");
+      return mutationResult(false, { cloned: selected.items.length, requestedTimeOffsetSeconds: requestedOffset, appliedTimeOffsetSeconds: appliedOffset.appliedSeconds, videoTrackOffset: videoOffset, audioTrackOffset: audioOffset }, "sequence_editor_transaction", "Clone selected timeline items");
     }
 
     async function removeTimelineSelection(args) {
@@ -1710,15 +1825,63 @@
     async function insertMogrtPath(args) {
       assertObject(args); assertOnlyKeys(args, ["filePath", "timeSeconds", "videoTrackIndex", "audioTrackIndex", "confirmNonUndoable", "operationId"]);
       requireConfirmation(args.confirmNonUndoable, "MOGRT insertion is a direct SequenceEditor call without an Action boundary");
-      const context = await editorContext(false), path = await allowedPath(args.filePath, "filePath", "file"), values = Array.from(await context.editor.insertMogrtFromPath(path, tick(finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), "timeSeconds"), nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), nonNegativeInt(args.audioTrackIndex, "audioTrackIndex")) || []);
-      return directMutationResult(false, { inserted: values.length, source: "path" }, "sequence_editor_host_return");
+      const context = await editorContext(false), path = await allowedPath(args.filePath, "filePath", "file");
+      const requestedSeconds = finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), appliedTime = await sequenceFrameTime(context.sequence, requestedSeconds, "timeSeconds"), videoTrackIndex = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex");
+      const values = Array.from(await context.editor.insertMogrtFromPath(path, tick(appliedTime.appliedSeconds, "timeSeconds"), videoTrackIndex, nonNegativeInt(args.audioTrackIndex, "audioTrackIndex")) || []);
+      return mogrtPlacementResult(context, values, requestedSeconds, appliedTime, videoTrackIndex, "path");
     }
 
     async function insertMogrtLibrary(args) {
       assertObject(args); assertOnlyKeys(args, ["libraryName", "elementName", "timeSeconds", "videoTrackIndex", "audioTrackIndex", "confirmNonUndoable", "operationId"]);
       requireConfirmation(args.confirmNonUndoable, "MOGRT insertion is a direct SequenceEditor call without an Action boundary");
-      const context = await editorContext(false), values = Array.from(await context.editor.insertMogrtFromLibrary(boundedString(args.libraryName, "libraryName", 255), boundedString(args.elementName, "elementName", 255), tick(finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), "timeSeconds"), nonNegativeInt(args.videoTrackIndex, "videoTrackIndex"), nonNegativeInt(args.audioTrackIndex, "audioTrackIndex")) || []);
-      return directMutationResult(false, { inserted: values.length, source: "library" }, "sequence_editor_host_return");
+      const context = await editorContext(false);
+      const requestedSeconds = finiteNumber(args.timeSeconds, "timeSeconds", 0, 86400), appliedTime = await sequenceFrameTime(context.sequence, requestedSeconds, "timeSeconds"), videoTrackIndex = nonNegativeInt(args.videoTrackIndex, "videoTrackIndex");
+      const values = Array.from(await context.editor.insertMogrtFromLibrary(boundedString(args.libraryName, "libraryName", 255), boundedString(args.elementName, "elementName", 255), tick(appliedTime.appliedSeconds, "timeSeconds"), videoTrackIndex, nonNegativeInt(args.audioTrackIndex, "audioTrackIndex")) || []);
+      return mogrtPlacementResult(context, values, requestedSeconds, appliedTime, videoTrackIndex, "library");
+    }
+
+    // The SequenceEditor return value is not proof of placement (#642). Read the
+    // returned items back and look for one starting at the applied frame time.
+    async function mogrtPlacementResult(context, values, requestedSeconds, appliedTime, videoTrackIndex, source) {
+      const seconds = appliedTime.appliedSeconds, tolerance = Number(BigInt(appliedTime.ticksPerFrame)) / Number(BigInt(FrameTime.TICKS_PER_SECOND)) / 2;
+      const placements = [];
+      for (const item of values.slice(0, 16)) {
+        let startSeconds = null, endSeconds = null;
+        try { startSeconds = tickSeconds(await item.getStartTime()); endSeconds = tickSeconds(await item.getEndTime()); } catch (_) {}
+        placements.push({ name: await maybeCall(item, "getName"), startSeconds, endSeconds });
+      }
+      const returnedAtTime = placements.some((value) => value.startSeconds !== null && FrameTime.withinHalfFrame(value.startSeconds, seconds, appliedTime.ticksPerFrame));
+      const onTrack = await videoTrackHasItemAt(context.sequence, videoTrackIndex, seconds, tolerance);
+      if (onTrack === false && !returnedAtTime) {
+        throw commandError("UXP_VERIFICATION_FAILED", "Premiere reported the MOGRT insert, but no clip starts at " + seconds + " s on video track " + videoTrackIndex + " and the returned items are elsewhere or missing. Inspect the timeline before retrying.");
+      }
+      const verified = onTrack === true && returnedAtTime;
+      const result = directMutationResult(verified, {
+        inserted: values.length, source, sequenceId: guidString(context.sequence.guid),
+        requested: { timeSeconds: requestedSeconds, videoTrackIndex }, appliedTimeSeconds: seconds, placements
+      }, verified ? "mogrt_placement_readback" : "sequence_editor_host_return");
+      if (!verified) {
+        result.note = onTrack === null
+          ? "Premiere returned the inserted items, but video track " + videoTrackIndex + " could not be read back, so the placement was not confirmed."
+          : "The placement did not fully match the request. Check placements before editing further.";
+      }
+      return result;
+    }
+
+    async function videoTrackHasItemAt(sequence, trackIndex, seconds, tolerance) {
+      try {
+        if (trackIndex >= await sequence.getVideoTrackCount()) return false;
+        const track = await sequence.getVideoTrack(trackIndex), itemType = ppro.Constants && ppro.Constants.TrackItemType;
+        if (!track || !itemType || itemType.CLIP == null || typeof track.getTrackItems !== "function") return null;
+        const items = Array.from(await track.getTrackItems(itemType.CLIP, false) || []);
+        for (const item of items.slice(0, MAX_TRACK_ITEMS_FOR_PLACEMENT)) {
+          const start = tickSeconds(await item.getStartTime());
+          if (start !== null && Math.abs(start - seconds) <= tolerance) return true;
+        }
+        return false;
+      } catch (_) {
+        return null;
+      }
     }
 
     async function inspectSequences(args) {
@@ -2003,22 +2166,30 @@
       assertObject(args); assertOnlyKeys(args, ["sequenceId", "exportType", "outputFile", "presetFile", "exportFull", "confirmExternalWrite", "operationId"]);
       requireExternalWrite(args.confirmExternalWrite);
       const project = await activeProject(false), sequence = await resolveSequence(project, args.sequenceId), manager = encoderManager(), output = await allowedPath(args.outputFile, "outputFile", "file"), preset = await allowedPath(args.presetFile, "presetFile", "file");
-      const job = beginEncoderJob("sequence", args.operationId);
+      const full = optionalBoolean(args.exportFull, true, "exportFull");
+      const job = beginEncoderJob("sequence", args.operationId, {
+        schemaVersion: "premiere-mcp.encoder-lineage.v1", projectId: guidString(project.guid), sequenceId: guidString(sequence.guid), projectItemId: null,
+        inputFile: null, outputFile: output, presetFile: preset, exportType: args.exportType || "queueToAme", range: await sequenceEncodeRange(sequence, full)
+      });
       const accepted = await runTrackedEncode(job, function () {
-        return manager.exportSequence(sequence, exportType(args.exportType), output, preset, optionalBoolean(args.exportFull, true, "exportFull"));
+        return manager.exportSequence(sequence, exportType(args.exportType), output, preset, full);
       }, "Premiere rejected sequence export");
-      return externalWriteResult({ queued: true, kind: "sequence", sequence: await sequenceSnapshot(sequence), outputFile: output, encodeJob: accepted });
+      return withAmeQueueNote(externalWriteResult({ queued: true, kind: "sequence", sequence: await sequenceSnapshot(sequence), outputFile: output, encodeJob: accepted }), args.exportType === "queueToAme");
     }
 
     async function encodeProjectItem(args) {
       assertObject(args); assertOnlyKeys(args, ["projectItemId", "outputFile", "presetFile", "workArea", "removeUponCompletion", "startQueueImmediately", "confirmExternalWrite", "operationId"]);
       requireExternalWrite(args.confirmExternalWrite);
       const project = await activeProject(false), clip = asClip(await resolveProjectItem(project, args.projectItemId, true), "projectItemId"), manager = encoderManager(), output = await allowedPath(args.outputFile, "outputFile", "file"), preset = await allowedPath(args.presetFile, "presetFile", "file");
-      const job = beginEncoderJob("projectItem", args.operationId);
+      const workArea = boundedInt(args.workArea == null ? 0 : args.workArea, "workArea", 0, 16), removeUponCompletion = optionalBoolean(args.removeUponCompletion, false, "removeUponCompletion"), startQueueImmediately = optionalBoolean(args.startQueueImmediately, true, "startQueueImmediately");
+      const job = beginEncoderJob("projectItem", args.operationId, {
+        schemaVersion: "premiere-mcp.encoder-lineage.v1", projectId: guidString(project.guid), sequenceId: null, projectItemId: await projectItemId(clip),
+        inputFile: null, outputFile: output, presetFile: preset, exportType: "queueToAme", range: { mode: "project_item_work_area", inTicks: null, outTicks: null, workArea, endPolicy: "native_range_unverified" }, removeUponCompletion, startQueueImmediately
+      });
       const accepted = await runTrackedEncode(job, function () {
-        return manager.encodeProjectItem(clip, output, preset, boundedInt(args.workArea == null ? 0 : args.workArea, "workArea", 0, 16), optionalBoolean(args.removeUponCompletion, false, "removeUponCompletion"), optionalBoolean(args.startQueueImmediately, true, "startQueueImmediately"));
+        return manager.encodeProjectItem(clip, output, preset, workArea, removeUponCompletion, startQueueImmediately);
       }, "Premiere rejected project-item encode");
-      return externalWriteResult({ queued: true, kind: "projectItem", projectItemId: await projectItemId(clip), outputFile: output, encodeJob: accepted });
+      return withAmeQueueNote(externalWriteResult({ queued: true, kind: "projectItem", projectItemId: await projectItemId(clip), outputFile: output, encodeJob: accepted }), true);
     }
 
     async function encodeFile(args) {
@@ -2026,11 +2197,16 @@
       requireExternalWrite(args.confirmExternalWrite);
       const manager = encoderManager(), input = await allowedPath(args.filePath, "filePath", "file"), output = await allowedPath(args.outputFile, "outputFile", "file"), preset = await allowedPath(args.presetFile, "presetFile", "file"), start = finiteNumber(args.inSeconds, "inSeconds", 0, 86400), end = finiteNumber(args.outSeconds, "outSeconds", 0, 86400);
       if (end <= start) throw commandError("UXP_INVALID_ARGUMENT", "outSeconds must be greater than inSeconds");
-      const job = beginEncoderJob("file", args.operationId);
+      const inTime = tick(start), outTime = tick(end), workArea = boundedInt(args.workArea == null ? 0 : args.workArea, "workArea", 0, 16), removeUponCompletion = optionalBoolean(args.removeUponCompletion, false, "removeUponCompletion"), startQueueImmediately = optionalBoolean(args.startQueueImmediately, true, "startQueueImmediately");
+      const project = await ppro.Project.getActiveProject();
+      const job = beginEncoderJob("file", args.operationId, {
+        schemaVersion: "premiere-mcp.encoder-lineage.v1", projectId: project ? guidString(project.guid) : null, sequenceId: null, projectItemId: null,
+        inputFile: input, outputFile: output, presetFile: preset, exportType: "queueToAme", range: { mode: "file_range", inTicks: encodeTickString(inTime), outTicks: encodeTickString(outTime), inSeconds: start, outSeconds: end, workArea, endPolicy: "native_range_unverified" }, removeUponCompletion, startQueueImmediately
+      });
       const accepted = await runTrackedEncode(job, function () {
-        return manager.encodeFile(input, output, preset, tick(start), tick(end), boundedInt(args.workArea == null ? 0 : args.workArea, "workArea", 0, 16), optionalBoolean(args.removeUponCompletion, false, "removeUponCompletion"), optionalBoolean(args.startQueueImmediately, true, "startQueueImmediately"));
+        return manager.encodeFile(input, output, preset, inTime, outTime, workArea, removeUponCompletion, startQueueImmediately);
       }, "Premiere rejected file encode");
-      return externalWriteResult({ queued: true, kind: "file", outputFile: output, encodeJob: accepted });
+      return withAmeQueueNote(externalWriteResult({ queued: true, kind: "file", outputFile: output, encodeJob: accepted }), true);
     }
 
     function inspectEncoderJobs(args) {
@@ -2049,9 +2225,23 @@
       });
     }
 
-    function beginEncoderJob(kind, operationId) {
+    function encodeTickString(value) {
+      return value && typeof value.ticks === "string" && /^-?(0|[1-9][0-9]{0,39})$/.test(value.ticks) ? value.ticks : null;
+    }
+
+    async function sequenceEncodeRange(sequence, full) {
+      let start = full ? "0" : null, end = null;
+      try {
+        if (!full && typeof sequence.getInPoint === "function") start = encodeTickString(await sequence.getInPoint());
+        const endMethod = full ? "getEndTime" : "getOutPoint";
+        if (typeof sequence[endMethod] === "function") end = encodeTickString(await sequence[endMethod]());
+      } catch (_) { start = null; end = null; }
+      return { mode: full ? "full_sequence" : "sequence_marks", inTicks: start, outTicks: end, endPolicy: "native_range_unverified" };
+    }
+
+    function beginEncoderJob(kind, operationId, lineage) {
       if (!canTrackEncoderJobs()) return null;
-      return events.beginEncodeJob({ kind, operationId: operationId || undefined });
+      return events.beginEncodeJob({ kind, operationId: operationId || undefined, lineage });
     }
 
     async function runTrackedEncode(job, callback, rejectionMessage) {
@@ -2062,7 +2252,7 @@
         if (job) events.markEncodeRejected(job.jobId, "host_error");
         throw error;
       }
-      if (!accepted) {
+      if (accepted !== true) {
         if (job) events.markEncodeRejected(job.jobId, "host_rejected");
         throw commandError("UXP_HOST_REJECTED", rejectionMessage);
       }
@@ -2099,6 +2289,18 @@
     function directSequenceCreationResult(verified, values, boundary) {
       return { ...values, outcome: verified ? "verified" : "committed_unverified", verified, verificationBoundary: boundary,
         operation: operationSemantics({ mutatesProject: true, verificationStatus: verified ? "verified" : "not_verified", verificationBoundary: boundary, verificationEvidence: [{ type: boundary, verified }], undoSupported: false, cancellationSupported: false }) };
+    }
+
+    // Premiere 26.5.1 accepted UXP encode requests into the Media Encoder queue
+    // without starting it (#642). Say so instead of implying a render is running,
+    // and leave starting the queue to the caller: a UXP result must not trigger CEP.
+    function withAmeQueueNote(result, sentToAme) {
+      if (!sentToAme) return result;
+      return {
+        ...result,
+        ameQueueStarted: "unknown",
+        note: "Premiere accepted the job into the Adobe Media Encoder queue. Some Premiere builds leave that queue stopped. If encode_media_uxp action wait shows no progress, start the queue in Media Encoder or with the start_batch_encode tool. This tool does not start it for you, and the output file is not checked."
+      };
     }
 
     function externalWriteResult(values) {
@@ -2279,6 +2481,25 @@
     function settingMatches(after, key, value) { if (key === "videoWidth") return after.videoFrame && numbersEqual(after.videoFrame.width, value); if (key === "videoHeight") return after.videoFrame && numbersEqual(after.videoFrame.height, value); return valuesEqual(after[key], value); }
     function keyframeValue(value) { return value && value.value && Object.prototype.hasOwnProperty.call(value.value, "value") ? value.value.value : value && value.value !== undefined ? value.value : null; }
     function scalarValue(value) { if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") throw commandError("UXP_INVALID_ARGUMENT", "value must be a number, string, or boolean"); if (typeof value === "number" && !Number.isFinite(value)) throw commandError("UXP_INVALID_ARGUMENT", "value must be finite"); if (typeof value === "string" && value.length > 4000) throw commandError("UXP_INVALID_ARGUMENT", "value string exceeds 4000 characters"); return value; }
+    // Host reads may expose arrays or native objects. Keep client input validation separate.
+    function hostParameterValue(value, kind) {
+      if (value == null) throw commandError("UXP_VALUE_UNAVAILABLE", "Premiere did not expose a " + kind + " parameter start value");
+      const fields = kind === "point" ? ["x", "y"] : ["red", "green", "blue", "alpha"];
+      if (typeof value !== "object") throw commandError("UXP_TARGET_UNSUPPORTED", "Premiere parameter does not expose a " + kind + " value");
+      if (Array.isArray(value) && value.length !== fields.length && !(kind === "color" && value.length === 3)) {
+        throw commandError("UXP_INVALID_HOST_STATE", "Premiere returned an invalid " + kind + " value length");
+      }
+      const normalized = {};
+      for (let index = 0; index < fields.length; index += 1) {
+        const component = Array.isArray(value) ? (kind === "color" && index === 3 && value.length === 3 ? 1 : value[index]) : value[fields[index]];
+        if (typeof component !== "number" || !Number.isFinite(component) || component < -1000000 || component > 1000000) {
+          throw commandError("UXP_INVALID_HOST_STATE", "Premiere returned an unreadable " + kind + " component: " + fields[index]);
+        }
+        normalized[fields[index]] = component;
+      }
+      return normalized;
+    }
+
     function pointValue(value, label) {
       assertObject(value); assertOnlyKeys(value, ["x", "y"]);
       return {
@@ -2332,14 +2553,15 @@
       };
     }
 
-    function trackItemUpdateMatches(before, after, args) {
-      if (args.startSeconds != null && !numbersEqual(after.startSeconds, args.startSeconds)) return false;
-      if (args.endSeconds != null && !numbersEqual(after.endSeconds, args.endSeconds)) return false;
+    function trackItemUpdateMatches(before, after, args, ticksPerFrame) {
+      const matchesTimeline = (actual, expected) => ticksPerFrame ? FrameTime.withinHalfFrame(actual, expected, ticksPerFrame) : numbersEqual(actual, expected);
+      if (args.startSeconds != null && !matchesTimeline(after.startSeconds, args.startSeconds)) return false;
+      if (args.endSeconds != null && !matchesTimeline(after.endSeconds, args.endSeconds)) return false;
       if (args.inSeconds != null && !numbersEqual(after.inSeconds, args.inSeconds)) return false;
       if (args.outSeconds != null && !numbersEqual(after.outSeconds, args.outSeconds)) return false;
       if (args.disabled != null && after.disabled !== args.disabled) return false;
       if (args.name != null && after.name !== args.name) return false;
-      if (args.moveBySeconds != null && (!numbersEqual(after.startSeconds, Number(before.startSeconds) + args.moveBySeconds) || !numbersEqual(after.endSeconds, Number(before.endSeconds) + args.moveBySeconds))) return false;
+      if (args.moveBySeconds != null && (!matchesTimeline(after.startSeconds, Number(before.startSeconds) + args.moveBySeconds) || !matchesTimeline(after.endSeconds, Number(before.endSeconds) + args.moveBySeconds))) return false;
       return true;
     }
 

@@ -1,8 +1,8 @@
 ---
 name: pr
 description: Drive Adobe Premiere Pro through Premiere-MCP-IMT (pr_verify, pr_catalog, pr_do, pr_batch, pr_get_sequence, pr_export_frame) and use Premiere's AI tools — Generative Extend, Generative Media Tool, Object Mask, transcripts and Paper Edit, captions, Enhance Speech/Audio, Search, AI Assistant, Auto Reframe, Scene Edit Detection, Morph Cut — on localized Premiere in any UI language too. Read at the start of any Premiere task. This file is the router; open only the reference it points to.
-revision: 2
-updated_at: 2026-10-26
+revision: 3
+updated_at: 2026-10-28
 ---
 
 # Premiere Pro — agent skill
@@ -28,7 +28,7 @@ Facts: Premiere 26.5 (Sep 2026) and Premiere (Beta) 27.0, checked 2026-10-26.
 ## 2. Order of work
 
 1. **State.** `pr_verify` → `pr_get_sequence`. Unfamiliar project: `get_full_project_overview {include_bin_tree:false}`, `get_offline_media`.
-2. **Safety net.** No scripted undo: `undo`, `redo`, `multiple_undo` report Unavailable. Before a destructive or multi-step edit: `create_sequence_checkpoint {label}` (clones the sequence, returns a snapshot) and `pr_save_project`. Revert: `list_sequence_checkpoints` → `set_active_sequence` to the checkpoint (the original stays modified), or the user's Edit › Undo.
+2. **Safety net.** Edits Premiere records in its history (effects added or removed, cuts, inserts, transitions) return `undoSteps` / `undoStackIndex`: `undo {expected_undo_stack_index: <that index>}` reverts exactly that call (experimental QE, each step checked against the undo stack; after a marker edit add `acknowledge_untracked_markers:true`). Property writes (opacity, scale, effect parameters, volume) and markers record no step. Before a destructive or multi-step edit: `create_sequence_checkpoint {label}` (clones the sequence, returns a snapshot) and `pr_save_project`. Revert those: `list_sequence_checkpoints` → `set_active_sequence` to the checkpoint (the original stays modified), or the user's Edit › Undo.
 3. **Operate.** `plan_*` operations compute and never touch Premiere. Some `preview_*` operations return a token that the follow-up operation named in their description requires unchanged.
 4. **Verify by values, then picture.** `pr_get_sequence` → `diff_sequence_snapshots {before: <checkpoint snapshot>, after: <pr_get_sequence output>}`; effects: `list_clip_effects`, `get_effect_properties`; picture: `pr_export_frame` at the changed frames. Audio and motion need playback — report them as unverified.
 5. **Finish.** `pr_save_project`; report artifact paths and what stays unverified.
@@ -76,6 +76,7 @@ UXP bridge (`PREMIERE_UXP_TOKEN` + the UXP plugin in Premiere).
 
 ## 6. Failures
 
-- `isError` or `ok:false` → failed.
+- `isError` or `ok:false` → failed. A refusal that says "nothing was changed" changed nothing: fix the input and retry.
+- `receipt.outcome: "unknown"` (a write timed out or failed midway) → further edits are refused with `HOST_RECOVERY_REQUIRED`. Re-read what the call touched (`pr_get_sequence`, `list_clip_effects` …), then `inspect_operation_recovery {backend:"cep"}` → `acknowledge_operation_recovery {backend:"cep", expected_recovery_revision, expected_host_state_revision, reviewed:true}` with the two revisions it returned. Repeat the edit only if the readback shows it did not happen; pass the same `idempotency_key` on a retry so it cannot apply twice.
 - Unavailable or "requires UXP" → name the prerequisite (UXP bridge, newer Premiere) and offer the supported alternative.
 - "Success" but no visible change → re-read; some 26.x builds ignore certain edits silently.

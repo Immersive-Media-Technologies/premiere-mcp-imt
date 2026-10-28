@@ -11,6 +11,7 @@
   // preflight/transaction/readback boundary per target.
   function createSlipWorkflowDefinitions(deps) {
     const ppro = deps.ppro;
+    const FrameTime = deps.FrameTime || (typeof require === "function" ? require("./frame-time.cjs") : globalThis.PremiereMcpFrameTime);
     const fallbackTails = new Map();
     const locks = deps.locks && typeof deps.locks.withTrackMutationLock === "function"
       ? deps.locks
@@ -54,6 +55,8 @@
       const requestedOffset = signedOffset(args.slipBySeconds);
       assertExpectedTarget(expected, target);
       const initial = await activeTarget(target, true);
+      const requestedSlip = await sequenceFrameTime(initial.sequence, requestedOffset);
+      const offset = requestedSlip.appliedSeconds;
       if (expected.projectGuid !== initial.projectGuid || expected.sequenceId !== initial.sequenceId) {
         throw commandError("UXP_STALE_TRACK_ITEM", "The active project or sequence no longer matches the reviewed slip snapshot");
       }
@@ -70,11 +73,11 @@
           throw commandError("UXP_STALE_TRACK_ITEM", "The active project or sequence changed before the slip transaction");
         }
         const before = await slipSnapshot(context);
-        if (!sameSnapshot(before, expected)) {
+        if (!sameSnapshot(before, expected, requestedSlip.ticksPerFrame)) {
           throw commandError("UXP_STALE_TRACK_ITEM", "The timeline item changed since the reviewed slip snapshot");
         }
         assertSlipSupported(before);
-        const desired = desiredSlip(before, requestedOffset);
+        const desired = desiredSlip(before, offset);
         // The complete asynchronous snapshot is captured immediately before
         // this synchronous action-creation boundary. The keyed tail prevents
         // another MCP slip from interleaving between this check and readback.
@@ -96,31 +99,75 @@
         // Resolve by coordinate again rather than trusting the retained object.
         // An action may have committed even when this verification fails, so
         // callers must inspect before issuing another edit after that error.
-        const afterContext = await activeTarget(target, true);
-        if (afterContext.projectGuid !== before.projectGuid || afterContext.sequenceId !== before.sequenceId) {
-          throw commandError("UXP_VERIFICATION_FAILED", "Premiere changed the active project or sequence during the committed slip");
+        let after = null, compensatingMoveSeconds = null;
+        try {
+          const afterContext = await activeTarget(target, true);
+          if (afterContext.projectGuid !== before.projectGuid || afterContext.sequenceId !== before.sequenceId) {
+            throw commandError("UXP_VERIFICATION_FAILED", "Premiere changed the active project or sequence during the committed slip");
+          }
+          after = await slipSnapshot(afterContext);
+          // Premiere 26.3 and 26.5 apply TrackItem in/out actions like trims: the start follows
+          // the new in point and the end follows the new out point, so a slip lands as a move.
+          // When the source points are right and both edges moved by the same amount, move the
+          // item back by that measured amount in a second undoable transaction.
+          const movedBy = after.startSeconds - before.startSeconds;
+          if (!sameSlipResult(before, after, desired, requestedSlip.ticksPerFrame) && sameSnapshotIdentity(before, after) &&
+              afterContext.item && typeof afterContext.item.createMoveAction === "function" &&
+              FrameTime.withinHalfFrame(after.inSeconds, desired.inSeconds, requestedSlip.ticksPerFrame) && FrameTime.withinHalfFrame(after.outSeconds, desired.outSeconds, requestedSlip.ticksPerFrame) &&
+              numbersEqual(after.endSeconds - before.endSeconds, movedBy) && !numbersEqual(movedBy, 0)) {
+            let moved = false;
+            afterContext.project.lockedAccess(function () {
+              const moveAction = createPointAction(afterContext.item, "createMoveAction", -movedBy, "compensating move");
+              moved = afterContext.project.executeTransaction(function (compoundAction) {
+                if (compoundAction.addAction(moveAction) === false) {
+                  throw commandError("UXP_ACTION_REJECTED", "Premiere rejected the compensating move");
+                }
+              }, "Restore slipped item position");
+            });
+            if (!moved) throw commandError("UXP_TRANSACTION_FAILED", "Premiere did not commit the compensating move after the slip");
+            compensatingMoveSeconds = -movedBy;
+            const restoredContext = await activeTarget(target, true);
+            after = await slipSnapshot(restoredContext);
+          }
+          if (!sameSlipResult(before, after, desired, requestedSlip.ticksPerFrame)) {
+            // The transaction already committed, so this is not a "nothing
+            // happened" failure. Say what actually landed and forbid a retry:
+            // re-issuing the slip would apply a second offset to a moved item.
+            throw commandError(
+              "UXP_COMMITTED_UNVERIFIED",
+              "Premiere committed the slip transaction, so the project has already changed, but the result is not the requested source-only slip: " +
+                describeSlipDivergence(before, after, desired) +
+                ". Do not retry this call. Inspect the item and undo the edit in Premiere if the result is unwanted."
+            );
+          }
+          return {
+            slipped: true,
+            before,
+            after,
+            slipBySeconds: offset,
+            requestedSlipBySeconds: requestedOffset,
+            appliedSlipBySeconds: offset,
+            outcome: "verified",
+            verificationBoundary: "track_item_source_and_timeline_readback",
+            undoLabel: "Slip timeline item source",
+            ...(compensatingMoveSeconds === null ? {} : {
+              compensatingMoveSeconds,
+              undoSteps: 2,
+              hostNote: "Premiere moved the item with its new source points, so a second undoable move restored its timeline position. Undo twice to revert the slip."
+            })
+          };
+        } catch (error) {
+          return {
+            slipped: false, committed: true, verified: false, partial: true,
+            outcome: "committed_unverified", before, after, slipBySeconds: offset,
+            requestedSlipBySeconds: requestedOffset, appliedSlipBySeconds: offset,
+            timelineChanged: after ? !sameSnapshot(before, after, requestedSlip.ticksPerFrame) : null, rollbackPerformed: false,
+            ...(compensatingMoveSeconds === null ? {} : { compensatingMoveSeconds, undoSteps: 2 }),
+            verificationBoundary: "committed_transaction_with_failed_readback",
+            readbackError: error && error.message ? error.message : String(error),
+            nextStep: "Inspect the affected track and linked audio before any retry. The committed slip was not rolled back; use Premiere Undo only after reviewing the change."
+          };
         }
-        const after = await slipSnapshot(afterContext);
-        if (!sameSlipResult(before, after, desired)) {
-          // The transaction already committed, so this is not a "nothing
-          // happened" failure. Say what actually landed and forbid a retry:
-          // re-issuing the slip would apply a second offset to a moved item.
-          throw commandError(
-            "UXP_COMMITTED_UNVERIFIED",
-            "Premiere committed the slip transaction, so the project has already changed, but the result is not the requested source-only slip: " +
-              describeSlipDivergence(before, after, desired) +
-              ". Do not retry this call. Inspect the item and undo the edit in Premiere if the result is unwanted."
-          );
-        }
-        return {
-          slipped: true,
-          before,
-          after,
-          slipBySeconds: requestedOffset,
-          outcome: "verified",
-          verificationBoundary: "track_item_source_and_timeline_readback",
-          undoLabel: "Slip timeline item source"
-        };
       });
     }
 
@@ -207,14 +254,14 @@
       }
     }
 
-    function sameSlipResult(before, after, desired) {
+    function sameSlipResult(before, after, desired, ticksPerFrame) {
       return sameSnapshotIdentity(before, after) &&
-        numbersEqual(after.startSeconds, before.startSeconds) &&
-        numbersEqual(after.endSeconds, before.endSeconds) &&
-        numbersEqual(after.durationSeconds, before.durationSeconds) &&
+        FrameTime.withinHalfFrame(after.startSeconds, before.startSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(after.endSeconds, before.endSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(after.durationSeconds, before.durationSeconds, ticksPerFrame) &&
         numbersEqual(after.speed, before.speed) && after.reversed === before.reversed &&
-        numbersEqual(after.inSeconds, desired.inSeconds) && numbersEqual(after.outSeconds, desired.outSeconds) &&
-        numbersEqual(after.outSeconds - after.inSeconds, desired.sourceDuration);
+        FrameTime.withinHalfFrame(after.inSeconds, desired.inSeconds, ticksPerFrame) && FrameTime.withinHalfFrame(after.outSeconds, desired.outSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(after.outSeconds - after.inSeconds, desired.sourceDuration, ticksPerFrame);
     }
 
     function describeSlipDivergence(before, after, desired) {
@@ -243,13 +290,13 @@
       return (Math.round(value * 1000) / 1000) + "s";
     }
 
-    function sameSnapshot(left, right) {
+    function sameSnapshot(left, right, ticksPerFrame) {
       return sameSnapshotIdentity(left, right) &&
-        numbersEqual(left.startSeconds, right.startSeconds) &&
-        numbersEqual(left.endSeconds, right.endSeconds) &&
-        numbersEqual(left.inSeconds, right.inSeconds) &&
-        numbersEqual(left.outSeconds, right.outSeconds) &&
-        numbersEqual(left.durationSeconds, right.durationSeconds) &&
+        FrameTime.withinHalfFrame(left.startSeconds, right.startSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(left.endSeconds, right.endSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(left.inSeconds, right.inSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(left.outSeconds, right.outSeconds, ticksPerFrame) &&
+        FrameTime.withinHalfFrame(left.durationSeconds, right.durationSeconds, ticksPerFrame) &&
         numbersEqual(left.speed, right.speed) && left.reversed === right.reversed;
     }
 
@@ -275,6 +322,12 @@
       const action = creator(ppro.TickTime.createWithSeconds(seconds));
       if (!action) throw commandError("UXP_ACTION_REJECTED", "Premiere did not create the " + label + " action");
       return action;
+    }
+
+    async function sequenceFrameTime(sequence, seconds) {
+      const timebase = String(await sequence.getTimebase());
+      if (!/^\d{1,18}$/.test(timebase) || BigInt(timebase) <= 0n) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not return a valid sequence ticksPerFrame timebase");
+      return { ...FrameTime.snapSeconds(seconds, timebase), ticksPerFrame: timebase };
     }
 
     function targetCoordinates(args) {

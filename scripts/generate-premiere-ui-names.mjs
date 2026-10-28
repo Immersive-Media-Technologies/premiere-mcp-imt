@@ -18,6 +18,10 @@ const NAMES = [
   "Motion", "Opacity", "Time Remapping", "Volume", "Channel Volume", "Panner",
   "Position", "Scale", "Scale Width", "Scale Height", "Uniform Scale", "Rotation", "Anchor Point", "Anti-flicker Filter",
   "Crop Left", "Crop Top", "Crop Right", "Crop Bottom", "Blend Mode", "Level", "Bypass", "Balance", "Pan", "Speed",
+  // a graphic's own layers (built-ins that are never removed)
+  "Vector Motion", "Text", "Shape",
+  // Lumetri Color sections (color_correct stays inside Basic Correction)
+  "Basic Correction", "Creative", "Curves", "Color Wheels & Match", "HSL Secondary", "Vignette",
   // effects the tools apply or inspect
   "Lumetri Color", "Crop", "Warp Stabilizer", "Gaussian Blur", "Transform", "Tint", "Brightness & Contrast", "Ultra Key",
   "Black & White", "Sharpen", "Unsharp Mask", "Directional Blur", "Drop Shadow", "Basic 3D", "Corner Pin", "Track Matte Key",
@@ -26,7 +30,7 @@ const NAMES = [
   // their parameters
   "Left", "Top", "Right", "Bottom", "Zoom", "Input LUT", "Look", "Exposure", "Contrast", "Highlights", "Shadows", "Whites",
   "Blacks", "Temperature", "Saturation", "Vibrance", "Intensity", "Result", "Smoothness", "Method", "Framing", "Blurriness",
-  "Blur Dimensions", "Repeat Edge Pixels", "Amount",
+  "Blur Dimensions", "Repeat Edge Pixels", "Amount", "Fill Color", "Tint",
   // transitions
   "Cross Dissolve", "Dip to Black", "Dip to White", "Film Dissolve", "Additive Dissolve", "Morph Cut", "Push", "Slide", "Wipe",
   "Iris Round", "Iris Box", "Iris Cross", "Iris Diamond", "Split", "Barn Doors", "Constant Power", "Constant Gain", "Exponential Fade",

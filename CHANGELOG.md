@@ -7,9 +7,43 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-28
+
 ### Changed
 
-- README in plain Markdown — Glama and other catalogs strip raw HTML: the «Add to Cursor» button, client icons and the «Why this one» comparison table now show there too.
+- **Built on premiere-pro-mcp 1.26.0** (was 1.16.3). Every state-changing operation reads Premiere back and
+  reports `verified`, `committed_unverified` or `not_applied` instead of a bare success; fixes for false
+  successes seen on Premiere 26.5 — a QE clip looked up by index on a track with gaps (rename, effects,
+  stabilization hit the wrong clip), removals that did not ripple, Scale Height never set, a bin deletion
+  that emptied timelines, overwrites that hit V1/A1, still exports that deleted the previous file.
+- About 60 more operations (≈440): idempotency keys for retries, asynchronous sequence exports through
+  Media Encoder (`export_sequence_job_start`, `get_export_job_status`), a bridge-blocked diagnosis
+  (`get_bridge_telemetry`), caption retiming after ripple edits, a project-structure audit, freeze frames
+  from source media, ripple removal of many ranges, stock titles, transition removal, undo/redo through
+  the QE undo stack. Long calls send MCP progress notifications.
+- The UI-language layer covers the new code: effect lookup by name and in the QE catalog, Lumetri Color
+  sections and controls, Warp Stabilizer (Method set by its position in Premiere's list), built-in
+  components told apart from effects through Premiere's own dictionaries (removal still refuses on a UI
+  language the dictionaries do not name), After Effects MOGRT expressions by parameter index.
+- `pr_do` and `pr_batch` check arguments against the operation's schema (an unknown argument is named
+  with the accepted ones) and pass the request's progress and cancellation to the operation.
+- An edit whose outcome is unknown (a timeout, a failure midway) pauses further edits until the agent has
+  re-read the project and acknowledged it (`inspect_operation_recovery` → `acknowledge_operation_recovery`);
+  `pr_do` says so in the result, with the steps. A refusal raised before any write — a clip, item, effect,
+  property or sequence not found, no active sequence — says "nothing was changed", is reported as
+  `not_applied` and no longer pauses editing (it did in premiere-pro-mcp 1.26.0: one mistyped parameter
+  name blocked every later edit).
+- Warp Stabilizer: Premiere 26.5 places it above the clip's other effects, so smoothness and method were
+  never set when the clip already had an effect (live, Premiere 26.5 ru_RU); the new component is now found
+  wherever Premiere puts it.
+- Undo: `undo {expected_undo_stack_index}` reverts edits that report `undoSteps` (verified live on Premiere
+  26.5: an added effect removed, the undo stack one step back); the skill and the server instructions no
+  longer say there is no scripted undo.
+- The UXP plugin package is `premiere-mcp-imt-uxp-<version>-direct.ccx`.
+- README in plain Markdown — Glama and other catalogs strip raw HTML: the «Add to Cursor» button, client
+  icons and the «Why this one» comparison table now show there too.
+
+The Premiere connector changed: run `pr_install_connector` (action `install`) and restart Premiere.
 
 ## [1.0.2] - 2026-10-28
 

@@ -232,13 +232,25 @@ function es3Json(value: unknown): string {
 }
 
 /**
- * Translation table for the string literals of an ExtendScript body, as the
- * global assignment buildScript() puts in front of the script.
+ * UI names the ExtendScript helpers compare against on their own (built-in
+ * components and the intrinsic Motion / Opacity / audio properties). A tool's
+ * script does not necessarily mention them, so buildScript() always adds them.
  */
-export function premiereL10nPrelude(code: string): string {
+export const HELPER_UI_NAMES: readonly string[] = [
+  "Opacity", "Motion", "Time Remapping", "Volume", "Channel Volume", "Panner", "Balance",
+  "Vector Motion", "Text", "Shape", "Position", "Scale", "Scale Height", "Scale Width",
+  "Uniform Scale", "Rotation", "Anchor Point", "Blend Mode", "Level",
+];
+
+/**
+ * Translation table for the string literals of an ExtendScript body (plus
+ * `extraNames`), as the global assignment buildScript() puts in front of the script.
+ */
+export function premiereL10nPrelude(code: string, extraNames: readonly string[] = []): string {
   const table: Record<string, UiNameTranslations> = {};
-  for (const match of code.matchAll(STRING_LITERAL)) {
-    const value = unescapeLiteral(match[1] ?? match[2] ?? "").trim();
+  const literals = [...code.matchAll(STRING_LITERAL)].map((match) => unescapeLiteral(match[1] ?? match[2] ?? ""));
+  for (const literal of [...extraNames, ...literals]) {
+    const value = literal.trim();
     if (!value || value.length > MAX_NAME_LENGTH || table[value] || !/[A-Za-z]/.test(value)) continue;
     const translations = premiereUiNameTranslations(value);
     if (translations) table[value] = translations;

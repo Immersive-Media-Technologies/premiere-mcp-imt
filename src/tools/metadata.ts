@@ -39,7 +39,10 @@ const CEP_XMP_FIELD_HELPERS = `
             var compact = (String(ns || "") + String(name || "")).toLowerCase().replace(/[^a-z0-9]/g, "");
             return compact.indexOf("gps") !== -1 || compact.indexOf("serialnumber") !== -1
               || compact.indexOf("lensserial") !== -1 || compact.indexOf("bodyserial") !== -1
-              || compact.indexOf("cameraserial") !== -1;
+              || compact.indexOf("cameraserial") !== -1 || compact.indexOf("creator") !== -1
+              || compact.indexOf("author") !== -1 || compact.indexOf("owner") !== -1
+              || compact.indexOf("contact") !== -1 || compact.indexOf("email") !== -1
+              || compact.indexOf("address") !== -1;
           }
           function __collectXmpFields(packet, packetName, includeSensitive, fields) {
             if (!packet) return 0;
@@ -77,7 +80,7 @@ const CEP_XMP_FIELD_HELPERS = `
 export function getMetadataTools(bridgeOptions: BridgeOptions) {
   return {
     get_metadata: {
-      description: "Get metadata for a project item. Use parse_fields to return named XMP/project fields instead of raw XML. Project metadata XML and file/clip XMP are separate packets; disable either when identity/path is enough. Prefer inspect_project_panel_metadata_uxp item_columns or manage_metadata_uxp inspect_fields for visible columns. This is not the premiere://project/metadata resource. GPS and serials are omitted from parse_fields unless include_sensitive is true.",
+      description: "Get metadata for a project item. Returns bounded parsed fields by default; GPS, serials, and personal contact/author fields are omitted. Raw packets require explicit include_project_metadata/include_xmp_metadata and include_sensitive true. Media paths require include_media_path true. Project metadata XML and file/clip XMP are separate packets; disable either when identity/path is enough. Prefer inspect_project_panel_metadata_uxp item_columns or manage_metadata_uxp inspect_fields for visible columns. This is not the premiere://project/metadata resource. GPS and serials are omitted from parse_fields unless include_sensitive is true.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -87,19 +90,23 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
           },
           parse_fields: {
             type: "boolean",
-            description: "Parse project metadata and XMP into named fields (default false). When true, raw XML is omitted unless include_project_metadata or include_xmp_metadata is explicitly true.",
+            description: "Parse project metadata and XMP into named fields (default true). Set false for identity-only or explicitly requested raw packets.",
           },
           include_sensitive: {
             type: "boolean",
-            description: "When parse_fields is true, include GPS, serials, and similar EXIF. Default false.",
+            description: "Opt in to sensitive GPS, serial, author, and contact fields. Required for any raw packet; default false.",
+          },
+          include_media_path: {
+            type: "boolean",
+            description: "Opt in to the full source media path, which can identify the local user and folders; default false.",
           },
           include_project_metadata: {
             type: "boolean",
-            description: "Include the potentially large Project Metadata XML payload (default: true unless parse_fields is true).",
+            description: "Opt in to raw Project Metadata XML (maximum 256 Ki characters). Requires include_sensitive true; default false. Set false to skip reading this packet entirely.",
           },
           include_xmp_metadata: {
             type: "boolean",
-            description: "Include the potentially large XMP XML payload (default: true unless parse_fields is true).",
+            description: "Opt in to raw XMP XML (maximum 256 Ki characters). Requires include_sensitive true; default false. Set false to skip reading this packet entirely.",
           },
         },
         required: ["item_id"],
@@ -108,53 +115,50 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
         item_id: string;
         parse_fields?: boolean;
         include_sensitive?: boolean;
+        include_media_path?: boolean;
         include_project_metadata?: boolean;
         include_xmp_metadata?: boolean;
       }) => {
-        const parseFields = args.parse_fields === true;
-        const includeProjectMetadata = parseFields
-          ? args.include_project_metadata === true
-          : args.include_project_metadata !== false;
-        const includeXmpMetadata = parseFields
-          ? args.include_xmp_metadata === true
-          : args.include_xmp_metadata !== false;
+        const parseFields = args.parse_fields !== false;
+        const includeProjectMetadata = args.include_project_metadata === true;
+        const includeXmpMetadata = args.include_xmp_metadata === true;
         const includeSensitive = args.include_sensitive === true;
+        if ((includeProjectMetadata || includeXmpMetadata) && !includeSensitive) {
+          return { success: false, error: "Raw metadata packets require include_sensitive: true because they may disclose personal data" };
+        }
+        const readProject = includeProjectMetadata || (parseFields && args.include_project_metadata !== false);
+        const readXmp = includeXmpMetadata || (parseFields && args.include_xmp_metadata !== false);
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
 
           var metadata = {};
+          var projectPacket = "";
+          var xmpPacket = "";
+          ${readProject ? 'try { projectPacket = String(item.getProjectMetadata() || ""); } catch (eProject) {}' : ""}
+          ${readXmp ? 'try { xmpPacket = String(item.getXMPMetadata() || ""); } catch (eXmp) {}' : ""}
+          if (projectPacket.length > 262144 || xmpPacket.length > 262144) {
+            return __error("Metadata packet exceeds the 256 Ki character limit; use bounded Project-panel columns instead");
+          }
           ${parseFields ? `${CEP_XMP_FIELD_HELPERS}
           var loadError = __loadAdobeXmp();
           if (loadError) return __error(loadError);
           var fields = [];
           var omittedSensitiveCount = 0;
-          var projectPacket = "";
-          var xmpPacket = "";
-          try { projectPacket = String(item.getProjectMetadata() || ""); } catch (eProject) {}
-          try { xmpPacket = String(item.getXMPMetadata() || ""); } catch (eXmp) {}
           omittedSensitiveCount += __collectXmpFields(projectPacket, "project", ${includeSensitive ? "true" : "false"}, fields);
           omittedSensitiveCount += __collectXmpFields(xmpPacket, "xmp", ${includeSensitive ? "true" : "false"}, fields);
           metadata.parse_fields = true;
           metadata.fields = fields;
-          metadata.omittedSensitiveCount = omittedSensitiveCount;
+          metadata.omittedSensitiveCount = omittedSensitiveCount;` : ""}
           ${includeProjectMetadata ? "metadata.projectMetadata = projectPacket;" : ""}
-          ${includeXmpMetadata ? "metadata.xmpMetadata = xmpPacket;" : ""}` : `
-          ${includeProjectMetadata ? `try {
-            var xmpBlob = item.getProjectMetadata();
-            metadata.projectMetadata = xmpBlob;
-          } catch(e) {}` : ""}
-          ${includeXmpMetadata ? `try {
-            var xmpBlob2 = item.getXMPMetadata();
-            metadata.xmpMetadata = xmpBlob2;
-          } catch(e) {}` : ""}`}
+          ${includeXmpMetadata ? "metadata.xmpMetadata = xmpPacket;" : ""}
 
           metadata.name = item.name;
           metadata.nodeId = item.nodeId;
 
-          try {
+          ${args.include_media_path === true ? `try {
             metadata.mediaPath = item.getMediaPath();
-          } catch(e) {}
+          } catch(e) {}` : ""}
 
           return __result(metadata);
         `);
@@ -164,7 +168,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
 
     set_metadata: {
       description:
-        "Update project metadata on a project item. Supply complete metadata_xml plus updated_fields, or field_name and value to read-modify-write one XMP/project property through AdobeXMPScript with field readback.",
+        "Update project metadata on a project item. Supply complete metadata_xml plus updated_fields, or field_name and value to read-modify-write one XMP/project property through AdobeXMPScript with field readback. The project packet (default) stays in the project; packet 'xmp' is written by Premiere into the source media file on disk and requires the filesystem capability.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -242,6 +246,9 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
           if (packet !== "project" && packet !== "xmp") {
             return { success: false, error: "packet must be project or xmp." };
           }
+          if (packet === "project" && !/^Column\.[^.]+\.[^.]+$/.test(args.field_name!)) {
+            return { success: false, error: "Project field_name must be a qualified column path, for example Column.PropertyText.Description. Use get_metadata to inspect available field names." };
+          }
           if (packet === "xmp" && !(args.field_namespace && args.field_namespace.trim())) {
             return { success: false, error: "field_namespace is required for xmp packet updates." };
           }
@@ -253,7 +260,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
             : "\"\"";
           const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           ${CEP_XMP_FIELD_HELPERS}
           var loadError = __loadAdobeXmp();
           if (loadError) return __error(loadError);
@@ -317,7 +324,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
         const updatedFields = JSON.stringify(args.updated_fields);
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
 
           var requestedMetadata = "${escapeForExtendScript(args.metadata_xml!)}";
           var updatedFields = ${updatedFields};
@@ -339,7 +346,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
     },
 
     set_color_label: {
-      description: "Set the color label on a project item or clip",
+      description: "Set the color label on a project item or clip and read it back",
       parameters: {
         type: "object" as const,
         properties: {
@@ -355,12 +362,20 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
         required: ["item_id", "color_index"],
       },
       handler: async (args: { item_id: string; color_index: number }) => {
+        // Live 25.2.3 silently ignores an index outside 0-15.
+        if (!Number.isInteger(args.color_index) || args.color_index < 0 || args.color_index > 15) {
+          return { success: false, error: "color_index must be an integer from 0 to 15." };
+        }
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           
           item.setColorLabel(${args.color_index});
-          return __result({ updated: true, item: item.name, colorIndex: ${args.color_index} });
+          var observed = null;
+          try { observed = item.getColorLabel(); } catch (eRead) {}
+          if (typeof observed !== "number" || !isFinite(observed)) return __error("Color label was written but its stored value is unreadable. Inspect before retrying.", { outcome: "committed_unverified", verified: false });
+          if (observed !== ${args.color_index}) return __error("Premiere kept color label " + observed + " instead of ${args.color_index}.");
+          return __result({ updated: true, verified: true, item: item.name, colorIndex: observed });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -381,7 +396,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           
           var colorIndex = item.getColorLabel();
           return __result({ item: item.name, colorIndex: colorIndex });
@@ -405,7 +420,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           
           var interp = item.getFootageInterpretation();
           if (!interp) return __error("No footage interpretation available");
@@ -425,7 +440,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
     },
 
     set_footage_interpretation: {
-      description: "Set footage interpretation settings for a project item",
+      description: "Set footage interpretation settings for a project item and read them back, including fields that were not meant to change",
       parameters: {
         type: "object" as const,
         properties: {
@@ -441,53 +456,81 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
             type: "number",
             description: "Pixel aspect ratio (1.0 = square pixels)",
           },
+          field_type: {
+            type: "integer",
+            description: "Field order of interlaced footage: 0 = progressive, 1 = upper field first, 2 = lower field first",
+          },
         },
         required: ["item_id"],
       },
-      handler: async (args: { item_id: string; frame_rate?: number; pixel_aspect_ratio?: number }) => {
+      handler: async (args: { item_id: string; frame_rate?: number; pixel_aspect_ratio?: number; field_type?: number }) => {
+        if (args.frame_rate === undefined && args.pixel_aspect_ratio === undefined && args.field_type === undefined) {
+          return { success: false, error: "Provide frame_rate, pixel_aspect_ratio, field_type, or a combination." };
+        }
+        if (args.field_type !== undefined && (!Number.isInteger(args.field_type) || args.field_type < 0 || args.field_type > 2)) {
+          return { success: false, error: "field_type must be 0 (progressive), 1 (upper field first), or 2 (lower field first)." };
+        }
+        for (const [name, value] of [["frame_rate", args.frame_rate], ["pixel_aspect_ratio", args.pixel_aspect_ratio]] as const) {
+          if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
+            return { success: false, error: `${name} must be a positive number.` };
+          }
+        }
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           
           var interp = item.getFootageInterpretation();
           if (!interp) return __error("No footage interpretation available");
           
           ${args.frame_rate !== undefined ? `interp.frameRate = ${args.frame_rate};` : ""}
           ${args.pixel_aspect_ratio !== undefined ? `interp.pixelAspectRatio = ${args.pixel_aspect_ratio};` : ""}
+          ${args.field_type !== undefined ? `interp.fieldType = ${args.field_type};` : ""}
           
+          var wantedRate = ${args.frame_rate !== undefined ? args.frame_rate : "interp.frameRate"};
+          var wantedPar = ${args.pixel_aspect_ratio !== undefined ? args.pixel_aspect_ratio : "interp.pixelAspectRatio"};
+          var wantedField = ${args.field_type !== undefined ? args.field_type : "interp.fieldType"};
           item.setFootageInterpretation(interp);
-          return __result({ updated: true, item: item.name });
+          // Live 25.2.3: writing the interpretation back can reset fields that
+          // were not changed (a 2:1 pixel aspect returned to 1), so check both.
+          var after = null;
+          try { after = item.getFootageInterpretation(); } catch (eRead) {}
+          var observedRate = after && typeof after.frameRate === "number" ? after.frameRate : NaN;
+          var observedPar = after && typeof after.pixelAspectRatio === "number" ? after.pixelAspectRatio : NaN;
+          var observedField = after && typeof after.fieldType === "number" ? after.fieldType : NaN;
+          if (!isFinite(observedRate) || !isFinite(observedPar) || (${args.field_type !== undefined} && !isFinite(observedField))) return __error("Footage interpretation was written but its stored fields are unreadable. Inspect before retrying.", { outcome: "committed_unverified", verified: false });
+          if (!(Math.abs(observedRate - wantedRate) < 0.001) || !(Math.abs(observedPar - wantedPar) < 0.0001) || (${args.field_type !== undefined} && observedField !== wantedField)) {
+            return __jsonStringify({ success: false, error: "Premiere's footage interpretation reads " + observedRate + " fps, pixel aspect " + observedPar + (${args.field_type !== undefined} ? ", field type " + observedField : "") + " instead of " + wantedRate + " fps, " + wantedPar + (${args.field_type !== undefined} ? ", field type " + wantedField : "") + ".", data: { frameRate: observedRate, pixelAspectRatio: observedPar, fieldType: observedField } });
+          }
+          return __result({ updated: true, verified: true, item: item.name, frameRate: observedRate, pixelAspectRatio: observedPar, fieldType: observedField });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
     get_xmp_metadata: {
-      description: "Get the raw file/clip XMP packet for a project item (Dublin Core, EXIF, IPTC, xmpDM, and other namespaces). Distinct from Premiere-private project metadata. Omit GPS and camera serials from user-facing reports unless requested.",
+      description: "Inspect bounded file/clip XMP fields with GPS, serials, author and contact data omitted by default. Raw XMP requires include_raw and include_sensitive true; it can disclose personal data to the connected client. Distinct from Premiere-private project metadata.",
       parameters: {
         type: "object" as const,
         properties: {
-          item_id: {
-            type: "string",
-            description: "Node ID or name of the project item",
-          },
+          item_id: { type: "string", description: "Node ID or name of the project item" },
+          include_raw: { type: "boolean", description: "Opt in to raw XMP instead of parsed fields (maximum 256 Ki characters). Requires include_sensitive true; default false." },
+          include_sensitive: { type: "boolean", description: "Opt in to GPS, serial, author and contact fields; required for raw XMP; default false." },
         },
         required: ["item_id"],
       },
-      handler: async (args: { item_id: string }) => {
-        const script = buildToolScript(`
-          var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
-          
-          var xmp = item.getXMPMetadata();
-          return __result({ item: item.name, xmpMetadata: xmp });
-        `);
-        return sendCommand(script, bridgeOptions);
+      handler: async (args: { item_id: string; include_raw?: boolean; include_sensitive?: boolean }) => {
+        return getMetadataTools(bridgeOptions).get_metadata.handler({
+          item_id: args.item_id,
+          parse_fields: args.include_raw !== true,
+          include_project_metadata: false,
+          include_xmp_metadata: args.include_raw === true ? true : undefined,
+          include_sensitive: args.include_sensitive,
+        });
       },
     },
 
     set_xmp_metadata: {
       description:
-        "Merge a raw XMP XML patch into a project item's existing XMP metadata without removing unrelated fields.",
+        "Merge a raw XMP XML patch into a project item's existing XMP metadata without removing unrelated fields. WARNING: Premiere writes XMP into the source media file on disk (the file's metadata block and modification time change; picture and sound are untouched). Each supplied leaf field is compared with host readback (maximum 256); unreadable readback remains committed_unverified. Requires the filesystem capability.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -505,42 +548,72 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string; xmp_xml: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
 
           try {
             if (ExternalObject.AdobeXMPScript === undefined) {
               ExternalObject.AdobeXMPScript = new ExternalObject("lib:AdobeXMPScript");
             }
           } catch (e) {
-            return __error("Premiere could not load the Adobe XMP library; no metadata was changed: " + e.toString());
+            return __error("Premiere could not load the Adobe XMP library; no metadata was changed: " + e.toString(), { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
           }
-          if (typeof XMPMeta !== "function" || typeof XMPUtils === "undefined" || typeof XMPUtils.appendProperties !== "function") {
-            return __error("Premiere's XMP merge APIs are unavailable; no metadata was changed.");
+          if (typeof XMPMeta !== "function" || typeof XMPUtils === "undefined" || typeof XMPUtils.appendProperties !== "function" ||
+              typeof XMPConst === "undefined" || typeof XMPConst.APPEND_ALL_PROPERTIES !== "number" || typeof XMPConst.APPEND_REPLACE_OLD_VALUES !== "number") {
+            return __error("Premiere's XMP merge APIs are unavailable; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
           }
 
+          var writeAttempted = false;
           try {
             var existingPacket = String(item.getXMPMetadata() || "");
-            if (!existingPacket) return __error("The project item has no readable XMP packet; no metadata was changed.");
+            if (!existingPacket) return __error("The project item has no readable XMP packet; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
             var existingXmp = new XMPMeta(existingPacket);
             var patchXmp = new XMPMeta("${escapeForExtendScript(args.xmp_xml)}");
+            if (typeof patchXmp.iterator !== "function" || typeof existingXmp.getProperty !== "function" || typeof XMPConst.ITERATOR_JUST_LEAFNODES !== "number") return __error("XMP field inspection is unavailable; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
+            var patchFields = [], patchIterator = patchXmp.iterator(XMPConst.ITERATOR_JUST_LEAFNODES, "", "");
+            var patchField = patchIterator.next();
+            while (patchField) {
+              var fieldNamespace = String(patchField.namespace || ""), fieldPath = String(patchField.path || "");
+              if (!fieldNamespace || !fieldPath) return __error("The patch has an unreadable field identity; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
+              if (patchFields.length >= 256) return __error("The XMP patch exceeds 256 leaf fields; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
+              patchFields.push({ namespace: fieldNamespace, name: fieldPath, value: String(patchField.value == null ? "" : patchField.value) });
+              patchField = patchIterator.next();
+            }
+            if (!patchFields.length) return __error("The XMP patch has no readable leaf fields; no metadata was changed.", { outcome: "not_applied", mutationOutcome: "not_applied", timelineChanged: false });
             // Copy every supplied top-level field into the existing packet, replacing
             // only fields named by the patch and retaining unrelated metadata.
-            XMPUtils.appendProperties(patchXmp, existingXmp, true, true, false);
+            // AdobeXMPScript signature: appendProperties(source, dest, options: Number).
+            var appendOptions = XMPConst.APPEND_ALL_PROPERTIES | XMPConst.APPEND_REPLACE_OLD_VALUES;
+            XMPUtils.appendProperties(patchXmp, existingXmp, appendOptions);
+            writeAttempted = true;
             item.setXMPMetadata(existingXmp.serialize());
 
             // Reparse the host readback so a malformed or rejected packet never
             // reports success. Exact serialized XML formatting is host-dependent.
             var writtenPacket = String(item.getXMPMetadata() || "");
-            if (!writtenPacket) return __error("Premiere wrote no readable XMP packet; inspect the item before retrying.");
-            new XMPMeta(writtenPacket);
+            if (!writtenPacket) return __error("Premiere wrote no readable XMP packet; inspect the item before retrying.", { updated: null, verified: false, outcome: "committed_unverified" });
+            var writtenXmp = new XMPMeta(writtenPacket), fieldChecks = [], mismatchedFieldCount = 0;
+            for (var fi = 0; fi < patchFields.length; fi++) {
+              var wantedField = patchFields[fi];
+              var observed = writtenXmp.getProperty(wantedField.namespace, wantedField.name);
+              var observedValue = observed == null ? null : String(observed.value === undefined ? observed : observed.value);
+              var matched = observedValue !== null && observedValue === wantedField.value;
+              if (!matched) mismatchedFieldCount++;
+              fieldChecks.push({ namespace: wantedField.namespace, name: wantedField.name, matched: matched });
+            }
+            if (mismatchedFieldCount) return __error("Premiere's XMP readback does not contain every requested field value.", { updated: false, merged: true, item: item.name, verified: false, outcome: "failed", checkedFieldCount: fieldChecks.length, mismatchedFieldCount: mismatchedFieldCount, fieldChecks: fieldChecks });
             return __result({
               updated: true,
               merged: true,
               item: item.name,
-              verification: "readback_xmp_packet_reparsed"
+              verified: true,
+              outcome: "verified",
+              checkedFieldCount: fieldChecks.length,
+              mismatchedFieldCount: 0,
+              fieldChecks: fieldChecks,
+              verification: "field_value_readback"
             });
           } catch (e) {
-            return __error("Premiere could not merge XMP metadata; no success is reported: " + e.toString());
+            return __error("Premiere could not merge or verify XMP metadata; inspect before retrying: " + e.toString(), { updated: null, verified: false, outcome: writeAttempted ? "committed_unverified" : "failed" });
           }
         `);
         return sendCommand(script, bridgeOptions);
@@ -562,7 +635,7 @@ export function getMetadataTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found");
+          if (!item) return __error("Item not found; nothing was changed.");
           
           var info = { item: item.name };
           try { info.colorSpace = item.getColorSpace(); } catch(e) { info.colorSpace = "unknown"; }

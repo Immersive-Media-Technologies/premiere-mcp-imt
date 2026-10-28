@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
+import { reviewRecoveryFixture } from "./review-recovery-fixture.js";
 const require = createRequire(import.meta.url);
 const Commands = require("../../uxp-plugin/commands.cjs");
 const Protocol = require("../../uxp-plugin/protocol.cjs");
@@ -40,7 +41,7 @@ function host(options: { transitions?: boolean; commit?: boolean } = {}) {
     exportedFrames.push(filename);
     return true;
   });
-  const range = { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 };
+  const range = { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 };
   const playhead = { positionSeconds: 3 };
   const preferenceValues = new Map<string, string>([
     ["auto-peak-generation", "0"],
@@ -193,11 +194,13 @@ describe("UXP command registry", () => {
       name: "Delivery",
       presetPath: "/presets/hd.sqpreset",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await reviewRecoveryFixture(value.registry);
     await expect(value.registry.dispatch("sequence.createPreset", {
       name: "Delivery",
       presetPath: "/presets/hd.sqpreset",
       confirmNonUndoable: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(value.registry);
     expect(value.project.createSequenceWithPresetPath).not.toHaveBeenCalled();
     await expect(value.registry.dispatch("sequence.createPreset", {
       name: "Delivery",
@@ -320,6 +323,101 @@ describe("UXP command registry", () => {
     expect(value.exportedFrames).toEqual(["frame"]);
   });
 
+  it("snaps an explicit frame-export time and reports the requested and applied time", async () => {
+    const value = host();
+    value.sequence.getTimebase.mockResolvedValueOnce("10160640000");
+    const result = await value.registry.dispatch("frame.export", {
+      outputDirectory: "C:/approved", filename: "frame.png", seconds: 3.101,
+    });
+    expect(result).toMatchObject({ requestedSeconds: 3.101, appliedSeconds: 3.12, seconds: 3.12 });
+    expect(value.exportSequenceFrame).toHaveBeenCalledWith(value.sequence, { seconds: 3.12 }, "frame", "C:/approved", 1920, 1080);
+  });
+
+  it("retries with the extension when the host rejects a bare filename (Premiere 26.5.2)", async () => {
+    const value = host();
+    value.exportSequenceFrame.mockImplementation(async (_sequence: unknown, _position: unknown, filename: string) => {
+      if (!/\.png$/.test(filename)) throw new Error("Internal error : File Format is not supported");
+      value.exportedFrames.push(filename);
+      return true;
+    });
+    await expect(value.registry.dispatch("frame.export", {
+      outputDirectory: "C:/approved", filename: "frame.png",
+    })).resolves.toMatchObject({ path: "C:/approved/frame.png", exporterResult: true });
+    expect(value.exportSequenceFrame).toHaveBeenNthCalledWith(1, value.sequence, { seconds: 3 }, "frame", "C:/approved", 1920, 1080);
+    expect(value.exportSequenceFrame).toHaveBeenNthCalledWith(2, value.sequence, { seconds: 3 }, "frame.png", "C:/approved", 1920, 1080);
+    expect(value.exportedFrames).toEqual(["frame.png"]);
+  });
+
+  it("does not retry other export errors", async () => {
+    const value = host();
+    value.exportSequenceFrame.mockImplementation(async () => { throw new Error("disk full"); });
+    await expect(value.registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" }))
+      .rejects.toThrow("disk full");
+    expect(value.exportSequenceFrame).toHaveBeenCalledTimes(1);
+  });
+
+  describe("frame export output check (#642)", () => {
+    function withFiles(initial: string[], written: (filename: string) => string[]) {
+      const value = host();
+      const files = new Set(initial);
+      value.exportSequenceFrame.mockImplementation(async (_sequence: unknown, _position: unknown, filename: string) => {
+        for (const path of written(filename)) files.add(path);
+        return true;
+      });
+      const fileExists = vi.fn(async (path: string) => files.has(path));
+      const frameWait = vi.fn(async () => undefined);
+      const registry = Commands.createCommandRegistry({ ppro: value.ppro, Protocol, fileExists, frameWait });
+      return { registry, fileExists, frameWait, files };
+    }
+
+    it("waits for a PNG the host writes after returning (Premiere 26.5.2)", async () => {
+      const { registry, frameWait, files } = withFiles([], () => []);
+      frameWait.mockImplementation(async () => {
+        if (frameWait.mock.calls.length === 3) files.add("C:/approved/frame.png");
+      });
+      await expect(registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" }))
+        .resolves.toMatchObject({ path: "C:/approved/frame.png", outcome: "verified" });
+      expect(frameWait).toHaveBeenCalledTimes(3);
+    });
+
+    it("verifies the PNG exists after the export", async () => {
+      const { registry } = withFiles([], (stem) => [`C:/approved/${stem}.png`]);
+      await expect(registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" }))
+        .resolves.toMatchObject({
+          path: "C:/approved/frame.png", outcome: "verified", verificationBoundary: "output_file_exists",
+          operation: { verification: { status: "verified", boundary: "output_file_exists" } },
+        });
+    });
+
+    it("fails when Premiere returns true but writes no file", async () => {
+      const { registry, frameWait } = withFiles([], () => []);
+      await expect(registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" }))
+        .rejects.toMatchObject({ code: "UXP_VERIFICATION_FAILED", message: expect.stringMatching(/no file was written at C:\/approved\/frame\.png/) });
+      // It polls for the whole bounded wait (15 s at 250 ms) before giving up.
+      expect(frameWait).toHaveBeenCalledTimes(60);
+    });
+
+    it("reports the real path when the host does not append the extension", async () => {
+      const { registry } = withFiles([], (stem) => [`C:/approved/${stem}`]);
+      const result = await registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" });
+      expect(result).toMatchObject({ path: "C:/approved/frame", outcome: "verified" });
+      expect(result.warning).toMatch(/instead of C:\/approved\/frame\.png/);
+    });
+
+    it("does not count a file that existed before the export", async () => {
+      const { registry } = withFiles(["C:/approved/frame.png"], () => []);
+      const result = await registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" });
+      expect(result).toMatchObject({ path: "C:/approved/frame.png", outcome: "committed_unverified" });
+      expect(result.note).toMatch(/already existed/);
+    });
+
+    it("reports committed_unverified when UXP storage is unavailable", async () => {
+      const value = host();
+      await expect(value.registry.dispatch("frame.export", { outputDirectory: "C:/approved", filename: "frame.png" }))
+        .resolves.toMatchObject({ outcome: "committed_unverified", note: expect.stringMatching(/could not check/) });
+    });
+  });
+
   it("does not report a frame path when Premiere rejects the export", async () => {
     const value = host();
     value.exportSequenceFrame.mockResolvedValueOnce(false);
@@ -341,19 +439,19 @@ describe("UXP command registry", () => {
     const value = host();
     await expect(value.registry.dispatch("sequence.range.inspect", {})).resolves.toEqual({
       sequenceGuid: "sequence-1",
-      range: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      range: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       verificationBoundary: "sequence_range_readback",
     });
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2, outSeconds: 110, zeroPointSeconds: 7200 },
       operationId: "range-1",
     })).resolves.toMatchObject({
       updated: true,
       outcome: "verified",
       sequenceGuid: "sequence-1",
-      range: { inSeconds: 2, outSeconds: 110, zeroPointSeconds: 7200, endSeconds: 120 },
+      range: { inSeconds: 2, outSeconds: 110, inSet: true, outSet: true, zeroPointSeconds: 7200, endSeconds: 120 },
       operation: {
         mutatesProject: true,
         verification: { status: "verified" },
@@ -369,16 +467,82 @@ describe("UXP command registry", () => {
     expect(value.sequence.createSetZeroPointAction).toHaveBeenCalledWith({ seconds: 7200 });
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2, outSeconds: 110, zeroPointSeconds: 7200 },
       operationId: "range-1",
     })).resolves.toMatchObject({ replayed: true });
     expect(value.project.executeTransaction).toHaveBeenCalledOnce();
   });
 
+  it("treats negative Premiere In/Out sentinels as unset and can set them from that snapshot", async () => {
+    for (const unset of ["in", "out", "both"] as const) {
+      const value = host();
+      if (unset === "in" || unset === "both") value.range.inSeconds = -400000;
+      if (unset === "out" || unset === "both") value.range.outSeconds = -400000;
+      const inSeconds = unset === "in" || unset === "both" ? null : 1;
+      const outSeconds = unset === "out" || unset === "both" ? null : 100;
+      const expectedRange = {
+        inSeconds, outSeconds, inSet: inSeconds !== null, outSet: outSeconds !== null,
+        zeroPointSeconds: 3600, endSeconds: 120,
+      };
+      await expect(value.registry.dispatch("sequence.range.inspect", {})).resolves.toMatchObject({
+        range: expectedRange,
+      });
+      await expect(value.registry.dispatch("sequence.range.update", {
+        expectedSequenceGuid: "sequence-1", expectedRange,
+        updates: { inSeconds: 2, outSeconds: 110 }, operationId: "unset-range-" + unset,
+      })).resolves.toMatchObject({
+        updated: true, outcome: "verified",
+        range: { inSeconds: 2, outSeconds: 110, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
+      });
+      await expect(value.registry.dispatch("sequence.range.update", {
+        expectedSequenceGuid: "sequence-1",
+        expectedRange: { inSeconds: 2, outSeconds: 110, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
+        updates: { zeroPointSeconds: 7200 }, operationId: "set-range-then-update-" + unset,
+      })).resolves.toMatchObject({
+        updated: true,
+        range: { inSeconds: 2, outSeconds: 110, inSet: true, outSet: true, zeroPointSeconds: 7200, endSeconds: 120 },
+      });
+    }
+  });
+
+  it("preserves an unset Out when only In is updated", async () => {
+    const value = host();
+    value.range.outSeconds = -400000;
+    await expect(value.registry.dispatch("sequence.range.update", {
+      expectedSequenceGuid: "sequence-1",
+      expectedRange: { inSeconds: 1, outSeconds: null, inSet: true, outSet: false, zeroPointSeconds: 3600, endSeconds: 120 },
+      updates: { inSeconds: 2 }, operationId: "partial-unset-range",
+    })).resolves.toMatchObject({ range: { inSeconds: 2, outSeconds: null, inSet: true, outSet: false }, outcome: "verified" });
+  });
+
+  it("rejects malformed range reads and missing or inconsistent unset guards", async () => {
+    for (const field of ["getInPoint", "getOutPoint", "getZeroPoint", "getEndTime"] as const) {
+      for (const seconds of [NaN, Infinity, undefined, "0"]) {
+        const value = host();
+        value.sequence[field].mockResolvedValue({ seconds } as any);
+        await expect(value.registry.dispatch("sequence.range.inspect", {})).rejects.toThrow();
+      }
+    }
+    for (const field of ["getZeroPoint", "getEndTime"] as const) {
+      const value = host();
+      value.sequence[field].mockResolvedValue({ seconds: -400000 });
+      await expect(value.registry.dispatch("sequence.range.inspect", {})).rejects.toThrow();
+    }
+    for (const inSeconds of [undefined, null, 1]) {
+      const value = host();
+      await expect(value.registry.dispatch("sequence.range.update", {
+        expectedSequenceGuid: "sequence-1",
+        expectedRange: { inSeconds, outSeconds: 100, inSet: inSeconds === null, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
+        updates: { inSeconds: 2 }, operationId: "invalid-unset-range",
+      })).rejects.toThrow();
+      expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    }
+  });
+
   it("serializes concurrent sequence-range updates with different operation IDs", async () => {
     const value = host();
-    const expectedRange = { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 };
+    const expectedRange = { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 };
     const first = value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
       expectedRange,
@@ -395,11 +559,11 @@ describe("UXP command registry", () => {
     await expect(first).resolves.toMatchObject({
       updated: true,
       operationId: "range-concurrent-first",
-      range: { inSeconds: 2, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      range: { inSeconds: 2, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
     });
     await expect(second).rejects.toMatchObject({ code: "UXP_STALE_RANGE" });
     expect(value.project.executeTransaction).toHaveBeenCalledOnce();
-    expect(value.range).toEqual({ inSeconds: 2, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 });
+    expect(value.range).toEqual({ inSeconds: 2, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 });
   });
 
   it("inspects, guardedly sets, and replays the sequence player position", async () => {
@@ -433,6 +597,17 @@ describe("UXP command registry", () => {
     expect(value.project.lockedAccess).not.toHaveBeenCalled();
     await expect(value.registry.dispatch("sequence.playhead.set", args)).resolves.toMatchObject({ replayed: true });
     expect(value.sequence.setPlayerPosition).toHaveBeenCalledOnce();
+  });
+
+  it("snaps a fractional playhead request to the exact sequence timebase and reports both values", async () => {
+    const value = host();
+    value.sequence.getTimebase.mockResolvedValueOnce("10160640000");
+    const result = await value.registry.dispatch("sequence.playhead.set", {
+      expectedSequenceGuid: "sequence-1", expectedPositionSeconds: 3, positionSeconds: 3.101,
+      operationId: "playhead-grid-1",
+    });
+    expect(result).toMatchObject({ positioned: true, requestedPositionSeconds: 3.101, appliedPositionSeconds: 3.12, positionSeconds: 3.12 });
+    expect(value.sequence.setPlayerPosition).toHaveBeenCalledWith({ seconds: 3.12 });
   });
 
   it("inspects, guardedly sets, and replays bounded documented app preferences", async () => {
@@ -509,9 +684,11 @@ describe("UXP command registry", () => {
     await expect(value.registry.dispatch("preferences.set", {
       preference: "auto_peak_generation", expectedValue: "0", value: "1", persistence: "persistent", operationId: "app-preference-unconfirmed",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await reviewRecoveryFixture(value.registry);
     await expect(value.registry.dispatch("preferences.set", {
       preference: "unknown", expectedValue: "0", value: "1", persistence: "persistent", confirmPreferenceChange: true, operationId: "app-preference-invalid",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(value.registry);
     await expect(value.registry.dispatch("preferences.set", {
       preference: "auto_peak_generation", expectedValue: "0", value: "1", persistence: "persistent", confirmPreferenceChange: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
@@ -804,12 +981,15 @@ describe("UXP command registry", () => {
     await expect(malformed.registry.dispatch("sequence.playhead.set", {
       expectedPositionSeconds: 3, positionSeconds: 8,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(malformed.registry);
     await expect(malformed.registry.dispatch("sequence.playhead.set", {
       expectedSequenceGuid: "sequence-1", expectedPositionSeconds: Number.NaN, positionSeconds: 8,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(malformed.registry);
     await expect(malformed.registry.dispatch("sequence.playhead.set", {
       expectedSequenceGuid: "sequence-1", expectedPositionSeconds: 3, positionSeconds: 86400.001,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(malformed.registry);
     await expect(malformed.registry.dispatch("sequence.playhead.set", {
       expectedSequenceGuid: "sequence-1", expectedPositionSeconds: 3, positionSeconds: 8, unexpected: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
@@ -875,7 +1055,7 @@ describe("UXP command registry", () => {
 
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_STALE_RANGE" });
     expect(value.ppro.TickTime.createWithSeconds).toHaveBeenCalledWith(2);
@@ -887,30 +1067,33 @@ describe("UXP command registry", () => {
     const value = host();
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "other-sequence",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_STALE_SEQUENCE" });
+    await reviewRecoveryFixture(value.registry);
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 0, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 0, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_STALE_RANGE" });
+    await reviewRecoveryFixture(value.registry);
     const durationChanged = host();
     durationChanged.range.endSeconds = 119;
     await expect(durationChanged.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_STALE_RANGE" });
     expect(durationChanged.project.executeTransaction).not.toHaveBeenCalled();
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 111, outSeconds: 110 },
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(value.registry);
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: {},
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
     expect(value.sequence.createSetInPointAction).not.toHaveBeenCalled();
@@ -920,7 +1103,7 @@ describe("UXP command registry", () => {
     rejectedAction.sequence.createSetInPointAction.mockReturnValue(undefined);
     await expect(rejectedAction.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_ACTION_REJECTED" });
   });
@@ -932,7 +1115,7 @@ describe("UXP command registry", () => {
       .mockResolvedValueOnce({ seconds: 99 });
     await expect(value.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { outSeconds: 110 },
     })).rejects.toMatchObject({ code: "UXP_VERIFICATION_FAILED" });
 
@@ -942,7 +1125,7 @@ describe("UXP command registry", () => {
       .mockResolvedValueOnce({ seconds: 119 });
     await expect(durationChanged.registry.dispatch("sequence.range.update", {
       expectedSequenceGuid: "sequence-1",
-      expectedRange: { inSeconds: 1, outSeconds: 100, zeroPointSeconds: 3600, endSeconds: 120 },
+      expectedRange: { inSeconds: 1, outSeconds: 100, inSet: true, outSet: true, zeroPointSeconds: 3600, endSeconds: 120 },
       updates: { inSeconds: 2 },
     })).rejects.toMatchObject({ code: "UXP_VERIFICATION_FAILED" });
 
@@ -985,7 +1168,7 @@ describe("UXP command registry", () => {
     expect(value.project.save).toHaveBeenCalledOnce();
   });
 
-  it("shares concurrent mutation failures and releases the operation id for retry", async () => {
+  it("shares concurrent mutation failures and consumes the operation id without blind retry", async () => {
     const value = host();
     let rejectSave: (error: Error) => void = () => undefined;
     value.project.save
@@ -1003,10 +1186,9 @@ describe("UXP command registry", () => {
       expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: "save failed" }) }),
       expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: "save failed" }) }),
     ]);
-    await expect(value.registry.dispatch("project.save", args)).resolves.toMatchObject({
-      saved: true, operationId: "save-retry",
-    });
-    expect(value.project.save).toHaveBeenCalledTimes(2);
+    await expect(value.registry.dispatch("project.save", args)).rejects.toMatchObject({ code: "UXP_OPERATION_CONSUMED" });
+    await expect(value.registry.dispatch("project.save", { operationId: "save-other" })).rejects.toMatchObject({ code: "UXP_RECOVERY_REQUIRED" });
+    expect(value.project.save).toHaveBeenCalledTimes(1);
   });
 
   it("applies replay protection to the injected transcript import mutator", async () => {
@@ -1041,7 +1223,7 @@ describe("UXP command registry", () => {
     const value = host();
     await expect(value.registry.dispatch("interchange.export", {
       format: "otio", outputFilePath: "/tmp/edit.otio",
-    })).resolves.toMatchObject({ exported: true, format: "otio", outcome: "verified" });
+    })).resolves.toMatchObject({ exported: true, format: "otio", outcome: "committed_unverified", outputVerified: false });
     await expect(value.registry.dispatch("encoder.configure", {
       launch: true, embeddedXmp: true, startBatch: true,
     })).resolves.toMatchObject({
@@ -1049,6 +1231,18 @@ describe("UXP command registry", () => {
       outcome: "committed_unverified",
       performed: ["launch", "embeddedXmp", "startBatch"],
     });
+  });
+
+  it.each(["otio", "fcpxml"])("probes interchange formats independently (%s only)", async (format) => {
+    const value = host();
+    value.registry = Commands.createCommandRegistry({ ppro: value.ppro, Protocol, workspace: { status: () => ({ canonicalPathValidation: "available" }), assertPathAllowed: async (path: string) => path } });
+    const unavailable = format === "otio" ? "exportAsFinalCutProXML" : "exportAsOpenTimelineIO";
+    delete (value.ppro.ProjectConverter as Record<string, unknown>)[unavailable];
+    await expect(value.registry.capabilities()).resolves.toMatchObject({ commands: { "interchange.export": { supported: true, formats: { otio: format === "otio", fcpxml: format === "fcpxml" } } } });
+    await expect(value.registry.dispatch("interchange.export", { format, outputFilePath: "/tmp/edit." + format })).resolves.toMatchObject({ exported: true, outputVerified: false, outcome: "committed_unverified" });
+    await expect(value.registry.dispatch("interchange.export", { format: format === "otio" ? "fcpxml" : "otio", outputFilePath: "/tmp/unavailable.xml" })).rejects.toMatchObject({ code: "UXP_COMMAND_UNAVAILABLE" });
+    await reviewRecoveryFixture(value.registry);
+    await expect(value.registry.dispatch("interchange.export", { format, outputFilePath: "/tmp/invalid.xml", suppressUI: "true" })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
   });
 
   it("adds a configured transition in a locked undoable transaction", async () => {

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -36,17 +37,31 @@ describe("CEP connector updater", () => {
     expect(updater.isTrustedDownloadUrl("https://evil.example/file.zxp")).toBe(false);
   });
 
+  it("asks the /latest endpoint for plain JSON, which it serves (not the abbreviated type, which it answers with 406)", () => {
+    expect(updater.LATEST_PACKAGE_API.endsWith("/latest")).toBe(true);
+    expect(updater.LATEST_PACKAGE_ACCEPT).toBe("application/json");
+    const panel = readFileSync(join(process.cwd(), "cep-plugin", "main.js"), "utf8");
+    expect(panel).toContain("Accept: MCPBridgeUpdater.LATEST_PACKAGE_ACCEPT");
+    expect(panel).not.toContain("application/vnd.npm.install-v1+json");
+  });
+
   it("reads the latest global package version from the npm registry record", () => {
     const update = updater.updateStateFromPackageRecord("1.14.7", {
       "dist-tags": { latest: "v1.14.8" },
     });
 
-    expect(updater.LATEST_PACKAGE_API).toBe("https://registry.npmjs.org/@immersive-media-technologies%2Fpremiere-mcp-imt");
+    expect(updater.LATEST_PACKAGE_API).toBe("https://registry.npmjs.org/@immersive-media-technologies%2Fpremiere-mcp-imt/latest");
     expect(update).toEqual({
       currentVersion: "1.14.7",
       latestVersion: "1.14.8",
       updateAvailable: true,
     });
+    expect(updater.updateStateFromPackageRecord("1.14.8", { version: "1.14.8" })).toEqual({
+      currentVersion: "1.14.8",
+      latestVersion: "1.14.8",
+      updateAvailable: false,
+    });
+    expect(() => updater.latestPackageVersion({ version: "nightly" })).toThrow("valid latest version");
     expect(() => updater.latestPackageVersion({ "dist-tags": { latest: "nightly" } }))
       .toThrow("valid latest version");
   });

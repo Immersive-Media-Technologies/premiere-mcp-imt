@@ -5,7 +5,8 @@ const require = createRequire(import.meta.url);
 const Commands = require("../../uxp-plugin/commands.cjs");
 const Protocol = require("../../uxp-plugin/protocol.cjs");
 
-type SlideHostOptions = { pauseFirstSnapshot?: boolean };
+/** independentEdges models a host where timeline edge actions leave source points alone; the default is the trim-like behaviour measured on Premiere 26.5.2. */
+type SlideHostOptions = { pauseFirstSnapshot?: boolean; independentEdges?: boolean };
 
 function slideHost(options: SlideHostOptions = {}) {
   const state = {
@@ -37,8 +38,14 @@ function slideHost(options: SlideHostOptions = {}) {
       getSpeed: vi.fn(async () => 1),
       isSpeedReversed: vi.fn(async () => false),
       createMoveAction: vi.fn((time: { seconds: number }) => ({ apply: () => { itemState.start += time.seconds; itemState.end += time.seconds; } })),
-      createSetStartAction: vi.fn((time: { seconds: number }) => ({ apply: () => { itemState.start = time.seconds; } })),
-      createSetEndAction: vi.fn((time: { seconds: number }) => ({ apply: () => { itemState.end = time.seconds; } })),
+      createSetStartAction: vi.fn((time: { seconds: number }) => ({ apply: () => {
+        if (!options.independentEdges) itemState.inPoint += time.seconds - itemState.start;
+        itemState.start = time.seconds;
+      } })),
+      createSetEndAction: vi.fn((time: { seconds: number }) => ({ apply: () => {
+        if (!options.independentEdges) itemState.outPoint += time.seconds - itemState.end;
+        itemState.end = time.seconds;
+      } })),
       createSetInPointAction: vi.fn((time: { seconds: number }) => ({ apply: () => { itemState.inPoint = time.seconds; } })),
       createSetOutPointAction: vi.fn((time: { seconds: number }) => ({ apply: () => { itemState.outPoint = time.seconds; } })),
     };
@@ -47,6 +54,7 @@ function slideHost(options: SlideHostOptions = {}) {
   const videoTrack = { getTrackItems: vi.fn(async () => [previous, target, following]) };
   const sequence = {
     guid: "sequence-1",
+    getTimebase: vi.fn(async () => "10160640000"),
     getVideoTrackCount: vi.fn(async () => 1), getVideoTrack: vi.fn(async () => videoTrack),
     getAudioTrackCount: vi.fn(async () => 0), getAudioTrack: vi.fn(async () => null),
   };
@@ -71,6 +79,15 @@ const expectedSnapshot = {
 const targetCoordinates = { mediaType: "video", trackIndex: 0, clipIndex: 1 };
 
 describe("guarded documented UXP track-item slide workflow", () => {
+  it("retains an unverified commit when the host ignores part of the slide", async () => {
+    const value = slideHost();
+    value.following.createSetStartAction.mockImplementation(() => ({ apply: () => undefined }));
+    const input = { ...targetCoordinates, expectedSnapshot, slideBySeconds: 1, confirmSlide: true, operationId: "partial-slide" };
+    await expect(value.registry.dispatch("trackItem.slide", input)).resolves.toMatchObject({ outcome: "committed_unverified", committed: true, partial: true, rollbackPerformed: false });
+    await expect(value.registry.dispatch("trackItem.slide", input)).resolves.toMatchObject({ replayed: true });
+    // Failed timeline placement must not trigger source corrections; replay adds none.
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
+  });
   it("advertises bounded inspection and a replay-safe undoable transaction command", async () => {
     const value = slideHost();
     await expect(value.registry.capabilities()).resolves.toMatchObject({ commands: {
@@ -99,8 +116,25 @@ describe("guarded documented UXP track-item slide workflow", () => {
     expect(value.project.executeTransaction.mock.calls[0]?.[1]).toBe("Slide timeline item");
     expect(value.target.createMoveAction).toHaveBeenCalledWith({ seconds: 2 });
     expect(value.previous.createSetEndAction).toHaveBeenCalledWith({ seconds: 12 });
-    expect(value.previous.createSetOutPointAction).toHaveBeenCalledWith({ seconds: 12 });
     expect(value.following.createSetStartAction).toHaveBeenCalledWith({ seconds: 22 });
+    // On a trim-like host the source points follow the edges, so no source action is sent.
+    expect(value.previous.createSetOutPointAction).not.toHaveBeenCalled();
+    expect(value.following.createSetInPointAction).not.toHaveBeenCalled();
+    expect(value.state).toEqual({
+      previous: { start: 0, end: 12, inPoint: 0, outPoint: 12 },
+      target: { start: 12, end: 22, inPoint: 20, outPoint: 30 },
+      following: { start: 22, end: 30, inPoint: 32, outPoint: 40 },
+    });
+  });
+
+  it("writes neighbour source points in a second transaction when the host keeps edges and sources independent", async () => {
+    const value = slideHost({ independentEdges: true });
+    await expect(value.registry.dispatch("trackItem.slide", {
+      ...targetCoordinates, expectedSnapshot, slideBySeconds: 2, confirmSlide: true, operationId: "slide-independent",
+    })).resolves.toMatchObject({ slid: true, outcome: "verified", undoSteps: 2 });
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(2);
+    expect(value.project.executeTransaction.mock.calls[1]?.[1]).toBe("Slide neighbour source points");
+    expect(value.previous.createSetOutPointAction).toHaveBeenCalledWith({ seconds: 12 });
     expect(value.following.createSetInPointAction).toHaveBeenCalledWith({ seconds: 32 });
     expect(value.state).toEqual({
       previous: { start: 0, end: 12, inPoint: 0, outPoint: 12 },
@@ -110,13 +144,19 @@ describe("guarded documented UXP track-item slide workflow", () => {
   });
 
   it("rejects incomplete confirmation/replay/stale/edge requests before action creation", async () => {
+    const attempts = [
+      { args: { ...targetCoordinates, expectedSnapshot, slideBySeconds: 1, operationId: "missing-confirmation" }, code: "UXP_CONFIRMATION_REQUIRED" },
+      { args: { ...targetCoordinates, expectedSnapshot, slideBySeconds: 1, confirmSlide: true }, code: "UXP_INVALID_ARGUMENT" },
+      { args: { ...targetCoordinates, expectedSnapshot: { ...expectedSnapshot, following: { ...expectedSnapshot.following, inSeconds: 31 } }, slideBySeconds: 1, confirmSlide: true, operationId: "stale" }, code: "UXP_STALE_TRACK_ITEM" },
+      { args: { ...targetCoordinates, expectedSnapshot, slideBySeconds: 10, confirmSlide: true, operationId: "zero-following" }, code: "UXP_TARGET_UNSUPPORTED" },
+    ];
+    // A refused mutation retains its consumed receipt; each unrelated guard uses a fresh host.
+    for (const attempt of attempts) {
+      const value = slideHost();
+      await expect(value.registry.dispatch("trackItem.slide", attempt.args)).rejects.toMatchObject({ code: attempt.code });
+      expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    }
     const value = slideHost();
-    await expect(value.registry.dispatch("trackItem.slide", { ...targetCoordinates, expectedSnapshot, slideBySeconds: 1, operationId: "missing-confirmation" })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
-    await expect(value.registry.dispatch("trackItem.slide", { ...targetCoordinates, expectedSnapshot, slideBySeconds: 1, confirmSlide: true })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
-    await expect(value.registry.dispatch("trackItem.slide", {
-      ...targetCoordinates, expectedSnapshot: { ...expectedSnapshot, following: { ...expectedSnapshot.following, inSeconds: 31 } }, slideBySeconds: 1, confirmSlide: true, operationId: "stale",
-    })).rejects.toMatchObject({ code: "UXP_STALE_TRACK_ITEM" });
-    await expect(value.registry.dispatch("trackItem.slide", { ...targetCoordinates, expectedSnapshot, slideBySeconds: 10, confirmSlide: true, operationId: "zero-following" })).rejects.toMatchObject({ code: "UXP_TARGET_UNSUPPORTED" });
     await expect(value.registry.dispatch("trackItem.slide.inspect", { mediaType: "video", trackIndex: 0, clipIndex: 0 })).rejects.toMatchObject({ code: "UXP_TARGET_UNSUPPORTED" });
     expect(value.project.executeTransaction).not.toHaveBeenCalled();
   });

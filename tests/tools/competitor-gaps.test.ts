@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runInNewContext } from "node:vm";
+import { getHelpersSource } from "../../src/bridge/script-builder.js";
 import type { BridgeOptions } from "../../src/bridge/file-bridge.js";
 
 vi.mock("../../src/bridge/file-bridge.js", () => ({
@@ -115,6 +117,57 @@ describe("competitor-gap default-profile tools", () => {
     expect(script).toContain("TIMELINE_GAPS");
     expect(script).toContain("readyForExport");
     expect(script).not.toContain("encodeSequence");
+  });
+
+  it("keeps exporter initialization unverified when timeline preflight passes", async () => {
+    await getCompetitorGapTools(bridgeOptions).validate_project_for_export.handler({});
+    const script = mockedSendCommand.mock.calls[0][0];
+    const encoder = vi.fn(() => { throw new Error("exporter unavailable"); });
+    const seq = { sequenceID: "seq", name: "Sequence", end: { seconds: 2 },
+      videoTracks: { numTracks: 1, 0: { clips: { numItems: 1, 0: { start: { ticks: "0" }, end: { ticks: "508032000000" } } } } },
+      audioTracks: { numTracks: 0 }, exportAsMediaDirect: encoder };
+    const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, { app: { project: { activeSequence: seq } } })));
+    expect(result).toMatchObject({ success: true, data: { readyForExport: true, verificationBoundary: "timeline_and_paths_only", exporterInitializationChecked: false, renderVerified: false } });
+    expect(encoder).not.toHaveBeenCalled();
+  });
+
+  it("reports only composite black/dead-air intervals by default and pages per-track gaps on request", async () => {
+    await getCompetitorGapTools(bridgeOptions).validate_project_for_export.handler({});
+    const script = mockedSendCommand.mock.calls[0][0];
+    const ticks = (seconds: number) => String(seconds * 254016000000);
+    const track = (intervals: Array<[number, number]>) => ({ clips: {
+      numItems: intervals.length,
+      ...Object.fromEntries(intervals.map(([start, end], index) => [index, { start: { ticks: ticks(start) }, end: { ticks: ticks(end) } }])),
+    } });
+    const sequence = {
+      sequenceID: "seq", name: "Podcast", end: { seconds: 20 }, getInPoint: () => "0", getOutPoint: () => "10",
+      videoTracks: { numTracks: 2, 0: track([[0, 2], [5, 12]]), 1: track([[0, 2], [4, 7], [11, 12]]) },
+      audioTracks: { numTracks: 1, 0: track([[0, 10]]) },
+    };
+    const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+      app: { project: { activeSequence: sequence } },
+    })));
+    expect(result.data.summary).toMatchObject({
+      checkedRange: { inSeconds: 0, outSeconds: 10 },
+      compositeVideoGapCount: 1,
+      compositeAudioGapCount: 0,
+    });
+    expect(result.data.warnings).toContainEqual(expect.objectContaining({
+      code: "TIMELINE_GAPS", trackType: "video", gaps: [{ startSeconds: 2, endSeconds: 4, durationSeconds: 2 }],
+    }));
+    expect(result.data.warnings.flatMap((warning: any) => warning.gaps ?? []).some((gap: any) => gap.startSeconds >= 10)).toBe(false);
+    expect(result.data.summary).not.toHaveProperty("perTrackGapPage");
+
+    vi.clearAllMocks();
+    await getCompetitorGapTools(bridgeOptions).validate_project_for_export.handler({ per_track_gaps: true, gap_offset: 1, gap_limit: 1 });
+    const pageScript = mockedSendCommand.mock.calls[0][0];
+    expect(pageScript).toContain("trackGaps.slice(1, 2)");
+    expect(pageScript).toContain("perTrackGapPage");
+    const pageResult = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${pageScript}`, {
+      app: { project: { activeSequence: sequence } },
+    })));
+    expect(pageResult.data.summary.perTrackGapPage).toMatchObject({ total: 3, offset: 1, limit: 1, returned: 1, truncated: true, nextOffset: 2 });
+    expect(pageResult.data.summary.perTrackGapPage.gaps[0]).toMatchObject({ trackLabel: "V2", startSeconds: 2, endSeconds: 4 });
   });
 
   it("makes caption-read limitations explicit instead of treating no tracks as no captions", async () => {

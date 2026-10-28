@@ -102,12 +102,24 @@ describe("editor-request tools", () => {
       expect(await tools.add_markers_batch.handler({ markers: [{ time_seconds: 1 }, { time_seconds: 1 }] })).toEqual({ success: false, error: "No active sequence" });
     });
 
+    it("snaps batch marker times and end edges to the sequence grid with requested/applied receipts", async () => {
+      await tools.add_markers_batch.handler({ markers: [{ time_seconds: 0.5, duration_seconds: 0.5 }] });
+      const script = mockedSendCommand.mock.calls[0][0];
+      expect(script).toContain("__snapSequenceTicks(seq, requestedStartTicks)");
+      expect(script).toContain("snapSpec.requestedEnd = snapSpec.requestedT + snapSpec.d");
+      expect(script).toContain("createdMarker.requestedSeconds = spec.requestedT");
+      expect(script).toContain("createdMarker.requestedEndSeconds = spec.requestedEnd");
+      expect(script).toContain("frameSeconds / 1000");
+    });
+
     it("targets a clip when node_id is given", async () => {
       await tools.add_markers_batch.handler({ markers: [{ time_seconds: 1 }], node_id: "clip-9" });
       const script = mockedSendCommand.mock.calls[0][0];
       expect(script).toContain('__findClip("clip-9")');
       expect(script).toContain('targetKind = "clip"');
       expect(script).toContain("clipResult.clip.markers");
+      expect(script).toContain('targetKind === "clip" ? requestedStartTicks');
+      expect(script).toContain('targetKind === "clip" ? __secondsToTicks(snapSpec.requestedEnd)');
     });
   });
 
@@ -289,6 +301,23 @@ describe("editor-request tools", () => {
       const again = await tools.export_sequence_edl.handler({ output_path: target, approved_workspace_path: workspace });
       expect(again.success).toBe(false);
       expect(again.error).toMatch(/already exists/);
+    });
+
+    it("omits the event and reel lists from a written EDL when return_content is false", async () => {
+      expect((await tools.export_sequence_edl.handler({ return_content: false })).error).toMatch(/return_content: false needs output_path/);
+      expect(mockedSendCommand).not.toHaveBeenCalled();
+      mockedSendCommand.mockResolvedValue({ success: true, data: READBACK });
+      const target = path.join(workspace, "compact.edl");
+      const result = await tools.export_sequence_edl.handler({ output_path: target, approved_workspace_path: workspace, return_content: false });
+      expect(result.success).toBe(true);
+      const data = result.data as Record<string, unknown>;
+      expect(data.events).toBeUndefined();
+      expect(data.reels).toBeUndefined();
+      expect(data.edl).toBeUndefined();
+      expect(data).toMatchObject({ written: true, event_count: 2, content_omitted: true, validation: { valid: true } });
+      expect(data.record_duration_seconds).toBeGreaterThan(0);
+      expect(typeof data.reel_count).toBe("number");
+      expect(readFileSync(target, "utf8")).toContain("TITLE:");
     });
 
     it("propagates readback failures and generator errors", async () => {

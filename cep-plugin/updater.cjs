@@ -7,9 +7,12 @@
 })(this, function () {
   "use strict";
 
-  var CURRENT_VERSION = "1.0.2";
+  var CURRENT_VERSION = "1.0.4";
   var PACKAGE_NAME = "@immersive-media-technologies/premiere-mcp-imt";
-  var LATEST_PACKAGE_API = "https://registry.npmjs.org/" + PACKAGE_NAME.replace("/", "%2F");
+  var LATEST_PACKAGE_API = "https://registry.npmjs.org/" + PACKAGE_NAME.replace("/", "%2F") + "/latest";
+  // The /latest endpoint serves only full JSON: it answers HTTP 406 to the abbreviated
+  // "application/vnd.npm.install-v1+json" type that the full packument accepts.
+  var LATEST_PACKAGE_ACCEPT = "application/json";
   var LATEST_RELEASE_API =
     "https://api.github.com/repos/Immersive-Media-Technologies/premiere-mcp-imt/releases/latest";
   var RELEASES_URL =
@@ -40,7 +43,7 @@
       throw new Error("The npm registry returned an invalid package record.");
     }
     var tags = record["dist-tags"];
-    var latest = tags && tags.latest;
+    var latest = (tags && tags.latest) || record.version;
     var version = normalizeVersion(latest);
     if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
       throw new Error("The npm registry did not provide a valid latest version.");
@@ -190,6 +193,7 @@
     CURRENT_VERSION: CURRENT_VERSION,
     PACKAGE_NAME: PACKAGE_NAME,
     LATEST_PACKAGE_API: LATEST_PACKAGE_API,
+    LATEST_PACKAGE_ACCEPT: LATEST_PACKAGE_ACCEPT,
     LATEST_RELEASE_API: LATEST_RELEASE_API,
     RELEASES_URL: RELEASES_URL,
     normalizeVersion: normalizeVersion,

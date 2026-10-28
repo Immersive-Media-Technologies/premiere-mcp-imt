@@ -6,6 +6,19 @@ const Commands = require("../../uxp-plugin/commands.cjs");
 const Events = require("../../uxp-plugin/events.cjs");
 const Protocol = require("../../uxp-plugin/protocol.cjs");
 
+// Each call separates independent fixture cases after their refusal/readback
+// assertions. Reconciliation consumes the exact inspected IDs; it never permits
+// replay of the refused operation or changes the production recovery guard.
+async function acknowledgeReviewedRefusal(value: { registry: { dispatch: (...args: any[]) => Promise<any> } }, expectedIds?: string[]) {
+  const recovery = await value.registry.dispatch("operations.recovery.inspect", {});
+  expect(recovery.recoveryRequired).toBe(true);
+  expect(recovery.operations.length).toBeGreaterThan(0);
+  expect(recovery.operations.every((operation: { outcome: string }) => operation.outcome === "unknown")).toBe(true);
+  const operationIds = recovery.operations.map((operation: { id: string }) => operation.id);
+  if (expectedIds) expect(operationIds).toEqual(expectedIds);
+  await expect(value.registry.dispatch("operations.recovery.acknowledge", { expectedRecoveryRevision: recovery.recoveryRevision, expectedIdentityRevision: recovery.identityRevision, operationIds, reviewed: true })).resolves.toMatchObject({ acknowledged: true, replayAuthorized: false, reconciledOperationIds: operationIds, recoveryRequired: false });
+}
+
 type MutableItem = {
   id: string;
   name: string;
@@ -226,6 +239,7 @@ function advancedHost() {
   const selection = { getTrackItems: vi.fn(async () => [trackItem]) };
   const sequence = {
     guid: "sequence-1", name: "Assembly",
+    getTimebase: vi.fn(async () => "10160640000"),
     getSelection: vi.fn(async () => selection),
     getVideoTrackCount: vi.fn(async () => 1),
     getVideoTrack: vi.fn(async () => ({ getTrackItems: vi.fn(async () => [trackItem]) })),
@@ -374,6 +388,22 @@ describe("advanced stable Premiere UXP workflows", () => {
     expect(capabilities.commands["sequences.createEmpty"]).toMatchObject({ supported: true, destructive: true, undoable: false, idempotent: true, minHostVersion: "26.3.0" });
   });
 
+  it("retains marker creation when a later color action fails", async () => {
+    const value = advancedHost();
+    const original = value.markers.createAddMarkerAction.getMockImplementation()!;
+    value.markers.createAddMarkerAction.mockImplementation((...args) => {
+      const action = original(...args);
+      return { apply: () => {
+        action.apply();
+        value.markerValues[value.markerValues.length - 1].createSetColorByIndexAction.mockImplementation(() => { throw new Error("color unavailable"); });
+      } };
+    });
+    await expect(value.registry.dispatch("markers.add", { name: "Partial", colorIndex: 4, operationId: "partial-color" })).resolves.toMatchObject({
+      added: true, committed: true, partial: true, verified: false, outcome: "committed_unverified", undoSteps: 1,
+    });
+    expect(value.markerValues).toHaveLength(2);
+  });
+
   it("uses Project-view selection and completes marker/bin actions with identity and field readback", async () => {
     const value = advancedHost();
     await expect(value.registry.dispatch("projectSelection.views", {})).resolves.toMatchObject({
@@ -391,9 +421,9 @@ describe("advanced stable Premiere UXP workflows", () => {
     })).resolves.toMatchObject({
       added: 3, outcome: "verified", verificationBoundary: "beat_marker_guid_and_time_readback",
       markers: [
-        { name: "Beat 1", startSeconds: 1.5 },
-        { name: "Beat 2", startSeconds: 2.5 },
-        { name: "Beat 3", startSeconds: 3.5 },
+        { name: "Beat 1", startSeconds: 1.52 },
+        { name: "Beat 2", startSeconds: 2.52 },
+        { name: "Beat 3", startSeconds: 3.52 },
       ],
     });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(2);
@@ -407,6 +437,22 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("bins.create", {
       parentBinId: "bin-1", name: "Selects", operationId: "bin-create",
     })).resolves.toMatchObject({ created: true, outcome: "verified", item: { name: "Selects" } });
+  });
+
+  it("verifies project-item removal from the tree even when the removed item is still selected (#642)", async () => {
+    const value = advancedHost();
+    await expect(value.registry.dispatch("bins.remove", {
+      projectItemId: "clip-1", expectedName: "Interview.mov", operationId: "remove-clip",
+    })).resolves.toMatchObject({ removed: true, outcome: "verified", item: { id: "clip-1" } });
+    expect(value.bin.children).toEqual([]);
+  });
+
+  it("refuses project-item removal without an explicit projectItemId", async () => {
+    const value = advancedHost();
+    await expect(value.registry.dispatch("bins.remove", { expectedName: "Interview.mov" }))
+      .rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT", message: expect.stringMatching(/projectItemId is required/) });
+    expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    expect(value.bin.children).toHaveLength(1);
   });
 
   it("walks the native Project root in deterministic bounded order without reading beyond the requested tree", async () => {
@@ -468,7 +514,7 @@ describe("advanced stable Premiere UXP workflows", () => {
       confirmDestructive: true,
       markerSnapshots: [
         { markerGuid: "marker-1", expectedName: "Beat", expectedStartSeconds: 1, expectedDurationSeconds: 0 },
-        { markerGuid: "marker-2", expectedName: "Remove", expectedStartSeconds: 4, expectedDurationSeconds: 1.5 },
+        { markerGuid: "marker-2", expectedName: "Remove", expectedStartSeconds: 4, expectedDurationSeconds: 1.52 },
       ],
       operationId: "marker-batch-remove",
     };
@@ -489,9 +535,11 @@ describe("advanced stable Premiere UXP workflows", () => {
     const snapshot = { markerGuid: "marker-1", expectedName: "Beat", expectedStartSeconds: 0, expectedDurationSeconds: 0 };
     await expect(value.registry.dispatch("markers.removeMany", { markerSnapshots: [snapshot] }))
       .rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("markers.removeMany", {
       confirmDestructive: true, markerSnapshots: [snapshot, snapshot],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("markers.removeMany", {
       confirmDestructive: true,
       markerSnapshots: [{ ...snapshot, expectedName: "Changed elsewhere" }],
@@ -506,10 +554,11 @@ describe("advanced stable Premiere UXP workflows", () => {
     const snapshot = { markerGuid: "marker-1", expectedName: "Beat", expectedStartSeconds: 1, expectedDurationSeconds: 0 };
     await expect(value.registry.dispatch("markers.removeMany", { markerSnapshots: [snapshot] }))
       .rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("markers.removeMany", {
       confirmDestructive: true, markerSnapshots: Array.from({ length: 129 }, () => snapshot),
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
-    expect(value.ppro.Project.getActiveProject).not.toHaveBeenCalled();
+    // Registry may read identity for replay binding; no marker mutation is attempted.
     expect(value.ppro.Markers.getMarkers).not.toHaveBeenCalled();
   });
 
@@ -517,12 +566,14 @@ describe("advanced stable Premiere UXP workflows", () => {
     const value = advancedHost();
     await expect(value.registry.dispatch("markers.add", { name: "Unexpected", confirmDestructive: true }))
       .rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("markers.update", {
       markerGuid: "marker-1", name: "Unexpected", markerSnapshots: [],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("markers.remove", { markerGuid: "marker-1", confirmDestructive: true }))
       .rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
-    expect(value.ppro.Project.getActiveProject).not.toHaveBeenCalled();
+    // Registry may read identity for replay binding; no marker mutation is attempted.
     expect(value.ppro.Markers.getMarkers).not.toHaveBeenCalled();
   });
 
@@ -627,7 +678,7 @@ describe("advanced stable Premiere UXP workflows", () => {
       markerSnapshots: [{ markerGuid: "marker-1", expectedName: "Beat", expectedStartSeconds: 1, expectedDurationSeconds: 0 }],
       operationId: "marker-remove-concurrent",
     });
-    await removalContextEntered;
+    // Protected registry queue keeps the second host preflight behind the first.
     await Promise.resolve();
     await Promise.resolve();
     expect(marker.getName).toHaveBeenCalledTimes(1);
@@ -710,7 +761,7 @@ describe("advanced stable Premiere UXP workflows", () => {
     expect(value.project.createSequenceFromMedia).not.toHaveBeenCalled();
   });
 
-  it("does not cache failures that occur before a subclip transaction is attempted", async () => {
+  it("consumes unclassified handler failures even when a mock knows the action construction failed", async () => {
     const value = advancedHost();
     const implementation = value.clip.createSubClipAction.getMockImplementation();
     value.clip.createSubClipAction.mockImplementationOnce(() => { throw new Error("cannot construct action"); });
@@ -722,10 +773,8 @@ describe("advanced stable Premiere UXP workflows", () => {
     };
     await expect(value.registry.dispatch("silence.deriveSequence", args)).rejects.toThrow("cannot construct action");
     value.clip.createSubClipAction.mockImplementation(implementation!);
-    await expect(value.registry.dispatch("silence.deriveSequence", args)).resolves.toMatchObject({
-      created: true, partial: false,
-    });
-    expect(value.project.createSequenceFromMedia).toHaveBeenCalledTimes(1);
+    await expect(value.registry.dispatch("silence.deriveSequence", args)).rejects.toMatchObject({ code: "UXP_OPERATION_CONSUMED" });
+    expect(value.project.createSequenceFromMedia).not.toHaveBeenCalled();
   });
 
   it("rejects a silence stringout before overflowing the destination bin", async () => {
@@ -803,6 +852,7 @@ describe("advanced stable Premiere UXP workflows", () => {
       { beatTimesSeconds: [1], offsetSeconds: -2 },
     ]) {
       await expect(value.registry.dispatch("markers.addBeatGrid", args)).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+      await acknowledgeReviewedRefusal(value);
     }
     expect(value.project.lockedAccess).not.toHaveBeenCalled();
 
@@ -892,6 +942,7 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("project.import", {
       mode: "files", paths: ["D:/Approved/broll.mov"], targetBinId: "bin-1",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("project.import", {
       mode: "files", paths: ["D:/Approved/broll.mov"], targetBinId: "bin-1",
       confirmNonUndoable: true, operationId: "import-files",
@@ -988,6 +1039,10 @@ describe("advanced stable Premiere UXP workflows", () => {
       ...target, expectedSnapshot, point: { x: 1100, y: 600 }, confirmSetPoint: true, operationId: "point-stale",
     })).rejects.toMatchObject({ code: "UXP_STALE_POINT_PARAMETER" });
     expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value, ["point-stale"]);
+    await expect(value.registry.dispatch("parameters.point.set", {
+      ...target, expectedSnapshot, point: { x: 1100, y: 600 }, confirmSetPoint: true, operationId: "point-stale",
+    })).rejects.toMatchObject({ code: "UXP_OPERATION_CONSUMED" });
 
     await expect(value.registry.dispatch("parameters.point.set", {
       ...target, expectedSnapshot, point: { x: 1100, y: 600 }, confirmSetPoint: true,
@@ -1078,6 +1133,63 @@ describe("advanced stable Premiere UXP workflows", () => {
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["point", [0.5, 0.5], { x: 0.5, y: 0.5 }, { x: 0.75, y: 0.25 }],
+    ["color", [0.1, 0.2, 0.3], { red: 0.1, green: 0.2, blue: 0.3, alpha: 1 }, { red: 0.9, green: 0.8, blue: 0.7, alpha: 0.6 }],
+    ["color", [0.1, 0.2, 0.3, 0.4], { red: 0.1, green: 0.2, blue: 0.3, alpha: 0.4 }, { red: 0.9, green: 0.8, blue: 0.7, alpha: 0.6 }],
+  ] as const)("normalizes host %s arrays before inspection and guarded write readback", async (kind, initial, normalized, update) => {
+    const value = advancedHost();
+    value.parameterState.value = initial;
+    const target = { mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 0, paramIndex: 0, expectedComponentId: "ADBE Opacity", expectedParamName: "Opacity" };
+    // Native constructors are still used for writes; this host serializes their readback as arrays.
+    value.parameter.getStartValue.mockImplementation(async () => {
+      const stored = value.parameterState.value;
+      return { value: Array.isArray(stored) ? { value: stored } : { value: kind === "point"
+        ? [(stored as { x: number }).x, (stored as { y: number }).y]
+        : [(stored as { red: number }).red, (stored as { green: number }).green, (stored as { blue: number }).blue, (stored as { alpha: number }).alpha] } };
+    });
+    const expectedSnapshot = await value.registry.dispatch(`parameters.${kind}.inspect`, target);
+    expect(expectedSnapshot[kind]).toEqual(normalized);
+    const input = { ...target, expectedSnapshot, [kind]: update, [kind === "point" ? "confirmSetPoint" : "confirmSetColor"]: true, operationId: `array-${kind}-${initial.length}` };
+    await expect(value.registry.dispatch(`parameters.${kind}.set`, input)).resolves.toMatchObject({ outcome: "verified", after: { [kind]: update } });
+    expect(value.parameter.createKeyframe).toHaveBeenCalledWith(expect.objectContaining(update));
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
+    await expect(value.registry.dispatch(`parameters.${kind}.set`, { ...input, operationId: "bad-array-input", [kind]: initial })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value, ["bad-array-input"]);
+    await expect(value.registry.dispatch(`parameters.${kind}.set`, { ...input, operationId: "bad-array-snapshot", expectedSnapshot: { ...expectedSnapshot, [kind]: initial } })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["point", null, "UXP_VALUE_UNAVAILABLE"],
+    ["color", null, "UXP_VALUE_UNAVAILABLE"],
+    ["point", 50, "UXP_TARGET_UNSUPPORTED"],
+    ["color", 50, "UXP_TARGET_UNSUPPORTED"],
+    ["point", [1], "UXP_INVALID_HOST_STATE"],
+    ["point", [1, 2, 3], "UXP_INVALID_HOST_STATE"],
+    ["point", [NaN, 2], "UXP_INVALID_HOST_STATE"],
+    ["point", [null, 2], "UXP_INVALID_HOST_STATE"],
+    ["point", ["1", 2], "UXP_INVALID_HOST_STATE"],
+    ["color", [1, 2], "UXP_INVALID_HOST_STATE"],
+    ["color", [1, 2, 3, 4, 5], "UXP_INVALID_HOST_STATE"],
+    ["color", [1, 2, 3, Infinity], "UXP_INVALID_HOST_STATE"],
+    ["color", { red: 1, green: 2, blue: 3 }, "UXP_INVALID_HOST_STATE"],
+  ])("rejects unreadable host %s values before mutation", async (kind, hostValue, code) => {
+    const value = advancedHost();
+    value.parameterState.value = hostValue;
+    const target = { mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 0, paramIndex: 0, expectedComponentId: "ADBE Opacity", expectedParamName: "Opacity" };
+    await expect(value.registry.dispatch(`parameters.${kind}.inspect`, target)).rejects.toMatchObject({ code });
+    expect(value.project.executeTransaction).not.toHaveBeenCalled();
+  });
+
+  it("still rejects changing host array values during double-read inspection", async () => {
+    const value = advancedHost();
+    const target = { mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 0, paramIndex: 0, expectedComponentId: "ADBE Opacity", expectedParamName: "Opacity" };
+    value.parameter.getStartValue.mockResolvedValueOnce({ value: [0.5, 0.5] }).mockResolvedValueOnce({ value: [0.6, 0.5] });
+    await expect(value.registry.dispatch("parameters.point.inspect", target)).rejects.toMatchObject({ code: "UXP_STALE_POINT_PARAMETER" });
+    expect(value.project.executeTransaction).not.toHaveBeenCalled();
+  });
+
   it("fails closed on stale, animated, unavailable, or changing Color parameter state", async () => {
     const value = advancedHost();
     value.parameterState.value = { red: 0.1, green: 0.2, blue: 0.3, alpha: 1 };
@@ -1089,10 +1201,12 @@ describe("advanced stable Premiere UXP workflows", () => {
       confirmSetColor: true, operationId: "color-stale",
     })).rejects.toMatchObject({ code: "UXP_STALE_COLOR_PARAMETER" });
     expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value, ["color-stale"]);
 
     await expect(value.registry.dispatch("parameters.color.set", {
       ...target, expectedSnapshot, color: { red: 0.9, green: 0.8, blue: 0.7, alpha: 0.6 }, confirmSetColor: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("parameters.color.set", {
       ...target, expectedSnapshot, color: { red: 0.9, green: 0.8, blue: 0.7, alpha: 0.6 }, operationId: "color-unconfirmed",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
@@ -1190,6 +1304,7 @@ describe("advanced stable Premiere UXP workflows", () => {
       expectedDisplayFormats: { audioDisplayFormat: 1, videoDisplayFormat: 26 },
       updates: { audioDisplayFormat: 1 },
     })).rejects.toMatchObject({ code: "UXP_STALE_SEQUENCE_DISPLAY_FORMAT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("sequence.displayFormat.update", {
       expectedSequenceGuid: "sequence-1",
       expectedDisplayFormats: { audioDisplayFormat: 2, videoDisplayFormat: 26 },
@@ -1246,13 +1361,47 @@ describe("advanced stable Premiere UXP workflows", () => {
       operation: { mutatesProject: true, undo: { supported: true } },
     });
     await expect(value.registry.dispatch("timeline.mogrtLibrary", {
-      libraryName: "Brand", elementName: "Lower Third", timeSeconds: 5,
+      libraryName: "Brand", elementName: "Lower Third", timeSeconds: 12,
       videoTrackIndex: 0, audioTrackIndex: 0, confirmNonUndoable: true,
     })).resolves.toMatchObject({
-      inserted: 1, source: "library", outcome: "committed_unverified", verified: false,
-      verificationBoundary: "sequence_editor_host_return",
+      inserted: 1, source: "library", outcome: "verified", verified: true,
+      verificationBoundary: "mogrt_placement_readback",
+      requested: { timeSeconds: 12, videoTrackIndex: 0 },
+      placements: [{ name: "Interview V", startSeconds: 12, endSeconds: 22 }],
     });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  describe("MOGRT insert placement readback (#642)", () => {
+    it("verifies a path insert that lands at the requested time and track", async () => {
+      const value = advancedHost();
+      await expect(value.registry.dispatch("timeline.mogrtPath", {
+        filePath: "D:/Approved/lower-third.mogrt", timeSeconds: 10, videoTrackIndex: 0, audioTrackIndex: 0, confirmNonUndoable: true,
+      })).resolves.toMatchObject({ inserted: 1, source: "path", outcome: "verified", verificationBoundary: "mogrt_placement_readback" });
+    });
+
+    it("fails when nothing starts at the requested time", async () => {
+      const value = advancedHost();
+      await expect(value.registry.dispatch("timeline.mogrtPath", {
+        filePath: "D:/Approved/lower-third.mogrt", timeSeconds: 4, videoTrackIndex: 0, audioTrackIndex: 0, confirmNonUndoable: true,
+      })).rejects.toMatchObject({ code: "UXP_VERIFICATION_FAILED", message: expect.stringMatching(/no clip starts at 4 s on video track 0/) });
+    });
+
+    it("fails when Premiere returns no items and the track has nothing there", async () => {
+      const value = advancedHost();
+      value.ppro.SequenceEditor.getEditor().insertMogrtFromPath.mockReturnValueOnce([]);
+      await expect(value.registry.dispatch("timeline.mogrtPath", {
+        filePath: "D:/Approved/lower-third.mogrt", timeSeconds: 3, videoTrackIndex: 0, audioTrackIndex: 0, confirmNonUndoable: true,
+      })).rejects.toMatchObject({ code: "UXP_VERIFICATION_FAILED" });
+    });
+
+    it("stays committed_unverified when the track cannot be read back", async () => {
+      const value = advancedHost();
+      value.sequence.getVideoTrack.mockRejectedValueOnce(new Error("track read failed"));
+      await expect(value.registry.dispatch("timeline.mogrtPath", {
+        filePath: "D:/Approved/lower-third.mogrt", timeSeconds: 10, videoTrackIndex: 0, audioTrackIndex: 0, confirmNonUndoable: true,
+      })).resolves.toMatchObject({ outcome: "committed_unverified", note: expect.stringMatching(/could not be read back/) });
+    });
   });
 
   it("reads a bounded documented UXP timeline snapshot without falling back to CEP or mutating Premiere", async () => {
@@ -1484,8 +1633,37 @@ describe("advanced stable Premiere UXP workflows", () => {
       splitEdit: "l_cut", extensionSeconds: 2, outcome: "verified",
       before: { audio: { endSeconds: 20, outSeconds: 10 }, video: { endSeconds: 20 } },
       after: { endSeconds: 22, outSeconds: 12 },
+      undoSteps: 2,
     });
+    // This host keeps edges and source points independent, so the source-out write follows separately.
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates an L-cut in one transaction when the end action carries the source out (Premiere 26.5.2)", async () => {
+    const value = advancedHost();
+    value.trackItem.createSetEndAction = vi.fn((time: { seconds: number }) => ({ apply: () => {
+      value.trackState.outPoint += time.seconds - value.trackState.end;
+      value.trackState.end = time.seconds;
+    } }));
+    await expect(value.registry.dispatch("trackItem.splitEdit", {
+      kind: "l_cut", audioTrackIndex: 0, audioClipIndex: 0, videoTrackIndex: 0, videoClipIndex: 0,
+      extensionSeconds: 2, operationId: "l-cut-trim-like",
+    })).resolves.toMatchObject({ outcome: "verified", after: { endSeconds: 22, outSeconds: 12 }, undoSteps: 1 });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
+    expect(value.trackItem.createSetOutPointAction).not.toHaveBeenCalled();
+  });
+
+  it("refuses a split edit that would overlap the next audio clip, without changing anything", async () => {
+    // On 26.5.2 an overlapping L-cut crashed Premiere while it drew the two audio items.
+    const value = advancedHost();
+    const following = { getStartTime: vi.fn(async () => ({ seconds: 21 })), getEndTime: vi.fn(async () => ({ seconds: 30 })) };
+    value.sequence.getAudioTrack = vi.fn(async () => ({ getTrackItems: vi.fn(async () => [value.trackItem, following]) }));
+    await expect(value.registry.dispatch("trackItem.splitEdit", {
+      kind: "l_cut", audioTrackIndex: 0, audioClipIndex: 0, videoTrackIndex: 0, videoClipIndex: 0,
+      extensionSeconds: 2, operationId: "l-cut-overlap",
+    })).rejects.toMatchObject({ code: "UXP_TARGET_UNSUPPORTED", message: expect.stringContaining("would overlap audio clip 1") });
+    expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    expect(value.trackState).toMatchObject({ end: 20, outPoint: 10 });
   });
 
   it("verifies an L-cut from the re-fetched audio timeline edge when source-out readback lags", async () => {
@@ -1498,6 +1676,15 @@ describe("advanced stable Premiere UXP workflows", () => {
       splitEdit: "l_cut", outcome: "verified", timelineMatched: true, sourceReadbackMatched: false,
       after: { endSeconds: 22, outSeconds: 10 },
     });
+  });
+
+  it("verifies stored interpolation while leaving rendered curves unverified", async () => {
+    const value = advancedHost();
+    value.parameterState.keyframes = [1];
+    await expect(value.registry.dispatch("parameters.keyframeInterpolation", {
+      mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 0, paramIndex: 0,
+      timeSeconds: 1, interpolation: "linear", operationId: "linear-render-boundary",
+    })).resolves.toMatchObject({ verified: true, renderVerified: false, renderHonesty: expect.stringContaining("26.5.2") });
   });
 
   it("uses complete keyframe preflight/readback and reports absent removals as no-ops", async () => {
@@ -1560,10 +1747,12 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("parameters.timeVarying.set", {
       ...target, expectedKeyframeTimesSeconds: [1], confirmDisableTimeVarying: true, operationId: "stale-animation",
     })).rejects.toMatchObject({ code: "UXP_STALE_PARAMETER" });
+    await acknowledgeReviewedRefusal(value, ["stale-animation"]);
     await expect(value.registry.dispatch("parameters.timeVarying.set", {
       ...target, expectedKeyframeTimesSeconds: [1, 2], operationId: "unconfirmed-animation",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
     expect(value.parameter.createSetTimeVaryingAction).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value, ["unconfirmed-animation"]);
 
     await expect(value.registry.dispatch("parameters.timeVarying.set", {
       ...target, expectedKeyframeTimesSeconds: [1, 2], confirmDisableTimeVarying: true, operationId: "confirmed-animation",
@@ -1643,6 +1832,7 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("sequenceSettings.update", {
       updates: { videoFrameRate: 241 },
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
 
     delete (value.project as unknown as Record<string, unknown>).importAEComps;
     await expect(value.registry.capabilities()).resolves.toMatchObject({
@@ -1678,10 +1868,12 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("sequences.createEmpty", { name: "Empty Assembly" }))
       .rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
     expect(value.project.createSequence).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("sequences.createEmpty", {
       name: "Empty Assembly", confirmNonUndoable: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
     expect(value.project.createSequence).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value);
 
     await expect(value.registry.dispatch("sequences.createEmpty", {
       name: "Empty Assembly", confirmNonUndoable: true, operationId: "empty-sequence-1",
@@ -1816,6 +2008,7 @@ describe("advanced stable Premiere UXP workflows", () => {
     await expect(value.registry.dispatch("sequences.close", { sequenceId: "sequence-1024" }))
       .rejects.toMatchObject({ code: "UXP_PROJECT_TOO_LARGE" });
     expect(value.project.closeSequence).not.toHaveBeenCalled();
+    await acknowledgeReviewedRefusal(value);
 
     await expect(value.registry.dispatch("sequences.delete", { confirmNonUndoable: true }))
       .rejects.toMatchObject({ code: "UXP_PROJECT_TOO_LARGE" });
@@ -1921,6 +2114,29 @@ describe("advanced stable Premiere UXP workflows", () => {
     expect(emptySequenceValue.sequences).toHaveLength(1024);
   });
 
+  it("binds encode receipts to native sequence mark ticks and exact reviewed destinations", async () => {
+    const value = advancedHost();
+    Object.assign(value.sequence, {
+      getInPoint: vi.fn(async () => ({ ticks: "254016000000", seconds: 1 })),
+      getOutPoint: vi.fn(async () => ({ ticks: "508032000000", seconds: 2 })),
+      getEndTime: vi.fn(async () => ({ ticks: "2540160000000", seconds: 10 })),
+    });
+    const common = { sequenceId: "sequence-1", exportType: "queueToAme", outputFile: "D:/Approved/lineage.mp4", presetFile: "D:/Approved/h264.epr", confirmExternalWrite: true };
+    const receipt = await value.registry.dispatch("encoder.sequence", { ...common, exportFull: false, operationId: "lineage-marks" });
+    expect(receipt.encodeJob).toMatchObject({
+      nativeJobId: null, correlationVerified: false,
+      lineage: { projectId: "project-1", sequenceId: "sequence-1", outputFile: common.outputFile, presetFile: common.presetFile, range: { mode: "sequence_marks", inTicks: "254016000000", outTicks: "508032000000", endPolicy: "native_range_unverified" } },
+    });
+    const full = await value.registry.dispatch("encoder.sequence", { ...common, outputFile: "D:/Approved/full.mp4", operationId: "lineage-full" });
+    expect(full.encodeJob.lineage.range).toMatchObject({ mode: "full_sequence", inTicks: "0", outTicks: "2540160000000" });
+    (value.sequence as any).getInPoint.mockRejectedValueOnce(new Error("marks unavailable"));
+    const unknown = await value.registry.dispatch("encoder.sequence", { ...common, outputFile: "D:/Approved/unknown.mp4", exportFull: false, operationId: "lineage-unknown" });
+    expect(unknown.encodeJob.lineage.range).toMatchObject({ inTicks: null, outTicks: null, endPolicy: "native_range_unverified" });
+    value.manager.exportSequence.mockResolvedValueOnce(false);
+    await expect(value.registry.dispatch("encoder.sequence", { ...common, outputFile: "D:/Approved/rejected.mp4", operationId: "lineage-rejected" })).rejects.toMatchObject({ code: "UXP_HOST_REJECTED" });
+    expect(value.events.listEncodeJobs({ jobId: "lineage-rejected" }).jobs[0]).toMatchObject({ state: "failed", lineage: { outputFile: "D:/Approved/rejected.mp4" } });
+  });
+
   it("clones sequences with identity readback and gates AME writes on explicit confirmation", async () => {
     const value = advancedHost();
     await expect(value.registry.dispatch("sequences.clone", {
@@ -1933,13 +2149,15 @@ describe("advanced stable Premiere UXP workflows", () => {
       sequenceId: "sequence-1", exportType: "queueToAme",
       outputFile: "D:/Approved/output.mp4", presetFile: "D:/Approved/h264.epr",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("encoder.sequence", {
       sequenceId: "sequence-1", exportType: "queueToAme",
       outputFile: "D:/Approved/output.mp4", presetFile: "D:/Approved/h264.epr",
       confirmExternalWrite: true, operationId: "encode-sequence",
     })).resolves.toMatchObject({
       queued: true, kind: "sequence", outcome: "committed_unverified", verified: false,
-      verificationBoundary: "encoder_host_return",
+      verificationBoundary: "encoder_host_return", ameQueueStarted: "unknown",
+      note: expect.stringMatching(/does not start it for you/),
       encodeJob: { jobId: "encode-sequence", state: "accepted", terminal: false },
     });
     expect(value.manager.exportSequence).toHaveBeenCalledWith(
@@ -1954,6 +2172,13 @@ describe("advanced stable Premiere UXP workflows", () => {
       timedOut: false,
       job: { state: "completed", terminal: true, verificationBoundary: "encoder_terminal_event_only" },
     });
+    const immediate = await value.registry.dispatch("encoder.sequence", {
+      sequenceId: "sequence-1", exportType: "immediately",
+      outputFile: "D:/Approved/now.mp4", presetFile: "D:/Approved/h264.epr",
+      confirmExternalWrite: true, operationId: "encode-now",
+    });
+    expect(immediate).toMatchObject({ queued: true, outcome: "committed_unverified" });
+    expect(immediate).not.toHaveProperty("ameQueueStarted");
 
     const noProject = advancedHost();
     noProject.ppro.Project.getActiveProject.mockResolvedValue(null);

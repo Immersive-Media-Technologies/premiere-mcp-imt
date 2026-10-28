@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +28,7 @@ vi.mock("../../src/bridge/file-bridge.js", () => ({
 import { sendCommand } from "../../src/bridge/file-bridge.js";
 import { getAudioTools } from "../../src/tools/audio.js";
 import { confirmationToken, getEditPlanTools, validateEditPlan } from "../../src/tools/edit-plans.js";
+import { staticEditPlanTokenStore, fixtureEditPlanBinding } from "../helpers/static-edit-plan-token-store.js";
 import {
   getExportTools,
   inspectExportPresetFile,
@@ -149,11 +150,13 @@ describe("audio tool analysis coverage", () => {
     // Premiere's Volume > Level uses +15 dB as its normalized maximum.
     expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("0.08912509381337455");
 
-    await tools.add_audio_keyframes.handler({
+    const callsBefore = mockedSendCommand.mock.calls.length;
+    const underflow = await tools.add_audio_keyframes.handler({
       node_id: "clip",
-      keyframes: [{ time_seconds: 1.25, level_db: -Infinity }],
+      keyframes: [{ time_seconds: 1.25, level_db: -7000 }],
     });
-    expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("1e-7");
+    expect(underflow.success).toBe(false);
+    expect(mockedSendCommand.mock.calls.length).toBe(callsBefore);
 
     await tools.mute_track.handler({ track_index: 3, muted: false });
     expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("track.setMute(0)");
@@ -185,8 +188,10 @@ describe("edit plan validation and apply coverage", () => {
     const tools = getEditPlanTools(bridgeOptions, {
       capabilities: { capabilities: new Set(["inspect"]), source: "explicit" },
       operationIdFactory: () => "preview-mixed",
+      tokenStore: staticEditPlanTokenStore,
     });
 
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { targetsValidated: true, hostBinding: fixtureEditPlanBinding(plan) } });
     const result = await tools.preview_edit_plan.handler({ plan });
     expect(result).toMatchObject({
       success: true,
@@ -211,22 +216,29 @@ describe("edit plan validation and apply coverage", () => {
       ],
     };
     const auditSink = vi.fn();
-    mockedSendCommand.mockResolvedValueOnce({ success: false, error: "Premiere rejected the edit" });
+    mockedSendCommand
+      .mockResolvedValueOnce({ success: true, data: { totalMovers: 1, ripples: [{ index: 0, movers: 1, removals: 1 }] } })
+      .mockResolvedValueOnce({ success: false, error: "Premiere rejected the edit" });
     const tools = getEditPlanTools(bridgeOptions, {
       capabilities: { capabilities: new Set(["inspect", "edit"]), source: "explicit" },
       auditSink,
       operationIdFactory: () => "apply-remove",
+      tokenStore: staticEditPlanTokenStore,
     });
 
+    staticEditPlanTokenStore.issue(confirmationToken(plan), fixtureEditPlanBinding(plan));
     const result = await tools.apply_edit_plan.handler({
       plan,
       confirmation_token: confirmationToken(plan),
     });
-    const script = String(mockedSendCommand.mock.calls[0][0]);
+    const script = String(mockedSendCommand.mock.calls.at(-1)?.[0]);
 
     expect(script).toContain('__findSequence("seq\\"one")');
     expect(script).toContain("function __planFindClip");
-    expect(script).toContain("found0.remove(true, true)");
+    // TrackItem.remove(true, ...) does not ripple on 25.2; the verified ripple delete does.
+    expect(script).not.toContain("remove(true, true)");
+    expect(script).toContain("var ripple0 = (function () { var __result = function (d)");
+    expect(script).toContain("app.project.activeSequence = seq");
     expect(result).toEqual({ success: false, error: "Premiere rejected the edit (operation apply-remove)" });
     expect(auditSink.mock.calls.map(([event]) => event.outcome)).toEqual(["started", "failed"]);
   });
@@ -277,16 +289,21 @@ describe("export verification and host-result coverage", () => {
 
   it("reads a host-exported frame, reports unreadable output, and covers proxy script choices", async () => {
     const tools = getExportTools(bridgeOptions);
-    const frame = temporaryPath("frame.png", "png bytes");
-    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { outputPath: frame } });
+    const header = Buffer.alloc(33); Buffer.from([137,80,78,71,13,10,26,10]).copy(header); header.write("IHDR",12);header.writeUInt32BE(1,16);header.writeUInt32BE(1,20);header[25]=2;
+    const frame = temporaryPath("frame.png", header);
+    const ownedReply = (file: string) => async (script: string) => {
+      const owned = JSON.parse('"' + /var outputPath = "([^"\n]+)";/.exec(script)![1] + '"');
+      renameSync(file, owned); return {success:true,data:{outputPath:owned}};
+    };
+    mockedSendCommand.mockImplementationOnce(ownedReply(frame));
     await expect(tools.capture_frame.handler({ time_seconds: 3 })).resolves.toMatchObject({
       success: true,
-      data: { captured: true, mimeType: "image/png", base64: Buffer.from("png bytes").toString("base64") },
+      data: { captured: true, mimeType: "image/png", base64: header.toString("base64") },
     });
     expect(existsSync(frame)).toBe(false);
 
     const oversizedFrame = temporaryPath("oversized-frame.png", "x".repeat(MAX_CAPTURE_FRAME_BYTES + 1));
-    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { outputPath: oversizedFrame } });
+    mockedSendCommand.mockImplementationOnce(ownedReply(oversizedFrame));
     await expect(tools.capture_frame.handler({})).resolves.toMatchObject({
       success: false,
       error: expect.stringContaining("inline response limit"),
@@ -296,16 +313,77 @@ describe("export verification and host-result coverage", () => {
     mockedSendCommand.mockResolvedValueOnce({ success: true, data: { outputPath: temporaryDirectory() } });
     await expect(tools.capture_frame.handler({})).resolves.toMatchObject({
       success: false,
-      error: expect.stringContaining("Failed to read captured frame"),
+      error: expect.stringContaining("CAPTURE_PATH_IDENTITY"),
     });
 
     await tools.manage_proxies.handler({ item_id: "item", action: "create" });
     expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("output_path is required");
-    await tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mov" });
-    expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("__findProxyPreset()");
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { candidates: [] } });
+    await expect(tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mov" }))
+      .resolves.toMatchObject({ success: false, error: expect.stringContaining("Pass preset_path explicitly") });
     await tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mov", preset_path: "proxy.epr" });
     expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain('var presetPath = "proxy.epr"');
     await tools.manage_proxies.handler({ item_id: "item", action: "attach" });
     expect(mockedSendCommand.mock.calls.at(-1)?.[0]).toContain("proxy_path is required for attach action");
+  });
+});
+
+// https://github.com/leancoderkavy/premiere-pro-mcp/issues/610
+describe("issue #610 — manage_proxies auto-discovery skips Same as Project presets", () => {
+  const tools = getExportTools(bridgeOptions);
+
+  it("skips Same as Project candidates (plain and gzipped) and encodes with the first safe preset", async () => {
+    const { gzipSync } = await import("node:zlib");
+    const dir = temporaryDirectory();
+    const sameAsProject = join(dir, "Proxy 1.epr");
+    writeFileSync(sameAsProject, "<Preset><Dest>SameAsProject</Dest></Preset>");
+    const gzippedSameAsProject = join(dir, "Proxy 2.epr");
+    writeFileSync(gzippedSameAsProject, gzipSync(Buffer.from("<Dest>Same as Project</Dest>")));
+    const safe = join(dir, "Match Source.epr");
+    writeFileSync(safe, "<Preset><Dest>Custom</Dest></Preset>");
+
+    mockedSendCommand.mockReset();
+    mockedSendCommand
+      .mockResolvedValueOnce({ success: true, data: { candidates: [sameAsProject, gzippedSameAsProject, 42, safe] } })
+      .mockResolvedValueOnce({ success: true, data: { accepted: true } });
+
+    await tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "C:/out/proxy.mp4" });
+    expect(mockedSendCommand).toHaveBeenCalledTimes(2);
+    expect(mockedSendCommand.mock.calls[0]?.[0]).toContain("__listProxyPresetCandidates()");
+    const encodeScript = mockedSendCommand.mock.calls[1]?.[0] as string;
+    expect(encodeScript).toContain("Match Source.epr");
+    expect(encodeScript).not.toContain("Proxy 1.epr");
+    expect(encodeScript).toContain("presetAutoDiscovered: true");
+    expect(encodeScript).toContain("skippedSameAsProjectPresets: 2");
+  });
+
+  it("fails clearly without encoding when every candidate is Same as Project", async () => {
+    const dir = temporaryDirectory();
+    const sameAsProject = join(dir, "Proxy.epr");
+    writeFileSync(sameAsProject, "SameAsProject");
+    mockedSendCommand.mockReset();
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { candidates: [sameAsProject] } });
+
+    await expect(tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mp4" }))
+      .resolves.toMatchObject({
+        success: false,
+        error: expect.stringContaining("Same as Project"),
+        skippedPresetCount: 1,
+      });
+    expect(mockedSendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a failed candidate listing and leaves explicit preset_path untouched", async () => {
+    mockedSendCommand.mockReset();
+    mockedSendCommand.mockResolvedValueOnce({ success: false, error: "bridge down" });
+    await expect(tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mp4" }))
+      .resolves.toMatchObject({ success: false, error: "bridge down" });
+
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: {} });
+    await tools.manage_proxies.handler({ item_id: "item", action: "create", output_path: "proxy.mp4", preset_path: "mine.epr" });
+    const script = mockedSendCommand.mock.calls.at(-1)?.[0] as string;
+    expect(script).toContain('var presetPath = "mine.epr"');
+    expect(script).toContain("presetAutoDiscovered: false");
+    expect(script).not.toContain("__listProxyPresetCandidates()");
   });
 });

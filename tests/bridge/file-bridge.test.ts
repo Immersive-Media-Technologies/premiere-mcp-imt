@@ -16,19 +16,34 @@ import {
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { runWithUndoTracking, undoTrackingEnabled } from "../../src/bridge/undo-tracking.js";
+import { currentInvocation, withInvocationContext } from "../../src/workflows/invocation-context.js";
 import {
   getDarwinUserTempDirectory,
   getTempDir,
   getDefaultBridgeTempDir,
   getBridgeLiveness,
   ensurePrivateBridgeDirectory,
+  inspectWindowsBridgeDirectoryAcl,
+  isWindowsCapabilitySid,
   MAX_BRIDGE_RESPONSE_BYTES,
   sendCommand,
   sendRawCommand,
+  withBridgeWorkflow,
   cleanupTempDir,
 } from "../../src/bridge/file-bridge.js";
 
 // Mock fs module
+// File transport unit tests isolate ownership; real multi-process lease behavior
+// is exercised by host-lease.test.ts using the actual filesystem.
+vi.mock("../../src/bridge/host-lease.js", () => ({
+  withHostLease: async (_directory: string, _timeout: number, work: () => Promise<unknown>) => work(),
+  ownsHostLease: () => false,
+  inspectHostRecovery: () => ({ version: 1, recoveryRequired: false, recoveryRevision: null }),
+  markHostRecovery: vi.fn(),
+  HostLeaseError: class extends Error {},
+}));
+
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -63,6 +78,23 @@ const mockedRealpathSync = vi.mocked(realpathSync);
 const mockedChmodSync = vi.mocked(chmodSync);
 const mockedWatch = vi.mocked(watch);
 const mockedExecFileSync = vi.mocked(execFileSync);
+
+describe("Windows context confidentiality inspection", () => {
+  it("checks read access and uses file ACL APIs for context databases", () => {
+    mockedExecFileSync.mockReturnValueOnce(JSON.stringify({
+      ownerSid: "owner", currentUserSid: "owner", unsafeWriteAces: [], unsafeAncestorEntries: [],
+    }));
+    inspectWindowsBridgeDirectoryAcl("C:\\Context\\project-context.sqlite", false, { readAccess: true, file: true });
+    const args = mockedExecFileSync.mock.calls.at(-1)![1] as string[];
+    const script = Buffer.from(args.at(-1)!, "base64").toString("utf16le");
+    expect(script).toContain("$mutating = $mutating -bor [System.Security.AccessControl.FileSystemRights]::ReadData");
+    expect(script).toContain("[System.IO.File]::GetAccessControl($path)");
+    expect(script).not.toContain("[System.IO.Directory]::GetAccessControl($path)");
+    expect(script).toContain("[System.IO.File]::SetAccessControl($path, $acl)");
+    expect(script).toContain("$inheritance = [System.Security.AccessControl.InheritanceFlags]::None");
+    expect(script).toContain("$acl.SetOwner(");
+  });
+});
 
 // ensureDir on an existing dir stat-checks ownership; default to a dir owned by us
 // with safe perms so the existing tests exercise the happy path.
@@ -182,6 +214,44 @@ describe("sendCommand", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("records implicit legacy edit dispatch and measured stages while explicit read-only preflights stay undispatched", async () => {
+    mockedExistsSync.mockImplementation((path) => !String(path).endsWith("bridge-heartbeat.json"));
+    mockedReadFileSync.mockReturnValue('{"success":true,"data":{"verified":true}}');
+    for (const send of [sendCommand, sendRawCommand]) {
+      await withInvocationContext({}, () => runWithUndoTracking(true, async () => {
+        await send("var verified = true;", { tempDir: "/tmp/test-bridge" });
+        const context = currentInvocation()!;
+        expect(context.dispatched).toBe(true);
+        expect(context.stages).toMatchObject({ queue_wait: expect.any(Number), dispatch: expect.any(Number), host_wait: expect.any(Number), readback: expect.any(Number) });
+      }));
+      await withInvocationContext({}, () => runWithUndoTracking(true, async () => {
+        await send("var inspected = true;", { tempDir: "/tmp/test-bridge", mutating: false, mutationOnTimeout: false });
+        expect(currentInvocation()?.dispatched).toBe(false);
+      }));
+    }
+  });
+
+  it("preserves each queued workflow's invocation and mutation context after another request finishes", async () => {
+    mockedExistsSync.mockReturnValue(true);
+    let release = () => {};
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let firstContext: unknown, secondContext: unknown;
+    const first = withInvocationContext({}, () => runWithUndoTracking(true, () => {
+      firstContext = currentInvocation();
+      return withBridgeWorkflow({ tempDir: "/tmp/test-bridge" }, async () => { await blocked; });
+    }));
+    const second = withInvocationContext({}, () => runWithUndoTracking(false, () => {
+      secondContext = currentInvocation();
+      return withBridgeWorkflow({ tempDir: "/tmp/test-bridge" }, async () => {
+        expect(currentInvocation()).toBe(secondContext);
+        expect(currentInvocation()).not.toBe(firstContext);
+        expect(undoTrackingEnabled()).toBe(false);
+      });
+    }));
+    release();
+    await Promise.all([first, second]);
   });
 
   it("creates temp directory if it does not exist", async () => {
@@ -327,6 +397,104 @@ describe("sendCommand", () => {
     )).toThrow(/replaceable ancestor.*C:\\shared/i);
   });
 
+  function mockWindowsDirectoryStatus(): void {
+    mockedMkdirSync.mockReturnValue(undefined);
+    mockedLstatSync.mockReturnValueOnce({
+      uid: 0,
+      mode: 0,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    } as unknown as ReturnType<typeof lstatSync>);
+  }
+
+  it("lists every unsafe Windows ancestor with its reason and SID", () => {
+    mockWindowsDirectoryStatus();
+
+    expect(() => ensurePrivateBridgeDirectory(
+      "C:\\link\\shared\\premiere-mcp-bridge",
+      "win32",
+      undefined,
+      () => ({
+        ownerSid: "S-1-5-21-1000",
+        currentUserSid: "S-1-5-21-1000",
+        unsafeWriteAces: [],
+        unsafeAncestorEntries: [
+          { sid: "S-1-5-21-2000", path: "C:\\shared", reason: "replacement_rights" },
+          { sid: "", path: "C:\\link", reason: "reparse_point" },
+        ],
+      }),
+    )).toThrow(
+      "Bridge path has a replaceable ancestor C:\\shared (replacement_rights: S-1-5-21-2000); " +
+        "C:\\link (reparse_point: none).",
+    );
+  });
+
+  it("ignores Windows capability and app-container SIDs inherited on AppData", () => {
+    mockWindowsDirectoryStatus();
+
+    expect(() => ensurePrivateBridgeDirectory(
+      "C:\\Users\\editor\\AppData\\Local\\Temp\\premiere-mcp-bridge",
+      "win32",
+      undefined,
+      () => ({
+        ownerSid: "S-1-5-21-1000",
+        currentUserSid: "S-1-5-21-1000",
+        unsafeWriteAces: [
+          { sid: "S-1-15-3-3557520199-3666692283-3112367039", isInherited: true },
+          { sid: "s-1-15-2-1", isInherited: true },
+        ],
+        unsafeAncestorEntries: [{
+          sid: "S-1-15-3-3557520199-3666692283-3112367039",
+          path: "C:\\Users\\editor\\AppData",
+          reason: "replacement_rights",
+        }],
+      }),
+    )).not.toThrow();
+  });
+
+  it("still refuses account SIDs listed beside a capability SID", () => {
+    mockWindowsDirectoryStatus();
+
+    expect(() => ensurePrivateBridgeDirectory(
+      "C:\\Temp\\premiere-mcp-bridge",
+      "win32",
+      undefined,
+      () => ({
+        ownerSid: "S-1-5-21-1000",
+        currentUserSid: "S-1-5-21-1000",
+        unsafeWriteAces: [
+          { sid: "S-1-15-3-1", isInherited: true },
+          { sid: "S-1-5-21-2000", isInherited: true },
+        ],
+      }),
+    )).toThrow("Bridge temp dir C:\\Temp\\premiere-mcp-bridge grants write access to untrusted identities (S-1-5-21-2000).");
+  });
+
+  it("still refuses an ancestor owned by a capability SID", () => {
+    mockWindowsDirectoryStatus();
+
+    expect(() => ensurePrivateBridgeDirectory(
+      "C:\\odd\\premiere-mcp-bridge",
+      "win32",
+      undefined,
+      () => ({
+        ownerSid: "S-1-5-21-1000",
+        currentUserSid: "S-1-5-21-1000",
+        unsafeWriteAces: [],
+        unsafeAncestorEntries: [{ sid: "S-1-15-3-1", path: "C:\\odd", reason: "owner" }],
+      }),
+    )).toThrow("Bridge path has a replaceable ancestor C:\\odd (owner: S-1-15-3-1).");
+  });
+
+  it("recognizes only S-1-15-* SIDs as Windows capability SIDs", () => {
+    expect(isWindowsCapabilitySid("S-1-15-3-1024-1")).toBe(true);
+    expect(isWindowsCapabilitySid("S-1-15-2-1")).toBe(true);
+    expect(isWindowsCapabilitySid("S-1-5-21-2000")).toBe(false);
+    expect(isWindowsCapabilitySid("S-1-150-1")).toBe(false);
+    expect(isWindowsCapabilitySid("")).toBe(false);
+    expect(isWindowsCapabilitySid(undefined)).toBe(false);
+  });
+
   it("refuses a POSIX path beneath an untrusted replaceable parent", () => {
     mockedMkdirSync.mockReturnValue(undefined);
     mockedLstatSync
@@ -405,6 +573,20 @@ describe("sendCommand", () => {
     expect(content.endsWith("\nvar x = 1;")).toBe(true);
     expect(content.replaceAll("\\\\", "/")).toContain('$.evalFile("/tmp/test-bridge/helpers_');
     expect(writeCall?.[2]).toBe("utf-8");
+  });
+
+  it("names a headless-routed command so its reply file matches", async () => {
+    mockedExistsSync.mockImplementation(() => true);
+    mockedReadFileSync.mockReturnValue('{"success":true,"data":{"closed":true}}');
+
+    const promise = sendCommand("var x = 1;", { tempDir: "/tmp/test-bridge", hostEngine: "headless" });
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(promise).resolves.toMatchObject({ success: true, data: { closed: true } });
+
+    const publishedPath = String(mockedRenameSync.mock.calls[0]?.[1]);
+    expect(publishedPath).toMatch(/cmd_[0-9a-f-]{36}\.headless\.jsx$/);
+    const id = publishedPath.replace(/.*cmd_/, "").replace(/\.jsx$/, "");
+    expect(mockedReadFileSync.mock.calls.some(([path]) => String(path).endsWith(`res_${id}.json`))).toBe(true);
   });
 
   it("returns parsed JSON response", async () => {
@@ -573,7 +755,147 @@ describe("sendCommand", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("timed out");
-    expect(result.error).toContain("CEP plugin");
+    expect(result.error).toContain("MCP connector panel running in Premiere Pro");
+  });
+
+  it("reports unknown mutation state when an edit times out with a stuck busy marker", async () => {
+    mockedExistsSync.mockImplementation((path) => String(path).includes("busy_"));
+    mockedStatSync.mockImplementation((path) => String(path).includes("busy_")
+      ? ({ mtimeMs: 0 } as unknown as ReturnType<typeof statSync>)
+      : ({ uid: myUid, mode: 0o700 } as unknown as ReturnType<typeof statSync>));
+
+    const promise = sendCommand("edit script", { tempDir: "/tmp/test-bridge", timeoutMs: 50, mutationOnTimeout: true });
+    await vi.advanceTimersByTimeAsync(100);
+    const result = await promise;
+
+    expect(result).toMatchObject({
+      success: false,
+      data: { mutationOutcome: "unknown", timelineChanged: null },
+    });
+    expect(result.error).toContain("timeline state is unknown");
+    expect(result.error).toContain("inspect the timeline");
+  });
+
+  it("explains a queued command behind a fresh busy operation and proves mutating request was not applied", async () => {
+    vi.setSystemTime(new Date(10_000));
+    mockedExistsSync.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_") || value.includes("bridge-heartbeat")) return false;
+      if (value.includes("busy_previous.json")) return true;
+      if (value.includes("busy_")) return false;
+      return true; // the cmd file remains unclaimed while the earlier command owns the panel
+    });
+    mockedReaddirSync.mockReturnValue(["busy_previous.json"] as never);
+    mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_previous.json")
+      ? { uid: myUid, mode: 0o600, mtimeMs: Date.now() - 1000 }
+      : { uid: myUid, mode: 0o700 }) as unknown as typeof statSync);
+
+    const promise = sendCommand("mutate", { tempDir: "/tmp/test-bridge", timeoutMs: 500, mutating: true });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await promise;
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "Premiere is busy or blocked by an earlier command (for example an export or a dialog). This command was not run; retry when Premiere is responsive. Call get_bridge_telemetry (read-only; it sends no command) and read its blocking.state to see whether a dialog is blocking Premiere before you retry.",
+      data: { mutationOutcome: "not_applied", timelineChanged: false },
+    });
+  });
+
+  it("cancels an unclaimed command behind a stale busy marker still within the hard cap", async () => {
+    vi.setSystemTime(new Date(10_000));
+    mockedExistsSync.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_") || value.includes("bridge-heartbeat")) return false;
+      if (value.includes("busy_previous.json")) return true;
+      if (value.includes("busy_")) return false;
+      return true;
+    });
+    mockedReaddirSync.mockReturnValue(["busy_previous.json"] as never);
+    mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_previous.json")
+      ? { uid: myUid, mode: 0o600, mtimeMs: Date.now() - 30_000 }
+      : { uid: myUid, mode: 0o700 }) as unknown as typeof statSync);
+
+    const promise = sendCommand("mutate", { tempDir: "/tmp/test-bridge", timeoutMs: 500, mutating: true });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await promise;
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "Premiere is busy or blocked by an earlier command (for example an export or a dialog). This command was not run; retry when Premiere is responsive. Call get_bridge_telemetry (read-only; it sends no command) and read its blocking.state to see whether a dialog is blocking Premiere before you retry.",
+      data: { mutationOutcome: "not_applied", timelineChanged: false },
+    });
+    expect(mockedRenameSync).toHaveBeenCalledWith(expect.stringMatching(/cmd_.*\.jsx$/), expect.stringMatching(/cmd_.*\.jsx\.cancelled$/));
+  });
+
+  it("cancels an unclaimed command when the connector heartbeat was recently alive", async () => {
+    vi.setSystemTime(new Date(10_000));
+    mockedExistsSync.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_") || value.includes("busy_")) return false;
+      if (value.includes("bridge-heartbeat")) return true;
+      return true;
+    });
+    mockedReadFileSync.mockReturnValue('{"protocolVersion":1,"state":"running"}');
+    mockedReaddirSync.mockReturnValue([]);
+    mockedStatSync.mockReturnValue({ uid: myUid, mode: 0o700, mtimeMs: Date.now() } as unknown as ReturnType<typeof statSync>);
+
+    const promise = sendCommand("mutate", { tempDir: "/tmp/test-bridge", timeoutMs: 500, mutating: true });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await promise;
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "Premiere is busy or blocked by an earlier command (for example an export or a dialog). This command was not run; retry when Premiere is responsive. Call get_bridge_telemetry (read-only; it sends no command) and read its blocking.state to see whether a dialog is blocking Premiere before you retry.",
+      data: { mutationOutcome: "not_applied", timelineChanged: false },
+    });
+  });
+
+  it("reports unknown mutation state after Premiere accepted a command but its busy marker stopped", async () => {
+    vi.setSystemTime(new Date(10_000));
+    mockedExistsSync.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_")) return false;
+      if (value.includes("busy_")) return true;
+      return true;
+    });
+    mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_")
+      ? { uid: myUid, mode: 0o600, mtimeMs: 0 }
+      : { uid: myUid, mode: 0o700 }) as unknown as typeof statSync);
+
+    const promise = sendCommand("mutate", { tempDir: "/tmp/test-bridge", timeoutMs: 500, mutating: true });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await promise;
+
+    expect(result).toMatchObject({ success: false, data: { mutationOutcome: "unknown", timelineChanged: null } });
+    expect(result.error).toContain("outcome is unknown");
+    expect(result.error).toContain("inspect Premiere Pro before retrying");
+  });
+
+  it("does not claim not_applied if CEP wins the atomic command-claim race", async () => {
+    vi.setSystemTime(new Date(10_000));
+    mockedExistsSync.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_")) return false;
+      if (value.includes("busy_previous.json")) return true;
+      if (value.includes("busy_")) return false;
+      return true;
+    });
+    mockedReaddirSync.mockReturnValue(["busy_previous.json"] as never);
+    mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_previous.json")
+      ? { uid: myUid, mode: 0o600, mtimeMs: Date.now() - 1000 }
+      : { uid: myUid, mode: 0o700 }) as unknown as typeof statSync);
+    mockedRenameSync.mockImplementation(((source: unknown, target: unknown) => {
+      if (String(target).endsWith(".cancelled")) throw new Error("CEP claimed command first");
+      return undefined;
+    }) as unknown as typeof renameSync);
+
+    const promise = sendCommand("mutate", { tempDir: "/tmp/test-bridge", timeoutMs: 500, mutating: true });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await promise;
+
+    expect(result).toMatchObject({ success: false, data: { mutationOutcome: "unknown", timelineChanged: null } });
+    expect(result.error).toContain("claimed this command");
+    expect(result.error).not.toContain("safe to retry");
   });
 
   it("fails health-style commands before publication when a current connector is waiting", async () => {
@@ -607,6 +929,17 @@ describe("sendCommand", () => {
       tempDir: "/tmp/test-bridge",
       failFastOnUnreadyHeartbeat: true,
     })).resolves.toMatchObject({ success: false, error: expect.stringContaining("heartbeat is stale") });
+    expect(mockedRenameSync).not.toHaveBeenCalled();
+  });
+
+  it("fails at once when a connector that always publishes a heartbeat has none (live: AE tools waited 30 s)", async () => {
+    mockedExistsSync.mockImplementation(() => false);
+
+    await expect(sendCommand("var ae = true;", {
+      tempDir: "/tmp/test-bridge",
+      hostLabel: "After Effects",
+      requireHeartbeat: true,
+    })).resolves.toMatchObject({ success: false, error: expect.stringContaining("After Effects is not running its MCP connector") });
     expect(mockedRenameSync).not.toHaveBeenCalled();
   });
 
@@ -663,6 +996,93 @@ describe("sendCommand", () => {
     await expect(
       sendCommand(largeScript, { tempDir: "/tmp/test-bridge" })
     ).rejects.toThrow("500KB size limit");
+  });
+
+  describe("host heartbeats", () => {
+    let finished = false;
+    let busyPresent = true;
+    beforeEach(() => {
+      finished = false;
+      busyPresent = true;
+      vi.setSystemTime(new Date(100_000));
+      mockedExistsSync.mockImplementation((path) => {
+        const value = String(path);
+        if (value.endsWith("bridge-heartbeat.json")) return false;
+        if (value.includes("res_")) return finished;
+        if (value.includes("busy_")) return busyPresent;
+        return true;
+      });
+      // The panel refreshes its busy marker every ~2 s while evalScript runs.
+      mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_")
+        ? { uid: myUid, mode: 0o600, mtimeMs: Date.now() - 1_000, size: 10 }
+        : { uid: myUid, mode: 0o700, size: 40 }) as unknown as typeof statSync);
+      mockedReadFileSync.mockReturnValue('{"success":true,"data":{"rendered":true}}');
+    });
+
+    it("emits periodic progress heartbeats while a fresh busy marker shows the command is still running", async () => {
+      const notify = vi.fn().mockResolvedValue(undefined);
+      const promise = withInvocationContext({ progressToken: "render-1", notify }, () =>
+        sendCommand("render()", { tempDir: "/tmp/test-bridge", timeoutMs: 600_000 }));
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(notify).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(notify).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(notify).toHaveBeenCalledTimes(3);
+      const params = notify.mock.calls.map(([notification]) => notification.params);
+      expect(params[0]).toMatchObject({ progressToken: "render-1", message: expect.stringMatching(/Host still working \(1\d s elapsed\); outcome unverified\./) });
+      expect(params.every((entry) => entry.total === undefined)).toBe(true);
+      expect(params[1].progress).toBeGreaterThan(params[0].progress);
+      expect(params[2].progress).toBeGreaterThan(params[1].progress);
+      expect(params[2].progress).toBeLessThan(1);
+      finished = true;
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(promise).resolves.toMatchObject({ success: true, data: { rendered: true } });
+      const count = notify.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(notify).toHaveBeenCalledTimes(count);
+    });
+
+    it("is a no-op without a progress token", async () => {
+      const notify = vi.fn().mockResolvedValue(undefined);
+      const promise = withInvocationContext({ notify }, () =>
+        sendCommand("render()", { tempDir: "/tmp/test-bridge", timeoutMs: 600_000 }));
+      await vi.advanceTimersByTimeAsync(35_000);
+      finished = true;
+      await vi.advanceTimersByTimeAsync(500);
+      await promise;
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("sends no heartbeat while the command has no live busy marker (queued, stuck, or gone)", async () => {
+      busyPresent = false;
+      const notify = vi.fn().mockResolvedValue(undefined);
+      const promise = withInvocationContext({ progressToken: 7, notify }, () =>
+        sendCommand("render()", { tempDir: "/tmp/test-bridge", timeoutMs: 600_000 }));
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(notify).not.toHaveBeenCalled();
+      busyPresent = true;
+      mockedStatSync.mockImplementation(((path: unknown) => String(path).includes("busy_")
+        ? { uid: myUid, mode: 0o600, mtimeMs: Date.now() - 60_000, size: 10 }
+        : { uid: myUid, mode: 0o700, size: 40 }) as unknown as typeof statSync);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(notify).not.toHaveBeenCalled();
+      finished = true;
+      await vi.advanceTimersByTimeAsync(500);
+      await promise;
+    });
+
+    it("keeps heartbeats on the invoking request's progress token and survives a failed notification", async () => {
+      const notify = vi.fn().mockRejectedValue(new Error("client gone"));
+      const promise = withInvocationContext({ progressToken: "mine", notify }, () =>
+        sendCommand("render()", { tempDir: "/tmp/test-bridge", timeoutMs: 600_000 }));
+      await vi.advanceTimersByTimeAsync(21_000);
+      expect(notify).toHaveBeenCalledTimes(2);
+      expect(notify.mock.calls.every(([notification]) => notification.params.progressToken === "mine")).toBe(true);
+      finished = true;
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(promise).resolves.toMatchObject({ success: true });
+    });
   });
 });
 

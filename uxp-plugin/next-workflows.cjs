@@ -489,7 +489,7 @@
       assertOnlyKeys(args, ["path", "confirmExternalWrite", "confirmOverwrite", "operationId"]);
       requireConfirmation(args.confirmExternalWrite, "confirmExternalWrite", "Creating a project writes a new file");
       const path = await allowedWorkspacePath(args.path, "path");
-      rejectExistingProject(path, args.confirmOverwrite);
+      await rejectExistingProject(path, args.confirmOverwrite);
       const project = await ppro.Project.createProject(path);
       assertProjectPath(project, path, "created project");
       return projectMutationReceipt("created", project, path);
@@ -520,7 +520,7 @@
       const project = await targetProject(args.projectId);
       if (args.expectedPath != null) assertProjectPath(project, requiredPath(args.expectedPath, "expectedPath"), "target project");
       const path = await allowedWorkspacePath(args.path, "path");
-      rejectExistingProject(path, args.confirmOverwrite);
+      await rejectExistingProject(path, args.confirmOverwrite);
       if (typeof project.saveAs !== "function" || !await project.saveAs(path)) {
         throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not confirm Save As");
       }
@@ -543,7 +543,7 @@
         if (samePath(path, sourcePath) || paths.some(function (item) { return samePath(item, path); })) {
           throw commandError("UXP_INVALID_ARGUMENT", "Branch paths must be distinct from the source and each other");
         }
-        rejectExistingProject(path, args.confirmOverwrite);
+        await rejectExistingProject(path, args.confirmOverwrite);
         paths.push(path);
       }
       const branches = [];
@@ -1196,9 +1196,17 @@
       return { projectItemId, startSeconds: start, durationSeconds: duration };
     }
 
+    // Premiere 26.5 documents synchronous Media.getStart()/getDuration() and
+    // deprecates the start/duration properties, which return Promise<TickTime>.
+    function mediaTimingGetter(media, propertyName) {
+      const getterName = propertyName === "start" ? "getStart" : "getDuration";
+      return media && typeof media[getterName] === "function" ? getterName : null;
+    }
+
     function synchronousMediaTimingValue(media, propertyName) {
       try {
-        const value = media[propertyName];
+        const getterName = mediaTimingGetter(media, propertyName);
+        const value = getterName ? media[getterName]() : media[propertyName];
         if (value && typeof value.then === "function") return null;
         return boundedMediaTimingSeconds(value);
       } catch (_) { return null; }
@@ -1332,6 +1340,13 @@
     }
 
     async function mediaTimingValue(media, propertyName) {
+      const getterName = mediaTimingGetter(media, propertyName);
+      if (getterName) {
+        try {
+          const seconds = boundedMediaTimingSeconds(await media[getterName]());
+          if (seconds != null) return { accessor: getterName + "()", seconds };
+        } catch (_) { /* fall back to the deprecated property */ }
+      }
       try {
         return { accessor: propertyName, seconds: boundedMediaTimingSeconds(await media[propertyName]) };
       } catch (_) {
@@ -1719,9 +1734,45 @@
       return deps.workspace.assertPathAllowed(path, { label, kind: "file" });
     }
 
-    function rejectExistingProject(path, confirmation) {
-      if (ppro.Project.isProject(path) && confirmation !== true) {
-        throw commandError("UXP_CONFIRMATION_REQUIRED", "confirmOverwrite is required when the destination is already a Premiere project");
+    // Premiere 26.5.1's Project.isProject(path) is true for any *.prproj path,
+    // even a missing one (#642), so check the file itself when UXP storage can.
+    async function destinationFileExists(path) {
+      if (typeof deps.fileExists === "function") {
+        try {
+          const result = await deps.fileExists(path);
+          return typeof result === "boolean" ? result : null;
+        } catch (error) { return isMissingFileError(error) ? false : null; }
+      }
+      let fs = null;
+      try {
+        const uxp = require("uxp");
+        fs = uxp && uxp.storage && uxp.storage.localFileSystem;
+      } catch (_) { return null; }
+      if (!fs || typeof fs.getEntryWithUrl !== "function") return null;
+      const normalized = String(path).replace(/\\/g, "/");
+      const url = /^[A-Za-z]:\//.test(normalized) ? "file:/" + normalized : "file:" + normalized;
+      try {
+        const entry = await fs.getEntryWithUrl(url);
+        return entry ? true : null;
+      } catch (error) {
+        // Permission/unsupported-storage errors do not prove absence.
+        return isMissingFileError(error) ? false : null;
+      }
+    }
+
+    function isMissingFileError(error) {
+      const code = error && error.code;
+      return code === "ENOENT" || code === "NotFoundError" ||
+        (error && error.name === "NotFoundError");
+    }
+
+    async function rejectExistingProject(path, confirmation) {
+      if (confirmation === true) return;
+      const exists = await destinationFileExists(path);
+      if (exists !== false) {
+        throw commandError("UXP_CONFIRMATION_REQUIRED", exists === true
+          ? "confirmOverwrite is required when the destination file already exists"
+          : "Destination existence could not be verified; inspect the destination before confirming confirmOverwrite");
       }
     }
 

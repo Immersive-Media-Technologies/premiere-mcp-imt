@@ -27,6 +27,11 @@ const READ_ONLY_TOOLS = new Set([
   "plan_silence_review_markers",
   "verify_mogrt_artifact",
   "analyze_dialogue_edit_candidates",
+  "review_dialogue_candidates",
+  "review_quote_paper_edit",
+  "review_text_changes",
+  "review_sync_evidence",
+  "review_broll_placements",
   "preview_derived_dialogue_sequence_uxp",
   "preview_workflow_recipe",
   "preview_watched_media_import",
@@ -51,22 +56,24 @@ const READ_ONLY_TOOLS = new Set([
   "audit_timeline_health",
   "plan_client_notes_checklist",
   "plan_multicam_angle_switches",
+  "compute_mask_fit_motion",
 ]);
 const DESTRUCTIVE_PREFIXES = ["delete_", "remove_", "ripple_delete", "close_"];
 const DESTRUCTIVE_TOOLS = new Set(["manage_project_context"]);
 const OPEN_WORLD_TOOLS = new Set(["execute_extendscript", "send_raw_script"]);
 
 /** Conservative MCP hints. They describe expected behavior, never authorization. */
-export function annotationsForTool(name: string): ToolAnnotations {
-  const readOnly = READ_ONLY_TOOLS.has(name) || READ_PREFIXES.some((prefix) => name.startsWith(prefix));
+export function annotationsForTool(name: string, explicit?: ToolAnnotations): ToolAnnotations {
+  const readOnly = explicit?.readOnlyHint ?? (READ_ONLY_TOOLS.has(name) || READ_PREFIXES.some((prefix) => name.startsWith(prefix)));
   return {
     title: name.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" "),
     readOnlyHint: readOnly,
     destructiveHint: !readOnly && (
-      DESTRUCTIVE_TOOLS.has(name) || DESTRUCTIVE_PREFIXES.some((prefix) => name.startsWith(prefix))
+      DESTRUCTIVE_TOOLS.has(name) || name.startsWith("manage_") || name.startsWith("batch_") || DESTRUCTIVE_PREFIXES.some((prefix) => name.startsWith(prefix))
     ),
     idempotentHint: readOnly,
     openWorldHint: OPEN_WORLD_TOOLS.has(name),
+    ...explicit,
   };
 }
 
@@ -74,6 +81,11 @@ export function structuredToolResult(tool: string, success: boolean, data?: unkn
   return {
     ok: success,
     tool,
-    ...(success ? { data: data ?? null } : { error: error ?? "Unknown error" }),
+    ...(success
+      ? { data: data ?? null }
+      // Keep diagnostic data on failure (per-property outcomes, what was and was
+      // not applied). Dropping it left errors pointing at "data.notCopied" that
+      // the client never received.
+      : { error: error ?? "Unknown error", ...(data === undefined || data === null ? {} : { data }) }),
   };
 }

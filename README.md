@@ -11,7 +11,7 @@ frames and export — from plain language.
 
 Two parts, made to work together:
 
-- **The MCP server** — about 380 Premiere operations behind nine tools; writes are verified by
+- **The MCP server** — about 440 Premiere operations behind nine tools; writes are verified by
   reading Premiere back; **works on every Premiere UI language** (verified live); no telemetry.
 - **The skill** (`skills/pr`, also served by the `pr_skill` tool, so it works in any client) — how
   to drive Premiere safely, where scripting ends, and how to use **Premiere's own AI tools**:
@@ -32,7 +32,7 @@ By **[Immersive Media Technologies](https://github.com/Immersive-Media-Technolog
 needed with the Claude Desktop extension).**
 
 > [!CAUTION]
-> This edits real Premiere projects, and Premiere has **no scripted undo** — work on a copy. Project
+> This edits real Premiere projects, and scripted undo covers only some edits — work on a copy. Project
 > content (names, transcripts, markers, frames) goes to the AI service you use. Premiere's
 > generative tools spend your Adobe credits; the agent asks before starting one. Raw ExtendScript is
 > off unless you turn it on.
@@ -109,8 +109,8 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 
 | | |
 |---|---|
-| **Verified writes** | edits read Premiere back and report `verified` only when the readback matches; anything else is reported as unconfirmed. |
-| **Checkpoints instead of undo** | Premiere has no scripted undo. `create_sequence_checkpoint` clones the sequence before a risky edit; `diff_sequence_snapshots` shows exactly what changed (added, removed, moved, trimmed clips with frame deltas). |
+| **Verified writes** | edits read Premiere back and report `verified` only when the readback matches; anything else is reported as unconfirmed. An edit whose outcome is unknown pauses further edits until the agent has looked at the project and acknowledged it — a retry never applies a change twice. |
+| **Undo where Premiere records it, checkpoints elsewhere** | Edits that Premiere records in its history (effects added or removed, cuts, inserts) report `undoSteps` and can be reverted with `undo` — each step is checked against Premiere's undo stack (experimental QE). Property and marker writes are not recorded: `create_sequence_checkpoint` clones the sequence before a risky edit; `diff_sequence_snapshots` shows exactly what changed (added, removed, moved, trimmed clips with frame deltas). |
 | **Plan → preview → apply** | `plan_*` operations only compute; compound edits apply only with the confirmation token of their preview, unchanged. |
 | **Read-only mode** | `PR_MCP_READONLY=true` — inspection and exports only; the project cannot change. |
 | **No raw scripting by default** | `pr_execute_script` exists only with `PR_MCP_ENABLE_SCRIPT=true`. |
@@ -122,15 +122,15 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 |---|---|
 | `pr_verify` | connector, open project and active sequence — the first call |
 | `pr_get_sequence` | tracks and clips with their `node_id`, times and speed |
-| `pr_catalog` / `pr_do` / `pr_batch` | discover the ~380 operations (43 categories) and run one or several |
+| `pr_catalog` / `pr_do` / `pr_batch` | discover the ~440 operations (44 categories) and run one or several |
 | `pr_export_frame` | a frame of the sequence as PNG — the agent's eye |
 | `pr_save_project` | save |
 | `pr_install_connector` | check / install the connector inside Premiere |
 | `pr_skill` | the agent skill: the router and its references |
 | `pr_execute_script` | raw ExtendScript — only when enabled |
 
-`PR_MCP_FACADE=0` lists every operation as its own tool instead (about 150K tokens of definitions;
-the nine tools cost about 1.5K).
+`PR_MCP_FACADE=0` lists every operation as its own tool instead (more than 600K tokens of
+definitions — beyond most context windows; the nine tools cost about 1.5K).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -168,7 +168,7 @@ sends home. As of 2026-10-26:
 
 |  | Premiere-MCP-IMT | [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp) (upstream) | [AdobePremiereProMCP](https://github.com/ayushozha/AdobePremiereProMCP) | [Adobe_Premiere_Pro_MCP](https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP) | [flue](https://github.com/sfkislev/flue) |
 | --- | --- | --- | --- | --- | --- |
-| Tools the model sees by default | 9, over ~380 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
+| Tools the model sees by default | 9, over ~440 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
 | Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
 | Non-English Premiere | every UI language (all ten), verified live | English and es-ES measured | not stated | not stated | not stated |
 | Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
@@ -187,6 +187,9 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.0.4](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.4) · 2026-10-28 —
+  built on premiere-pro-mcp 1.26.0: every edit read back from Premiere, about 60 more operations, the UI-language
+  layer carried into the new code; reinstall the connector with `pr_install_connector`.
 - [v1.0.2](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.2) · 2026-10-28 —
   descriptions everywhere: every Adobe UI language, a large skills library, built for Adobe's generative features.
 - [v1.0.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.0.1) · 2026-10-28 —

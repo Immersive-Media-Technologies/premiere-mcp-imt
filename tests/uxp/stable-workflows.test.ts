@@ -5,6 +5,18 @@ const require = createRequire(import.meta.url);
 const Commands = require("../../uxp-plugin/commands.cjs");
 const Protocol = require("../../uxp-plugin/protocol.cjs");
 
+// Independent test cases explicitly reconcile the inspected current fixture
+// identity between refusals. The refused IDs remain consumed after acknowledgement.
+async function acknowledgeReviewedRefusal(value: { registry: { dispatch: (...args: any[]) => Promise<any> } }, expectedIds?: string[]) {
+  const recovery = await value.registry.dispatch("operations.recovery.inspect", {});
+  expect(recovery.recoveryRequired).toBe(true);
+  expect(recovery.operations.length).toBeGreaterThan(0);
+  expect(recovery.operations.every((operation: { outcome: string }) => operation.outcome === "unknown")).toBe(true);
+  const operationIds = recovery.operations.map((operation: { id: string }) => operation.id);
+  if (expectedIds) expect(operationIds).toEqual(expectedIds);
+  await expect(value.registry.dispatch("operations.recovery.acknowledge", { expectedRecoveryRevision: recovery.recoveryRevision, expectedIdentityRevision: recovery.identityRevision, operationIds, reviewed: true })).resolves.toMatchObject({ acknowledged: true, replayAuthorized: false, reconciledOperationIds: operationIds, recoveryRequired: false });
+}
+
 const PREMIERE_METADATA_NS = "http://ns.adobe.com/premierePrivateProjectMetaData/1.0/";
 const DC_NS = "http://purl.org/dc/elements/1.1/";
 const EXIF_NS = "http://ns.adobe.com/exif/1.0/";
@@ -407,25 +419,37 @@ describe("stable Premiere UXP workflow expansion", () => {
     });
     await expect(value.registry.dispatch("effects.chain.add", {
       mediaType: "video", trackIndex: 0, clipIndex: 0, effectId: "PR.Test",
-    })).resolves.toMatchObject({ applied: true, outcome: "verified", beforeCount: 1, after: { count: 2 } });
+    })).resolves.toMatchObject({ applied: true, outcome: "verified", beforeCount: 1, after: { count: 2 },
+      verificationBoundary: "effect_chain_count_readback", renderVerified: false });
     await expect(value.registry.dispatch("effects.chain.add", {
       mediaType: "audio", trackIndex: 0, clipIndex: 0, effectId: "Test Audio Effect",
-    })).resolves.toMatchObject({ applied: true, outcome: "verified", beforeCount: 1, after: { count: 2 } });
+    })).resolves.toMatchObject({ applied: true, outcome: "verified", beforeCount: 1, after: { count: 2 }, renderVerified: false });
     await expect(value.registry.dispatch("selection.inspect", {})).resolves.toMatchObject({
       count: 1, items: [{ mediaType: "video", trackIndex: 0, clipIndex: 0 }],
     });
     await expect(value.registry.dispatch("effects.selection.add", {
       mediaType: "video", effectId: "PR.Test",
-    })).resolves.toMatchObject({ applied: 1, outcome: "verified" });
+    })).resolves.toMatchObject({ applied: 1, outcome: "verified", renderVerified: false });
     await expect(value.registry.dispatch("effects.selection.remove", {
       mediaType: "video", componentIndex: 2, expectedEffectId: "PR.Test",
-    })).resolves.toMatchObject({ removed: 1, outcome: "verified" });
+    })).resolves.toMatchObject({ removed: 1, outcome: "verified", renderVerified: false });
     await expect(value.registry.dispatch("effects.chain.remove", {
       mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 1, expectedEffectId: "PR.Other",
     })).rejects.toMatchObject({ code: "UXP_STALE_EFFECT_CHAIN" });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(4);
     expect(value.components).toHaveLength(2);
     expect(value.audioComponents).toHaveLength(2);
+  });
+
+  it("labels a successful direct effect removal as component verified but render unverified", async () => {
+    const value = stableHost();
+    await value.registry.dispatch("effects.chain.add", {
+      mediaType: "video", trackIndex: 0, clipIndex: 0, effectId: "PR.Test",
+    });
+    await expect(value.registry.dispatch("effects.chain.remove", {
+      mediaType: "video", trackIndex: 0, clipIndex: 0, componentIndex: 1, expectedEffectId: "PR.Test",
+    })).resolves.toMatchObject({ removed: true, outcome: "verified", beforeCount: 2,
+      after: { count: 1 }, verificationBoundary: "effect_chain_count_readback", renderVerified: false });
   });
 
   it("reads one complete native track-item identity and rejects stale or incomplete snapshots", async () => {
@@ -811,19 +835,24 @@ describe("stable Premiere UXP workflow expansion", () => {
     await expect(invalid.registry.dispatch("selection.update", {
       mode: "replace", items: [target],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(invalid);
     await expect(invalid.registry.dispatch("selection.update", {
       mode: "clear", expectedSequenceGuid: "sequence-1", items: [target],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(invalid);
     await expect(invalid.registry.dispatch("selection.update", {
       mode: "clear", expectedSequenceGuid: "sequence-1", items: null,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(invalid);
     await expect(invalid.registry.dispatch("selection.update", {
       mode: "replace", expectedSequenceGuid: "sequence-1",
       items: [{ ...target, expectedStartSeconds: 21 }],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(invalid);
     await expect(invalid.registry.dispatch("selection.update", {
       mode: "replace", expectedSequenceGuid: "sequence-1", items: [target, target],
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(invalid);
     await expect(invalid.registry.dispatch("selection.targets.inspect", {
       items: [
         { mediaType: "video", trackIndex: 0, clipIndex: 0 },
@@ -897,12 +926,14 @@ describe("stable Premiere UXP workflow expansion", () => {
     await expect(value.registry.dispatch("proxy.attach", {
       projectItemId: "source-1", mediaPath: "D:/Approved/proxy.mov",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("proxy.attach", {
       projectItemId: "source-1", mediaPath: "D:/Approved/proxy.mov", confirmNonUndoable: true,
     })).resolves.toMatchObject({ attached: true, outcome: "verified", after: { hasProxy: true } });
     await expect(value.registry.dispatch("proxy.attach", {
       projectItemId: "source-1", mediaPath: "D:/Approved/proxy-2.mov", confirmNonUndoable: true,
     })).rejects.toMatchObject({ code: "UXP_PROXY_ALREADY_ATTACHED" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("ingest.configure", { enabled: true })).resolves.toMatchObject({
       configured: true, outcome: "verified", enabled: true,
     });
@@ -943,6 +974,25 @@ describe("stable Premiere UXP workflow expansion", () => {
     expect(disclosed.omittedSensitiveCount).toBe(0);
   });
 
+  it("resolves metadata field targets inside nested bins by id and name through FolderItem.cast (#612)", async () => {
+    const value = stableHost();
+    value.setMetadataPackets({ xmp: `${DC_NS}\tdescription\tA clip` });
+    // Nested bins come back from getItems() as ProjectItem views without getItems().
+    const binFolder = { isFolder: true, getItems: vi.fn(async () => [value.sourceClip]) };
+    const binItem = { name: "Selects", getId: vi.fn(async () => "bin-1") };
+    const root = { isFolder: true, getItems: vi.fn(async () => [binItem]) };
+    value.project.getRootItem.mockResolvedValue(root);
+    value.ppro.FolderItem.cast.mockImplementation((item: { isFolder?: boolean }) => {
+      if (item === binItem) return binFolder;
+      if (item.isFolder) return item;
+      throw new Error("not folder");
+    });
+    await expect(value.registry.dispatch("metadata.fields.inspect", { projectItemId: "source-1" }))
+      .resolves.toMatchObject({ fields: expect.arrayContaining([expect.objectContaining({ name: "description" })]) });
+    await expect(value.registry.dispatch("metadata.fields.inspect", { projectItemName: "Interview.mov" }))
+      .resolves.toMatchObject({ fields: expect.arrayContaining([expect.objectContaining({ name: "description" })]) });
+  });
+
   it("updates one metadata field through a complete packet write with field readback", async () => {
     const value = stableHost();
     value.setMetadataPackets({
@@ -971,12 +1021,14 @@ describe("stable Premiere UXP workflow expansion", () => {
       value: "slate-3",
       expectedValue: "slate-1",
     })).rejects.toMatchObject({ code: "UXP_STALE_METADATA_FIELD" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("metadata.fields.update", {
       projectItemId: "source-1",
       packet: "xmp",
       name: "description",
       value: "Updated clip",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value);
     await expect(value.registry.dispatch("metadata.fields.update", {
       projectItemId: "source-1",
       packet: "xmp",
@@ -986,6 +1038,21 @@ describe("stable Premiere UXP workflow expansion", () => {
     })).resolves.toMatchObject({
       updated: true, outcome: "verified", packet: "xmp", name: "description", value: "Updated clip",
     });
+  });
+
+  it("fails when Premiere commits a metadata write that reads back unchanged (#642)", async () => {
+    const value = stableHost();
+    value.setMetadataPackets({
+      project: `${PREMIERE_METADATA_NS}	Column.Intrinsic.LogNote	slate-1`,
+      xmp: `${DC_NS}	description	A clip`,
+    });
+    value.ppro.Metadata.createSetProjectMetadataAction.mockImplementation(() => ({ apply: () => undefined }));
+    await expect(value.registry.dispatch("metadata.fields.update", {
+      projectItemId: "source-1", packet: "project", name: "Column.Intrinsic.LogNote", value: "slate-2",
+    })).rejects.toMatchObject({ code: "UXP_METADATA_NOT_APPLIED" });
+    await expect(value.registry.dispatch("metadata.update", {
+      projectItemId: "source-1", projectMetadata: "project-after", updatedFields: ["Column.Intrinsic.LogNote"],
+    })).rejects.toMatchObject({ code: "UXP_RECOVERY_REQUIRED" });
   });
 
   it("updates metadata and footage conformance transactionally with readback", async () => {
@@ -1033,10 +1100,12 @@ describe("stable Premiere UXP workflow expansion", () => {
     await expect(value.registry.dispatch("metadata.projectPanel.update", {
       ...args, expectedProjectPanelMetadata: "panel-before", projectPanelMetadata: "<panel/>", operationId: "panel-stale-1",
     })).rejects.toMatchObject({ code: "UXP_STALE_PROJECT_PANEL_METADATA" });
+    await acknowledgeReviewedRefusal(value, ["panel-stale-1"]);
     await expect(value.registry.dispatch("metadata.projectPanel.update", {
       ...args, expectedProjectPanelMetadata: "<panel><column id=\"review\"/></panel>", projectPanelMetadata: "<panel/>",
       confirmUpdate: false, operationId: "panel-confirmation-1",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value, ["panel-confirmation-1"]);
     await expect(value.registry.dispatch("metadata.projectPanel.update", {
       ...args, expectedProjectPanelMetadata: "<panel><column id=\"review\"/></panel>", projectPanelMetadata: "<panel/>", confirmUpdate: true, operationId: "*",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
@@ -1105,16 +1174,20 @@ describe("stable Premiere UXP workflow expansion", () => {
     await expect(value.registry.dispatch("metadata.projectSchema.create", {
       ...args, fieldName: "McpPriority", expectedProjectPanelMetadata: "panel-before", operationId: "schema-stale-1",
     })).rejects.toMatchObject({ code: "UXP_STALE_PROJECT_METADATA_SCHEMA" });
+    await acknowledgeReviewedRefusal(value, ["schema-stale-1"]);
     await expect(value.registry.dispatch("metadata.projectSchema.create", {
       ...args, fieldName: "McpPriority", expectedProjectPanelMetadata: "panel-before|schema:McpReviewState:MCP Review State:3",
       confirmCreate: false, operationId: "schema-confirmation-1",
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await acknowledgeReviewedRefusal(value, ["schema-confirmation-1"]);
     await expect(value.registry.dispatch("metadata.projectSchema.create", {
       ...args, fieldName: "9-invalid", expectedProjectPanelMetadata: "panel-before|schema:McpReviewState:MCP Review State:3", operationId: "schema-invalid-name-1",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value, ["schema-invalid-name-1"]);
     await expect(value.registry.dispatch("metadata.projectSchema.create", {
       ...args, fieldName: "McpPriority", fieldType: "date", expectedProjectPanelMetadata: "panel-before|schema:McpReviewState:MCP Review State:3", operationId: "schema-invalid-type-1",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await acknowledgeReviewedRefusal(value, ["schema-invalid-type-1"]);
     await expect(value.registry.dispatch("metadata.projectSchema.create", {
       ...args, fieldName: "McpPriority", expectedProjectPanelMetadata: "panel-before|schema:McpReviewState:MCP Review State:3", operationId: "*",
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });

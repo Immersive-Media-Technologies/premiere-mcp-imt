@@ -102,7 +102,7 @@ const SNAPSHOT_HELPER = `
             outPointSeconds: __ticksToSeconds(clip.outPoint.ticks),
             enabled: true
           };
-          try { info.enabled = !clip.isDisabled(); } catch (disabledError) {}
+          try { info.enabled = !__isClipDisabled(clip); } catch (disabledError) {}
           if (includeSpeed) { try { info.speed = clip.getSpeed(); } catch (speedError) {} }
           try { if (clip.projectItem) info.sourceProjectItemId = clip.projectItem.nodeId; } catch (sourceError) {}
           clips.push(info);
@@ -133,7 +133,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
   return {
     add_markers_batch: {
       description:
-        "Add up to 200 sequence or clip markers in one verified CEP request (beat grids, chapters, silence reviews, client notes). Every marker is validated and range-checked before the first write; the tool reads back the marker count and each created marker's time and fails closed on any mismatch.",
+        "Add up to 200 sequence or clip markers in one verified CEP request (beat grids, chapters, silence reviews, client notes). Every marker is validated and range-checked before the first write; the tool reads back the marker count and each created marker's time and fails closed on any mismatch. EXPERIMENTAL QE: records an observed marker boundary for guarded Undo/Redo; crossing it is refused by default, and unreadable history records unknown protection. This boundary does not verify native marker reversal. Marker start and end storage are compared at exact integer ticks; unsupported time writes remain unverified with the created marker identity when available.",
       parameters: {
         type: "object" as const,
         additionalProperties: false,
@@ -157,7 +157,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
             },
           },
           sequence_id: { type: "string", minLength: 1, maxLength: 512, description: "Sequence ID or name. Defaults to the active sequence." },
-          node_id: { type: "string", minLength: 1, maxLength: 512, description: "Optional timeline clip node ID; markers are then created on that clip instead of the sequence (requires the active sequence)." },
+          node_id: { type: "string", minLength: 1, maxLength: 512, description: "Optional timeline clip node ID; markers are then created on that clip instead of the sequence (requires the active sequence). Premiere 25.2.3 timeline clips have no marker collection, so this refuses there and names the source time to use with add_marker_to_project_item." },
           skip_existing_within_frames: { type: "integer", minimum: 0, maximum: 120, description: "When above 0, skip a marker if an existing marker already sits within this many frames of it (default 0 = never skip)." },
           allow_beyond_end: { type: "boolean", description: "Allow marker times past the sequence end instead of rejecting the whole batch (default false)." },
         },
@@ -204,6 +204,16 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
              var clipResult = __findClip("${escapeForExtendScript(args.node_id)}");
              if (!clipResult) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}");
              var markers = clipResult.clip.markers;
+             if (!markers || typeof markers.createMarker !== "function") {
+               var sourceIn = NaN, sourceSpeed = null, sourceReverse = null;
+               try {
+                 sourceIn = __ticksToSeconds(clipResult.clip.inPoint.ticks);
+                 sourceSpeed = clipResult.clip.getSpeed();
+                 sourceReverse = clipResult.clip.isSpeedReversed();
+               } catch (eIn) {}
+               if (!isFinite(sourceIn) || (sourceSpeed !== 1 && sourceSpeed !== 100) || (sourceReverse !== false && sourceReverse !== 0)) return __error("Timeline clips have no marker collection on this Premiere host. Nothing was changed. Use add_marker_to_project_item after inspecting the source clock; this clip's timing or speed cannot establish a simple clip-to-source time conversion.");
+               return __error("Timeline clips have no marker collection on this Premiere host; clip markers belong to the source project item and appear on every use of that media. Nothing was changed. Use add_marker_to_project_item with the source time instead: this clip's in-point is " + sourceIn + "s, so clip time t is source time t + " + sourceIn + "s.");
+             }
              var limitSeconds = __ticksToSeconds(clipResult.clip.duration.ticks);
              var targetKind = "clip";`
           : `${sequenceLookup(args.sequence_id)}
@@ -214,8 +224,22 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           ${target}
           var requested = [${emitted}];
           var frameTicks = parseFloat(seq.timebase);
-          if (!frameTicks || isNaN(frameTicks)) frameTicks = TICKS_PER_SECOND / 30;
+          if (!frameTicks || isNaN(frameTicks) || frameTicks <= 0) return __error("The active sequence frame grid could not be read; no markers were created.");
           var frameSeconds = frameTicks / TICKS_PER_SECOND;
+          for (var snapIndex = 0; snapIndex < requested.length; snapIndex++) {
+            var snapSpec = requested[snapIndex];
+            snapSpec.requestedT = snapSpec.t;
+            var requestedStartTicks = __secondsToTicks(snapSpec.t);
+            var appliedStartTicks = targetKind === "clip" ? requestedStartTicks : __snapSequenceTicks(seq, requestedStartTicks);
+            snapSpec.t = __ticksToSeconds(appliedStartTicks);
+            snapSpec.startTicks = String(appliedStartTicks); snapSpec.endTicks = String(appliedStartTicks);
+            if (snapSpec.d > 0) {
+              snapSpec.requestedEnd = snapSpec.requestedT + snapSpec.d;
+              var appliedEndTicks = targetKind === "clip" ? __secondsToTicks(snapSpec.requestedEnd) : __snapSequenceTicks(seq, __secondsToTicks(snapSpec.requestedEnd));
+              snapSpec.d = __ticksToSeconds(appliedEndTicks - appliedStartTicks);
+              snapSpec.endTicks = String(appliedEndTicks);
+            }
+          }
           var allowBeyondEnd = ${args.allow_beyond_end ? "true" : "false"};
           var existing = [];
           var probe = markers.getFirstMarker();
@@ -243,27 +267,50 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
             }
             if (near) skipped.push({ timeSeconds: requested[i].t, name: requested[i].n }); else toWrite.push(requested[i]);
           }
-          var created = [];
+          if (toWrite.length) {
+            var markerBarrier = __rememberMarkerUndoBarrier(__readUndoIndex());
+          if (!markerBarrier.ok) return __error(markerBarrier.error);
+          }
+          var created = [], unverifiedFields = [];
+          // Once a marker exists the target has changed, so later failures
+          // report what was already written.
+          function __batchFailure(message, markerWritten) {
+            return __error(message, { createdCount: created.length, created: created, timelineChanged: created.length > 0 || markerWritten ? true : null, outcome: "committed_unverified", verified: false, unverifiedFields: unverifiedFields });
+          }
           for (i = 0; i < toWrite.length; i++) {
             var spec = toWrite[i];
             var marker;
             try { marker = markers.createMarker(spec.t); } catch (createError) {
-              return __error("Premiere rejected marker " + i + " at " + spec.t + "s after " + created.length + " verified marker(s): " + createError.toString());
+              return __batchFailure("Premiere rejected marker " + i + " at " + spec.t + "s after " + created.length + " verified marker(s): " + createError.toString(), false);
             }
-            if (!marker) return __error("Premiere returned no marker for entry " + i + " at " + spec.t + "s after " + created.length + " verified marker(s).");
+            if (!marker) return __batchFailure("Premiere returned no marker for entry " + i + " at " + spec.t + "s after " + created.length + " verified marker(s).", false);
             try {
               if (spec.n !== null) marker.name = spec.n;
               if (spec.c !== null) marker.comments = spec.c;
               if (spec.k !== null) marker.setColorByIndex(spec.k);
-              if (spec.d > 0) marker.end = spec.t + spec.d;
+              var markerClock = __setMarkerRangeTicks(marker, spec.startTicks, spec.endTicks);
+              if (!markerClock.ok) return __batchFailure("Marker " + i + " did not retain its exact tick range (GUID " + String(marker.guid || "") + "); inspect it before retrying.", true);
             } catch (assignError) {
-              return __error("Premiere created marker " + i + " but rejected its properties: " + assignError.toString());
+              return __batchFailure("Premiere created marker " + i + " but rejected its properties: " + assignError.toString(), true);
             }
             var actualStart = __ticksToSeconds(marker.start.ticks);
-            if (Math.abs(actualStart - spec.t) > frameSeconds) {
-              return __error("Marker " + i + " landed at " + actualStart + "s instead of " + spec.t + "s; the batch is not reported as verified.");
+            if (!isFinite(actualStart) || Math.abs(actualStart - spec.t) > frameSeconds / 1000 || (targetKind === "sequence" && Math.abs(actualStart / frameSeconds - Math.round(actualStart / frameSeconds)) > 0.001)) {
+              return __batchFailure("Marker " + i + " landed at " + actualStart + "s instead of " + spec.t + "s; the batch is not reported as verified.", true);
             }
-            created.push({ timeSeconds: actualStart, name: marker.name, comments: marker.comments, endSeconds: __ticksToSeconds(marker.end.ticks), requestedColor: spec.k });
+            var actualEnd = __ticksToSeconds(marker.end.ticks);
+            var actualColor = null;
+            try { actualColor = marker.getColorByIndex(); } catch (eColor) {}
+            var fieldProblems = [];
+            if (spec.n !== null && String(marker.name) !== spec.n) fieldProblems.push("name reads back as " + marker.name);
+            if (spec.c !== null && String(marker.comments) !== spec.c) fieldProblems.push("comments read back as " + marker.comments);
+            if (spec.d > 0 && (!isFinite(actualEnd) || Math.abs(actualEnd - (spec.t + spec.d)) > frameSeconds / 1000 || (targetKind === "sequence" && Math.abs(actualEnd / frameSeconds - Math.round(actualEnd / frameSeconds)) > 0.001))) fieldProblems.push("end reads back as " + actualEnd + "s");
+            if (spec.k !== null && (typeof actualColor !== "number" || !isFinite(actualColor))) unverifiedFields.push({ markerIndex: i, field: "color" });
+            else if (spec.k !== null && actualColor !== spec.k) fieldProblems.push("color index reads back as " + actualColor);
+            if (fieldProblems.length) return __batchFailure("Marker " + i + " at " + spec.t + "s was created, but " + fieldProblems.join("; ") + ".", true);
+            var createdMarker = { requestedTicks: String(__secondsToTicks(spec.requestedT)), appliedTicks: spec.startTicks, storedTicks: markerClock.startTicks, storedEndTicks: markerClock.endTicks, timeSeconds: actualStart, name: marker.name, comments: marker.comments, endSeconds: actualEnd, color: typeof actualColor === "number" && isFinite(actualColor) ? actualColor : null };
+            if (Math.abs(actualStart - spec.requestedT) > frameSeconds / 1000) { createdMarker.requestedSeconds = spec.requestedT; createdMarker.appliedSeconds = actualStart; }
+            if (spec.requestedEnd !== undefined && Math.abs(actualEnd - spec.requestedEnd) > frameSeconds / 1000) { createdMarker.requestedEndSeconds = spec.requestedEnd; createdMarker.appliedEndSeconds = actualEnd; }
+            created.push(createdMarker);
           }
           var afterCount = 0;
           probe = markers.getFirstMarker();
@@ -273,7 +320,9 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           }
           return __result({
             added: created.length > 0,
-            verified: true,
+            verified: unverifiedFields.length === 0,
+            outcome: unverifiedFields.length ? "committed_unverified" : "verified",
+            unverifiedFields: unverifiedFields,
             target: targetKind,
             requestedCount: requested.length,
             createdCount: created.length,
@@ -282,7 +331,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
             markerCountBefore: beforeCount,
             markerCountAfter: afterCount,
             markers: created,
-            verificationScope: "Marker collection readback only; colors are requested values and are not read back by Premiere's DOM."
+            verificationScope: "Marker collection readback: start, end, name, comments and color index (when Premiere reports it) are read back for every created marker."
           });
         `);
         const result = await sendCommand(script, bridgeOptions);
@@ -358,7 +407,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
         const scope = args.count_scope ?? "per_track";
         const script = buildToolScript(`
           var seq = __getCurrentActiveSequence();
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           var everyNth = ${everyNth};
           var offset = ${offset};
           var perTrack = ${scope === "per_track" ? "true" : "false"};
@@ -383,7 +432,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
                 var start = __ticksToSeconds(clip.start.ticks);
                 var end = __ticksToSeconds(clip.end.ticks);
                 var duration = end - start;
-                if (!includeDisabled) { try { if (clip.isDisabled()) continue; } catch (disabledError) {} }
+                if (!includeDisabled) { try { if (__isClipDisabled(clip)) continue; } catch (disabledError) {} }
                 if (nameContains !== null && String(clip.name).toLowerCase().indexOf(nameContains) === -1) continue;
                 if (nameRegex !== null && !nameRegex.test(String(clip.name))) continue;
                 if (minDuration !== null && duration < minDuration - 0.0001) continue;
@@ -476,7 +525,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
         const trackType = args.track_type ?? "both";
         const script = buildToolScript(`
           var seq = __getCurrentActiveSequence();
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           var action = "${args.action}";
           var frames = ${frames};
           var trackIndexFilter = ${args.track_index === undefined ? "null" : args.track_index};
@@ -517,10 +566,14 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
 
           if (action === "start") target = 0;
           else if (action === "end") target = endTicks;
-          else if (action === "in_point") { target = __secondsToTicks(Number(seq.getInPoint())); }
-          else if (action === "out_point") { target = __secondsToTicks(Number(seq.getOutPoint())); }
-          else if (action === "work_area_in") { target = parseFloat(seq.getWorkAreaInPoint()); }
-          else if (action === "work_area_out") { target = parseFloat(seq.getWorkAreaOutPoint()); }
+          // Sequence point getters return seconds (-400000 when unset), not ticks.
+          else if (action === "in_point" || action === "out_point" || action === "work_area_in" || action === "work_area_out") {
+            var pointSeconds = action === "in_point" ? __sequencePointSeconds(seq.getInPoint())
+              : (action === "out_point" ? __sequencePointSeconds(seq.getOutPoint())
+              : (action === "work_area_in" ? __workAreaSeconds(seq.getWorkAreaInPoint()) : __workAreaSeconds(seq.getWorkAreaOutPoint())));
+            if (pointSeconds === null) detail = "The sequence has no " + action.replace(/_/g, " ") + " set";
+            else target = __secondsToTicks(pointSeconds);
+          }
           else if (action === "next_edit") { target = nextAfter(collectEdits()); if (target === null) detail = "No edit point after the playhead"; }
           else if (action === "previous_edit") { target = previousBefore(collectEdits()); if (target === null) detail = "No edit point before the playhead"; }
           else if (action === "next_marker") { target = nextAfter(collectMarkers()); if (target === null) detail = "No marker after the playhead"; }
@@ -535,14 +588,13 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           if (Math.abs(observed - target) > frameTicks) {
             return __error("Premiere reports the playhead at " + __ticksToSeconds(observed) + "s instead of " + __ticksToSeconds(target) + "s after " + action + ".");
           }
-          var fps = TICKS_PER_SECOND / frameTicks;
           return __result({
             action: action,
             verified: true,
             fromSeconds: __ticksToSeconds(currentTicks),
             toSeconds: __ticksToSeconds(observed),
             deltaFrames: Math.round((observed - currentTicks) / frameTicks),
-            timecode: __ticksToTimecode(observed, Math.round(fps)),
+            timecode: __qeTimecodeForTicks(seq, observed).timecode,
             clamped: target === 0 || target === endTicks
           });
         `);
@@ -664,7 +716,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           }
           checkpoints.sort(function(left, right) {
             var l = left.createdUtc || ""; var r = right.createdUtc || "";
-            return l < r ? 1 : l > r ? -1 : 0;
+            return l < r ? 1 : (l > r ? -1 : 0);
           });
           return __result({ count: checkpoints.length, filteredTo: originalName, checkpoints: checkpoints });
         `);
@@ -674,7 +726,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
 
     export_sequence_edl: {
       description:
-        "Generate a CMX 3600 EDL for one video or audio track of a sequence from Premiere timeline readback (cuts, reels, source/record timecode, M2 lines for retimed clips), self-validate it, and return it inline or write it inside an approved workspace. Premiere is only read; this is not a Premiere-native export.",
+        "Generate a CMX 3600 EDL for one video or audio track of a sequence from Premiere timeline readback (cuts, reels, source/record timecode, M2 lines for retimed clips), self-validate it, and return it inline or write it inside an approved workspace. Premiere is only read; this is not a Premiere-native export. Long sequences can use a longer timeout (default 30 minutes).",
       parameters: {
         type: "object" as const,
         additionalProperties: false,
@@ -691,9 +743,12 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           include_clip_name_comments: { type: "boolean", description: "Emit '* FROM CLIP NAME:' comments (default true)." },
           output_path: { type: "string", maxLength: MAX_PATH_LENGTH, description: "Optional absolute .edl path to write. Requires approved_workspace_path; the file must not already exist. When omitted the EDL text is returned inline." },
           approved_workspace_path: { type: "string", maxLength: MAX_PATH_LENGTH, description: "Absolute existing directory that must contain output_path. Required with output_path." },
+          timeout_minutes: { type: "number", minimum: 1, maximum: 240, description: "Maximum wait for Premiere timeline readback (default: 30 minutes)." },
+          return_content: { type: "boolean", description: "Include the per-event list and reel list in the result (default true). With output_path, false returns only the path, event count, record duration, checksum and validation, which keeps long EDLs out of the conversation." },
         },
       },
       handler: async (args: {
+        return_content?: boolean;
         sequence_id?: string;
         track_type?: "video" | "audio";
         track_index?: number;
@@ -706,9 +761,12 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
         include_clip_name_comments?: boolean;
         output_path?: string;
         approved_workspace_path?: string;
+        timeout_minutes?: number;
       }): Promise<CommandResult> => {
         const trackType = args.track_type ?? "video";
         const trackIndex = args.track_index ?? 0;
+        const timeoutMinutes = args.timeout_minutes ?? 30;
+        if (!Number.isFinite(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 240) return { success: false, error: "timeout_minutes must be between 1 and 240" };
         if (!EDL_TRACK_TYPES.includes(trackType)) return { success: false, error: `track_type must be one of: ${EDL_TRACK_TYPES.join(", ")}` };
         if (!isInteger(trackIndex, 0, 255)) return { success: false, error: "track_index must be an integer from 0 through 255." };
         let target: string | null = null;
@@ -716,6 +774,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           const hasOutput = args.output_path !== undefined;
           if (hasOutput && args.approved_workspace_path === undefined) throw new Error("approved_workspace_path is required when output_path is provided");
           if (!hasOutput && args.approved_workspace_path !== undefined) throw new Error("approved_workspace_path is only accepted together with output_path");
+          if (!hasOutput && args.return_content === false) throw new Error("return_content: false needs output_path, because the EDL text is otherwise the result");
           target = hasOutput ? resolveContainedOutputPath(args.approved_workspace_path, args.output_path) : null;
           if (target && path.extname(target).toLowerCase() !== ".edl") throw new Error("output_path must use the .edl extension");
         } catch (error) {
@@ -750,7 +809,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
               enabled: true,
               speed: 100
             };
-            try { info.enabled = !clip.isDisabled(); } catch (disabledError) {}
+            try { info.enabled = !__isClipDisabled(clip); } catch (disabledError) {}
             try { info.speed = Number(clip.getSpeed()) * 100; } catch (speedError) {}
             try {
               var item = clip.projectItem;
@@ -775,7 +834,7 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
             tracks: [{ type: "${trackType}", index: trackIndex, name: track.name, clips: clips }]
           });
         `);
-        const readback = await sendCommand(script, bridgeOptions);
+        const readback = await sendCommand(script, { ...bridgeOptions, timeoutMs: timeoutMinutes * 60_000 });
         if (!readback.success) return readback;
         try {
           const exported = buildCmx3600Edl(readback.data, {
@@ -791,12 +850,16 @@ export function getEditorRequestTools(bridgeOptions: BridgeOptions) {
           });
           const bytes = Buffer.byteLength(exported.edl, "utf8");
           const { edl, ...summary } = exported;
+          const lastEvent = exported.events[exported.events.length - 1];
+          const recordDurationSeconds = lastEvent ? Number((lastEvent.record_out_seconds - exported.record_start_seconds).toFixed(6)) : 0;
           if (target) {
             writeFileSync(target, edl, { encoding: "utf8", flag: "wx" });
+            const { events, reels, ...compact } = summary;
             return {
               success: true,
               data: {
-                ...summary,
+                ...(args.return_content === false ? { ...compact, reel_count: reels.length, content_omitted: true } : summary),
+                record_duration_seconds: recordDurationSeconds,
                 written: true,
                 output_path: target,
                 bytes,

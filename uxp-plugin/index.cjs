@@ -17,8 +17,10 @@ const commandRegistry = Commands.createCommandRegistry({
   ppro,
   Protocol,
   workspace: workspaceBroker,
+  fileExists: (path) => workspaceBroker.fileExists(path),
   events: eventJournal,
   storage: typeof globalThis !== "undefined" ? globalThis.localStorage : null,
+  requireOperationDurability: true,
   xmp: uxp.xmp && typeof uxp.xmp.XMPMeta === "function"
     ? uxp.xmp
     : { XMPMeta: uxp.XMPMeta, XMPConst: uxp.XMPConst },
@@ -279,40 +281,12 @@ async function stateSnapshot() {
 async function exportFrame(args, operation) {
   assertNotCancelled(operation);
   publishOperation("progress", operation, { phase: "preflight", progress: 0.1 });
-  const project = await ppro.Project.getActiveProject();
-  if (!project) throw new Error("No active project");
-  const sequence = await project.getActiveSequence();
-  if (!sequence) throw new Error("No active sequence");
-  if (!args.outputDirectory) throw new Error("outputDirectory is required");
-  const outputDirectory = await workspaceBroker.assertPathAllowed(args.outputDirectory, { label: "outputDirectory", kind: "directory" });
-  const filename = Protocol.safeFilename(args.filename);
-  const exporterFilename = Protocol.exporterFrameName(filename);
-  const position = args.seconds == null ? await sequence.getPlayerPosition() : await tickTime(args.seconds);
-  const size = await sequence.getFrameSize();
-  const width = positiveInt(args.width, size.width), height = positiveInt(args.height, size.height);
   assertNotCancelled(operation);
   operation.phase = "host_call";
   publishOperation("progress", operation, { phase: "host_call", progress: 0.4, cancellable: false });
-  const returned = await ppro.Exporter.exportSequenceFrame(sequence, position, exporterFilename, outputDirectory, width, height);
-  if (returned !== true) throw new Error("Premiere did not confirm frame export; no output path is reported");
-  const path = Protocol.joinPath(outputDirectory, filename);
-  return {
-    path, width, height, seconds: position.seconds, exporterResult: returned,
-    operation: Protocol.operationSemantics({
-      mutatesProject: false,
-      verificationStatus: "not_verified",
-      verificationBoundary: "exporter_return_value",
-      verificationEvidence: [{ type: "host_return", value: returned }],
-      cancellationSupported: true
-    })
-  };
+  // The registry handler exports and then checks that the PNG exists on disk.
+  return commandRegistry.dispatch("frame.export", args);
 }
-
-async function tickTime(seconds) {
-  if (ppro.TickTime && typeof ppro.TickTime.createWithSeconds === "function") return ppro.TickTime.createWithSeconds(Number(seconds));
-  throw new Error("This Premiere build cannot create TickTime; omit seconds to capture the playhead");
-}
-function positiveInt(value, fallback) { const n = Number(value == null ? fallback : value); if (!Number.isFinite(n) || n <= 0) throw new Error("frame dimensions must be positive"); return Math.round(n); }
 
 async function dispatch(raw) {
   let cmd;
@@ -386,6 +360,7 @@ async function dispatch(raw) {
       error: {
         code: errorCode,
         message: error.message || String(error),
+        ...(error.noHostDispatch === true && error.dispatchEvidence === "panel_pre_dispatch" ? { noHostDispatch: true, dispatchEvidence: "panel_pre_dispatch" } : {}),
         operation: Protocol.operationSemantics({ cancellationSupported: true })
       }
     }, cmd && cmd.requestId));
@@ -398,7 +373,7 @@ function connect() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (socket) try { socket.onclose = null; socket.close(); } catch (_) {}
   const configuredUrl = document.getElementById("bridge-url").value;
-  const token = document.getElementById("bridge-token").value;
+  const token = document.getElementById("bridge-token").value.trim();
   let url;
   try {
     url = WorkspaceSupport.validateLoopbackBridgeUrl(configuredUrl);

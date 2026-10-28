@@ -1,4 +1,8 @@
 import type { UxpWebSocketBridge } from "../bridge/uxp-websocket-bridge.js";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import { inspectInterchangeArtifact } from "../interchange/evidence.js";
+import { withApplyGuards, withApplySnapshot } from "./uxp-apply-snapshot.js";
 import { planTranscriptRoughCut, previewTranscriptEdit, transcriptRevision } from "./transcript-edits.js";
 import { getUxpAdvancedWorkflowTools } from "./uxp-advanced-workflows.js";
 import { getUxpDialogueWorkflowTools } from "./uxp-dialogue-workflows.js";
@@ -35,6 +39,27 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
     type: "string" as const,
     description: "Optional idempotency key (1-128 letters, numbers, dot, underscore, colon, or dash).",
   };
+  const sequenceGuidGuardSchema = { type: "string", minLength: 1, maxLength: 512 };
+  const sequenceRangeSnapshotSchema = {
+    type: "object", additionalProperties: false,
+    properties: {
+      in_seconds: { type: ["number", "null"], minimum: 0, maximum: 86400 },
+      out_seconds: { type: ["number", "null"], minimum: 0, maximum: 86400 },
+      in_set: { type: "boolean" }, out_set: { type: "boolean" },
+      zero_point_seconds: { type: "number", minimum: 0, maximum: 86400 },
+      end_seconds: { type: "number", minimum: 0, maximum: 86400 },
+    },
+    required: ["in_seconds", "out_seconds", "in_set", "out_set", "zero_point_seconds", "end_seconds"],
+  };
+  const workAreaSnapshotSchema = {
+    type: "object", additionalProperties: false,
+    properties: {
+      in_seconds: { type: "number", minimum: 0, maximum: 86400 },
+      out_seconds: { type: "number", minimum: 0, maximum: 86400 },
+    }, required: ["in_seconds", "out_seconds"],
+  };
+  const playheadPositionGuardSchema = { type: "number", minimum: 0, maximum: 86400 };
+  const preferenceValueGuardSchema = { type: "string", maxLength: 1024 };
   const expectedTransitionTarget = {
     type: "object" as const,
     additionalProperties: false,
@@ -49,7 +74,7 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
       position: { type: "string", enum: ["start", "end"] },
       transition_present: { type: "boolean" },
     },
-    description: "Exact snapshot returned by inspect_video_transition_uxp. Mutations reject any changed sequence, clip identity, timing, edge, or transition presence.",
+    description: "The expected_target object returned by inspect, passed unchanged. Mutations reject any changed sequence, clip identity, timing, edge, or transition presence.",
   };
   return {
     ...getUxpDialogueWorkflowTools(bridge),
@@ -71,7 +96,18 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
     get_uxp_capabilities: {
       description: "Report the authenticated local UXP bridge connection and the capabilities advertised by the connected Premiere host.",
       parameters: {},
-      handler: async () => ({ success: true, data: bridge.getState() }),
+      handler: async () => {
+        // Report the panel's live capabilities, not the handshake taken when it connected.
+        let capabilitiesSource = "handshake";
+        if (bridge.getState().connected) {
+          try {
+            if (await bridge.refreshCapabilities()) capabilitiesSource = "live";
+          } catch {
+            // Fall back to the handshake report below.
+          }
+        }
+        return { success: true, data: { ...bridge.getState(), capabilitiesSource } };
+      },
     },
     get_uxp_state: {
       description: "Read the active project, sequence, and playhead state through the connected Premiere UXP bridge.",
@@ -81,7 +117,9 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
     inspect_project_uxp: {
       description: "Read a compact, revisioned project and sequence snapshot through documented Premiere UXP APIs.",
       parameters: {},
-      handler: async () => invoke(bridge, "project.snapshot"),
+      handler: async () => withApplyGuards(invoke(bridge, "project.snapshot"), {
+        expected_sequence_guid: { schema: sequenceGuidGuardSchema, sourceKey: "activeSequenceGuid" },
+      }),
     },
     inspect_project_insertion_bin_uxp: {
       description: "Read the current Project-panel insertion bin through documented Premiere UXP APIs. Returns only the active-project GUID and insertion-bin ID, name, and type; it does not traverse project folders, reveal media paths, or change Premiere. The panel target is read twice and the command rejects a project or target change while snapshotting.",
@@ -286,18 +324,10 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         additionalProperties: false,
         properties: {
           action: { type: "string", enum: ["inspect", "update"], description: "Read the active range or apply a guarded update." },
-          expected_sequence_guid: { type: "string", minLength: 1, maxLength: 512, description: "Required for update; copy the active sequence GUID returned by inspect." },
+          expected_sequence_guid: { ...sequenceGuidGuardSchema, description: "Required for update; the expected_sequence_guid returned by inspect, passed unchanged." },
           expected_range: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              in_seconds: { type: "number", minimum: 0, maximum: 86400 },
-              out_seconds: { type: "number", minimum: 0, maximum: 86400 },
-              zero_point_seconds: { type: "number", minimum: 0, maximum: 86400 },
-              end_seconds: { type: "number", minimum: 0, maximum: 86400 },
-            },
-            required: ["in_seconds", "out_seconds", "zero_point_seconds", "end_seconds"],
-            description: "Required for update; complete range returned by inspect. A changed value rejects the request before Premiere actions are created.",
+            ...sequenceRangeSnapshotSchema,
+            description: "Required for update; the expected_range object returned by inspect, passed unchanged. A changed value rejects the request before Premiere actions are created.",
           },
           updates: {
             type: "object",
@@ -324,16 +354,24 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
       handler: async (args: {
         action: "inspect" | "update";
         expected_sequence_guid?: string;
-        expected_range?: { in_seconds: number; out_seconds: number; zero_point_seconds: number; end_seconds: number };
+        expected_range?: {
+          in_seconds: number | null; out_seconds: number | null; in_set: boolean; out_set: boolean;
+          zero_point_seconds: number; end_seconds: number;
+        };
         updates?: { in_seconds?: number; out_seconds?: number; zero_point_seconds?: number };
         operation_id?: string;
       }) => {
-        if (args.action === "inspect") return invoke(bridge, "sequence.range.inspect");
+        if (args.action === "inspect") return withApplyGuards(invoke(bridge, "sequence.range.inspect"), {
+          expected_sequence_guid: { schema: sequenceGuidGuardSchema, sourceKey: "sequenceGuid" },
+          expected_range: { schema: sequenceRangeSnapshotSchema, sourceKey: "range" },
+        });
         return invoke(bridge, "sequence.range.update", {
           ...(args.expected_sequence_guid === undefined ? {} : { expectedSequenceGuid: args.expected_sequence_guid }),
           ...(args.expected_range === undefined ? {} : { expectedRange: {
             inSeconds: args.expected_range.in_seconds,
             outSeconds: args.expected_range.out_seconds,
+            inSet: args.expected_range.in_set,
+            outSet: args.expected_range.out_set,
             zeroPointSeconds: args.expected_range.zero_point_seconds,
             endSeconds: args.expected_range.end_seconds,
           } }),
@@ -346,6 +384,56 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         });
       },
     },
+    manage_work_area_uxp: {
+      description: "Inspect or set the active sequence work area through Premiere 26.5+ documented UXP WorkAreaUtils. Setting requires the sequence GUID and complete work area returned by inspect, keeps out within the sequence end, serializes competing requests, and verifies native in/out readback. WorkAreaUtils is a direct call, not an undoable transaction; a runtime capability probe remains authoritative and live-host behavior is not yet verified.",
+      parameters: {
+        type: "object" as const,
+        additionalProperties: false,
+        properties: {
+          action: { type: "string", enum: ["inspect", "set"], description: "Read the active work area or apply a guarded update." },
+          expected_sequence_guid: { ...sequenceGuidGuardSchema, description: "Required for set; the expected_sequence_guid returned by inspect, passed unchanged." },
+          expected_work_area: {
+            ...workAreaSnapshotSchema,
+            description: "Required for set; the expected_work_area object returned by inspect, passed unchanged. A changed value rejects the request before Premiere is called.",
+          },
+          in_seconds: { type: "number", minimum: 0, maximum: 86400, description: "Required for set; new work-area in point in seconds." },
+          out_seconds: { type: "number", minimum: 0, maximum: 86400, description: "Required for set; new work-area out point in seconds. Must exceed in_seconds and stay within the sequence end." },
+          operation_id: operationId,
+        },
+        required: ["action"],
+      },
+      operationalCapability: {
+        backend: "UXP" as const,
+        backends: ["uxp" as const],
+        minimumPremiereVersion: "26.5",
+        verificationBoundary: "structured_uxp_readback" as const,
+        hostVerificationRequired: true,
+        notes: ["Available only through an authenticated UXP bridge whose runtime capability handshake advertises the requested workArea command (Premiere 26.5+ WorkAreaUtils)."],
+      },
+      handler: async (args: {
+        action: "inspect" | "set";
+        expected_sequence_guid?: string;
+        expected_work_area?: { in_seconds: number; out_seconds: number };
+        in_seconds?: number;
+        out_seconds?: number;
+        operation_id?: string;
+      }) => {
+        if (args.action === "inspect") return withApplyGuards(invoke(bridge, "workArea.inspect"), {
+          expected_sequence_guid: { schema: sequenceGuidGuardSchema, sourceKey: "sequenceGuid" },
+          expected_work_area: { schema: workAreaSnapshotSchema, sourceKey: "workArea" },
+        });
+        return invoke(bridge, "workArea.set", {
+          ...(args.expected_sequence_guid === undefined ? {} : { expectedSequenceGuid: args.expected_sequence_guid }),
+          ...(args.expected_work_area === undefined ? {} : { expectedWorkArea: {
+            inSeconds: args.expected_work_area.in_seconds,
+            outSeconds: args.expected_work_area.out_seconds,
+          } }),
+          ...(args.in_seconds === undefined ? {} : { inSeconds: args.in_seconds }),
+          ...(args.out_seconds === undefined ? {} : { outSeconds: args.out_seconds }),
+          ...(args.operation_id ? { operationId: args.operation_id } : {}),
+        });
+      },
+    },
     manage_sequence_playhead_uxp: {
       description: "Inspect or set the active sequence player position through documented Premiere UXP APIs. Setting requires the sequence GUID and current position returned by inspect, serializes competing requests for that sequence, and verifies native readback; it changes player state only and makes no project-save or Undo claim.",
       parameters: {
@@ -353,8 +441,8 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         additionalProperties: false,
         properties: {
           action: { type: "string", enum: ["inspect", "set"], description: "Read the active player position or set it with a guarded request." },
-          expected_sequence_guid: { type: "string", minLength: 1, maxLength: 512, description: "Required for set; copy the active sequence GUID returned by inspect." },
-          expected_position_seconds: { type: "number", minimum: 0, maximum: 86400, description: "Required for set; current player position returned by inspect. A changed value rejects the request before Premiere is called." },
+          expected_sequence_guid: { ...sequenceGuidGuardSchema, description: "Required for set; the expected_sequence_guid returned by inspect, passed unchanged." },
+          expected_position_seconds: { ...playheadPositionGuardSchema, description: "Required for set; the expected_position_seconds returned by inspect, passed unchanged. A changed value rejects the request before Premiere is called." },
           position_seconds: { type: "number", minimum: 0, maximum: 86400, description: "Required for set; requested player position in seconds." },
           operation_id: operationId,
         },
@@ -375,7 +463,12 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         position_seconds?: number;
         operation_id?: string;
       }) => {
-        if (args.action === "inspect") return invoke(bridge, "sequence.playhead.inspect");
+        if (args.action === "inspect") return withApplyGuards(invoke(bridge, "sequence.playhead.inspect"), {
+          expected_sequence_guid: { schema: sequenceGuidGuardSchema, sourceKey: "sequenceGuid" },
+          expected_position_seconds: {
+            schema: playheadPositionGuardSchema, sourceKey: "positionSeconds",
+          },
+        });
         return invoke(bridge, "sequence.playhead.set", {
           ...(args.expected_sequence_guid === undefined ? {} : { expectedSequenceGuid: args.expected_sequence_guid }),
           ...(args.expected_position_seconds === undefined ? {} : { expectedPositionSeconds: args.expected_position_seconds }),
@@ -392,7 +485,7 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         properties: {
           action: { type: "string", enum: ["inspect", "set"], description: "Read all bounded preference values or guardedly set one." },
           preference: { type: "string", enum: ["auto_peak_generation", "import_workspace", "show_quickstart_dialog"], description: "Required for set; one documented Premiere application preference." },
-          expected_value: { type: "string", maxLength: 1024, description: "Required for set; exact native string returned for preference by inspect. A changed value rejects the write." },
+          expected_value: { ...preferenceValueGuardSchema, description: "Required for set; the expected_value returned by inspect with preference, passed unchanged. A changed value rejects the write." },
           value: { type: "string", maxLength: 1024, description: "Required for set. String-only by design so native string readback can be compared exactly." },
           persistence: { type: "string", enum: ["persistent", "non_persistent"], description: "Required for set; maps explicitly to Adobe's persistent or non-persistent property flag." },
           confirm_preference_change: { type: "boolean", description: "Required true for set because AppPreference writes directly to application state and are not undoable." },
@@ -417,7 +510,14 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         confirm_preference_change?: boolean;
         operation_id?: string;
       }) => {
-        if (args.action === "inspect") return invoke(bridge, "preferences.inspect");
+        if (args.action === "inspect") return withApplyGuards(invoke(bridge, "preferences.inspect"), args.preference ? {
+          expected_value: {
+            schema: preferenceValueGuardSchema,
+            sourceValue: (record) => Array.isArray(record.preferences)
+              ? (record.preferences.find((preference) => preference && typeof preference === "object" && (preference as Record<string, unknown>).preference === args.preference) as Record<string, unknown> | undefined)?.value
+              : undefined,
+          },
+        } : {});
         if (args.action !== "set") return { success: false, error: `Unsupported app preference action: ${String(args.action)}` };
         if (!args.preference || args.expected_value === undefined || args.value === undefined || !args.persistence || !args.operation_id) {
           return { success: false, error: "set requires preference, expected_value, value, persistence, and operation_id from a recent inspect" };
@@ -436,23 +536,43 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
       },
     },
     export_interchange_uxp: {
-      description: "Export the active sequence as OpenTimelineIO or Final Cut Pro XML with explicit verification.",
+      description: "Export the active sequence through its documented format-specific OpenTimelineIO or Final Cut Pro XML UXP method. Host acceptance is committed_unverified. Opt-in local artifact inspection requires filesystem authority and distinguishes fresh parsed bytes from host/destination/round-trip proof.",
       parameters: {
         type: "object" as const,
         properties: {
           format: { type: "string", enum: ["otio", "fcpxml"], description: "Interchange format." },
           output_file_path: { type: "string", description: "Absolute output file path." },
           suppress_ui: { type: "boolean", description: "Suppress Premiere export UI; defaults to true." },
+          verify_artifact: { type: "boolean", description: "Opt in to bounded Node-side file and structure inspection after export; requires filesystem authority. Only a newly created output can establish freshness. Defaults to false." },
           operation_id: operationId,
         },
         required: ["format", "output_file_path"],
       },
-      handler: async (args: { format: "otio" | "fcpxml"; output_file_path: string; suppress_ui?: boolean; operation_id?: string }) =>
-        invoke(bridge, "interchange.export", {
+      handler: async (args: { format: "otio" | "fcpxml"; output_file_path: string; suppress_ui?: boolean; verify_artifact?: boolean; operation_id?: string }) => {
+        if (!["otio", "fcpxml"].includes(args.format) || typeof args.output_file_path !== "string" || args.output_file_path.length > 4096 || !isAbsolute(args.output_file_path) || /\0/.test(args.output_file_path)) return { success: false, error: "format must be otio/fcpxml and output_file_path must be a bounded absolute path without NUL" };
+        if (args.verify_artifact !== undefined && typeof args.verify_artifact !== "boolean") return { success: false, error: "verify_artifact must be boolean" };
+        const existedBefore = args.verify_artifact === true && existsSync(args.output_file_path);
+        const response = await invoke(bridge, "interchange.export", {
           format: args.format, outputFilePath: args.output_file_path,
           ...(args.suppress_ui === undefined ? {} : { suppressUI: args.suppress_ui }),
           ...(args.operation_id ? { operationId: args.operation_id } : {}),
-        }),
+        });
+        if (!response.success || !("data" in response)) return response;
+        const hostResult = response.data.result && typeof response.data.result === "object" ? response.data.result as Record<string, unknown> : {};
+        const result: Record<string, unknown> = { ...hostResult, outcome: "committed_unverified", outputVerified: false, verificationBoundary: "projectConverter_host_return_only", destinationAcceptance: "not_run", roundTripValidated: false };
+        if (args.verify_artifact === true) {
+          try {
+            const artifact = inspectInterchangeArtifact(args.output_file_path, args.format);
+            result.artifact = { ...artifact, freshOutput: !existedBefore };
+            if (artifact.parsed && !existedBefore) {
+              result.outcome = "verified";
+              result.outputVerified = true;
+              result.verificationBoundary = "fresh_local_artifact_bounded_structure_only";
+            } else result.verificationWarning = "Output existed before dispatch; parsed bytes do not establish export freshness";
+          } catch (error) { result.artifact = { exists: false, parsed: false, error: (error as Error).message }; }
+        }
+        return { success: true, data: { backend: "uxp", result } };
+      },
     },
     get_transcript_languages_uxp: {
       description: "List transcription languages supported by the connected Premiere 26.3+ host.",
@@ -551,7 +671,7 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
       },
     },
     import_transcript_uxp: {
-      description: "Replace one source media clip's native transcript JSON through documented Premiere 26.3+ UXP APIs. Use project_guid and transcript_revision returned by get_clip_transcript_uxp, or omit expected_transcript_revision (or pass null) from has_transcript_uxp for an untranscribed clip. This destructive import requires explicit confirmation and an operation_id, serializes competing imports for the same project item, runs one undoable transaction, and reports exact bounded export SHA-256 readback rather than claiming a licensed-host result.",
+      description: "Import native transcript JSON onto one untranscribed source media clip through documented Premiere 26.3+ UXP APIs. Check has_transcript_uxp first and omit expected_transcript_revision (or pass null). Importing over an existing transcript is refused (UXP_TRANSCRIPT_OVERWRITE_REFUSED): on Premiere 26.5.1 a failed import cleared an existing transcript that could not be restored. This destructive import requires explicit confirmation and an operation_id, serializes competing imports for the same project item, runs one undoable transaction, and reports bounded exact or canonical full-content export readback; JSON key order and numeric spelling may change while timings, speakers and text must match. Host-attached empty transcripts permit import, but nonempty transcripts still refuse overwrite.",
       parameters: {
         type: "object" as const,
         additionalProperties: false,
@@ -936,7 +1056,7 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
       }),
     },
     export_frame_uxp: {
-      description: "Export a sequence frame through Premiere's supported UXP Exporter and verify the output file in the host panel.",
+      description: "Export a sequence frame through Premiere's supported UXP Exporter, then check in the host panel that the PNG exists. Returns outcome verified when a new file is found, committed_unverified when UXP storage cannot check or the file already existed, and fails when no file was written.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -979,7 +1099,7 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
           expected_sequence_guid: {
             type: "string",
             maxLength: 512,
-            description: "Optional active-sequence GUID from inspect_project_uxp; rejects a stale target before mutation.",
+            description: "Optional expected_sequence_guid returned by inspect_project_uxp, passed unchanged; rejects a stale target before mutation.",
           },
           operation_id: operationId,
         },
@@ -1008,10 +1128,10 @@ export function getUxpTools(bridge: UxpWebSocketBridge) {
         required: ["video_track_index", "clip_index"],
       },
       handler: async (args: { video_track_index: number; clip_index: number; position?: "start" | "end" }) =>
-        invoke(bridge, "transition.video.inspect", {
+        withApplySnapshot(invoke(bridge, "transition.video.inspect", {
           videoTrackIndex: args.video_track_index, clipIndex: args.clip_index,
           ...(args.position === undefined ? {} : { position: args.position }),
-        }),
+        }), { properties: expectedTransitionTarget.properties }, "expected_target"),
     },
     add_video_transition_uxp: {
       description: "Add an installed native video transition to one unchanged video-clip edge through one undoable UXP transaction. Requires an exact inspect snapshot, serializes transition updates per sequence, and reads edge presence back; it does not prove handles, rendered appearance, or playback.",

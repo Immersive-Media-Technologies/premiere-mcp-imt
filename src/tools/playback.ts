@@ -21,9 +21,28 @@ export function getPlaybackTools(bridgeOptions: BridgeOptions) {
     },
 
     stop_playback: {
-      description: "Request that active-sequence timeline playback stop through QE. The legacy API does not provide a same-call playhead readback, so stopped state is not reported as verified.",
-      parameters: {},
-      handler: async () => {
+      description: "Request that active-sequence timeline playback stop through QE. The legacy API does not provide a same-call playhead readback, so stopped state is not reported as verified. Only the timeline can be stopped: Premiere's scripting APIs have no documented call that stops the Source Monitor alone, so target \"source\" returns an error instead of stopping the timeline.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          target: {
+            type: "string",
+            enum: ["timeline", "source"],
+            description: "What to stop. Default \"timeline\". \"source\" is refused because no documented API stops only the Source Monitor.",
+          },
+        },
+      },
+      handler: async (args: { target?: string } = {}) => {
+        const target = args?.target ?? "timeline";
+        if (target === "source") {
+          return {
+            success: false,
+            error: "Premiere's ExtendScript and UXP APIs have no documented call that stops only the Source Monitor, so nothing was stopped. Pause it in Premiere, or close the clip with close_source_monitor.",
+          };
+        }
+        if (target !== "timeline") {
+          return { success: false, error: "target must be \"timeline\" or \"source\"." };
+        }
         const script = buildToolScript(`
           app.enableQE();
           qe.stopPlayback();
@@ -38,7 +57,7 @@ export function getPlaybackTools(bridgeOptions: BridgeOptions) {
     },
 
     play_source_monitor: {
-      description: "Request playback of the clip in the Source Monitor. The legacy API does not provide a same-call position readback, so movement is not reported as verified.",
+      description: "Request playback of the clip in the Source Monitor. Fails when no clip is loaded. The legacy API does not provide a same-call position readback, so movement is not reported as verified.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -50,12 +69,22 @@ export function getPlaybackTools(bridgeOptions: BridgeOptions) {
       },
       handler: async (args: { speed?: number }) => {
         const speed = args.speed ?? 1.0;
+        if (typeof speed !== "number" || !Number.isFinite(speed) || speed === 0 || Math.abs(speed) > 64) {
+          return { success: false, error: "speed must be a non-zero number from -64 to 64." };
+        }
         const script = buildToolScript(`
+          // Premiere accepts play() with nothing loaded and does nothing (#642).
+          if (typeof app.sourceMonitor.getProjectItem !== "function") return __error("Cannot confirm Source Monitor state; nothing was played.");
+          var loaded;
+          try { loaded = app.sourceMonitor.getProjectItem(); }
+          catch (eLoaded) { return __error("Cannot read Source Monitor state; nothing was played."); }
+          if (loaded === null || loaded === undefined) return __error("No clip is loaded in the Source Monitor. Open one with open_in_source first.");
           app.sourceMonitor.play(${speed});
           return __result({
             playbackRequested: true,
             playbackVerified: false,
             speed: ${speed},
+            clip: loaded ? loaded.name : null,
             verificationScope: "Premiere accepted the source-monitor playback request only; poll get_source_monitor_position before treating movement as confirmed."
           });
         `);

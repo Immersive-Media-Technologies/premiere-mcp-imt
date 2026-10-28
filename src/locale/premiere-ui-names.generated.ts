@@ -762,6 +762,265 @@ export const PREMIERE_UI_NAMES_FALLBACK: Record<string, Record<string, string[]>
       "速度"
     ]
   },
+  "Vector Motion": {
+    "de_DE": [
+      "Vektorbewegung"
+    ],
+    "es_ES": [
+      "Movimiento del vector"
+    ],
+    "fr_FR": [
+      "Mouvement vectoriel"
+    ],
+    "it_IT": [
+      "Movimento vettoriale"
+    ],
+    "ja_JP": [
+      "ベクトルモーション"
+    ],
+    "ko_KR": [
+      "벡터 모션"
+    ],
+    "pt_BR": [
+      "Movimento do vetor"
+    ],
+    "ru_RU": [
+      "Векторное движение"
+    ],
+    "zh_CN": [
+      "矢量运动"
+    ]
+  },
+  "Text": {
+    "es_ES": [
+      "Texto"
+    ],
+    "fr_FR": [
+      "Texte"
+    ],
+    "it_IT": [
+      "Testo"
+    ],
+    "ja_JP": [
+      "テキスト",
+      "横書きテキスト"
+    ],
+    "ko_KR": [
+      "텍스트"
+    ],
+    "pt_BR": [
+      "Texto"
+    ],
+    "ru_RU": [
+      "Текст"
+    ],
+    "zh_CN": [
+      "文本"
+    ]
+  },
+  "Shape": {
+    "de_DE": [
+      "Form"
+    ],
+    "es_ES": [
+      "Forma"
+    ],
+    "fr_FR": [
+      "Forme"
+    ],
+    "it_IT": [
+      "Forma"
+    ],
+    "ja_JP": [
+      "シェイプ"
+    ],
+    "ko_KR": [
+      "모양"
+    ],
+    "pt_BR": [
+      "Forma"
+    ],
+    "ru_RU": [
+      "Фигура",
+      "Форма"
+    ],
+    "zh_CN": [
+      "形状"
+    ]
+  },
+  "Basic Correction": {
+    "de_DE": [
+      "Einfache Korrektur"
+    ],
+    "es_ES": [
+      "Corrección básica"
+    ],
+    "fr_FR": [
+      "Correction de base"
+    ],
+    "it_IT": [
+      "Correzione di base"
+    ],
+    "ja_JP": [
+      "基本補正"
+    ],
+    "ko_KR": [
+      "기본 교정"
+    ],
+    "pt_BR": [
+      "Correção básica"
+    ],
+    "ru_RU": [
+      "Баз. коррекция",
+      "Базовая коррекция"
+    ],
+    "zh_CN": [
+      "基本校正"
+    ]
+  },
+  "Creative": {
+    "de_DE": [
+      "Kreativ"
+    ],
+    "es_ES": [
+      "Creativo"
+    ],
+    "fr_FR": [
+      "Créatif"
+    ],
+    "it_IT": [
+      "Creativo"
+    ],
+    "ja_JP": [
+      "クリエイティブ"
+    ],
+    "ko_KR": [
+      "크리에이티브"
+    ],
+    "pt_BR": [
+      "Criação"
+    ],
+    "ru_RU": [
+      "Креативный"
+    ],
+    "zh_CN": [
+      "创意"
+    ]
+  },
+  "Curves": {
+    "de_DE": [
+      "Kurven"
+    ],
+    "es_ES": [
+      "Curvas"
+    ],
+    "fr_FR": [
+      "Courbes"
+    ],
+    "it_IT": [
+      "Curve"
+    ],
+    "ja_JP": [
+      "トーンカーブ",
+      "カーブ"
+    ],
+    "ko_KR": [
+      "곡선"
+    ],
+    "pt_BR": [
+      "Curvas"
+    ],
+    "ru_RU": [
+      "Кривые"
+    ],
+    "zh_CN": [
+      "曲线"
+    ]
+  },
+  "Color Wheels & Match": {
+    "de_DE": [
+      "Farbräder und Farbabgleich"
+    ],
+    "es_ES": [
+      "Coincidencia y ruedas de color"
+    ],
+    "fr_FR": [
+      "Roues chromatiques et correspondance des couleurs",
+      "Roues chromatiques et corresp. couleurs"
+    ],
+    "it_IT": [
+      "Corrispondenza e ruote colori"
+    ],
+    "ja_JP": [
+      "カラーホイールとカラーマッチ"
+    ],
+    "ko_KR": [
+      "색상 휠 및 일치"
+    ],
+    "pt_BR": [
+      "Discos e correspondência de cores"
+    ],
+    "ru_RU": [
+      "Цветовые круги и сопоставление"
+    ],
+    "zh_CN": [
+      "色轮和匹配"
+    ]
+  },
+  "HSL Secondary": {
+    "de_DE": [
+      "HSL Sekundär"
+    ],
+    "es_ES": [
+      "HSL secundario"
+    ],
+    "fr_FR": [
+      "TSL secondaire"
+    ],
+    "it_IT": [
+      "HSL secondario"
+    ],
+    "ja_JP": [
+      "HSL セカンダリ"
+    ],
+    "ko_KR": [
+      "HSL 보조"
+    ],
+    "pt_BR": [
+      "Matiz, saturação, bril. sec.",
+      "HSL secundário"
+    ],
+    "ru_RU": [
+      "HSL дополнительно"
+    ],
+    "zh_CN": [
+      "HSL 次要",
+      "HSL 辅助"
+    ]
+  },
+  "Vignette": {
+    "es_ES": [
+      "Viñeta"
+    ],
+    "it_IT": [
+      "Vignettatura"
+    ],
+    "ja_JP": [
+      "ビネット"
+    ],
+    "ko_KR": [
+      "비네팅"
+    ],
+    "pt_BR": [
+      "Vinheta"
+    ],
+    "ru_RU": [
+      "Виньетка"
+    ],
+    "zh_CN": [
+      "晕影"
+    ]
+  },
   "Lumetri Color": {
     "de_DE": [
       "Lumetri-Farbe"
@@ -2590,6 +2849,37 @@ export const PREMIERE_UI_NAMES_FALLBACK: Record<string, Record<string, string[]>
     ],
     "zh_CN": [
       "数量"
+    ]
+  },
+  "Fill Color": {
+    "de_DE": [
+      "Flächenfarbe",
+      "Farbe"
+    ],
+    "es_ES": [
+      "Color de relleno"
+    ],
+    "fr_FR": [
+      "Couleur du fond",
+      "Fond"
+    ],
+    "it_IT": [
+      "Colore di riempimento"
+    ],
+    "ja_JP": [
+      "塗りのカラー"
+    ],
+    "ko_KR": [
+      "칠 색상"
+    ],
+    "pt_BR": [
+      "Cor de preenchimento"
+    ],
+    "ru_RU": [
+      "Цвет заливки"
+    ],
+    "zh_CN": [
+      "填充颜色"
     ]
   },
   "Cross Dissolve": {

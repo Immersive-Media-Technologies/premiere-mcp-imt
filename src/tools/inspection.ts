@@ -1,3 +1,4 @@
+import { sequenceReadProperties, sequenceReadScript, type SequenceReadArgs } from "./sequence-read.js";
 import { buildToolScript, escapeForExtendScript } from "../bridge/script-builder.js";
 import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
 
@@ -34,7 +35,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                 nodeId: item.nodeId,
                 name: item.name,
                 treePath: item.treePath,
-                type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 3 ? "root" : item.type === 4 ? "file" : "unknown"
+                type: __projectItemTypeName(item)
               };
               try { entry.mediaPath = item.getMediaPath(); } catch(e) {}
               try { entry.offline = item.isOffline(); } catch(e) {}
@@ -129,7 +130,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
         properties: {
           bin_id: {
             type: "string",
-            description: "Bin name, node ID, or path (e.g., 'Footage', 'Footage/Raw')",
+            description: "Bin name, node ID, or path (e.g., 'Footage', 'Footage/Raw'); '/' or 'root' for the project root",
           },
           recursive: {
             type: "boolean",
@@ -161,67 +162,29 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
         const limit = Number.isInteger(args.limit) && (args.limit as number) > 0 ? Math.min(args.limit as number, 500) : -1;
         const maxDepth = Number.isInteger(args.max_depth) ? Math.min(Math.max(args.max_depth as number, 0), 10) : -1;
         const script = buildToolScript(`
-          var root = app.project.rootItem;
+          if (!app.project || !app.project.rootItem) return __error("No project is open");
+          var requestedBin = "${escapeForExtendScript(args.bin_id)}";
+          // The project root is a bin too, but list_project_items never lists it:
+          // accept "/", "root", or its node ID. Otherwise node ID, then bin
+          // path, then bin name.
+          var rootBin = app.project.rootItem;
           var target = null;
-
-          // Try by node ID first
-          function findById(parent, id) {
-            for (var i = 0; i < parent.children.numItems; i++) {
-              var item = parent.children[i];
-              if (item.nodeId === id) return item;
-              if (item.type === 2) {
-                var found = findById(item, id);
-                if (found) return found;
-              }
-            }
-            return null;
-          }
-
-          target = findById(root, "${escapeForExtendScript(args.bin_id)}");
-
-          // Try by path
+          if (requestedBin === "/" || requestedBin.toLowerCase() === "root" || __nodeIdOf(rootBin) === requestedBin) target = rootBin;
+          else target = __findBin(requestedBin);
           if (!target) {
-            var parts = "${escapeForExtendScript(args.bin_id)}".split("/");
-            var current = root;
-            for (var p = 0; p < parts.length; p++) {
-              var found = false;
-              for (var i = 0; i < current.children.numItems; i++) {
-                if (current.children[i].name === parts[p] && current.children[i].type === 2) {
-                  current = current.children[i];
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) { current = null; break; }
-            }
-            if (current && current !== root) target = current;
+            var nonBin = __findProjectItemByNodeId(requestedBin);
+            if (nonBin) return __error("Project item " + requestedBin + " is not a bin. Pass a bin node ID, bin path, or bin name; use get_project_item_info for other item types.");
+            return __error("Bin not found: " + requestedBin + ". Pass a bin node ID from list_project_items, a slash-separated bin path, or an exact bin name.");
           }
-
-          // Try by name
-          if (!target) {
-            function findByName(parent, name) {
-              for (var i = 0; i < parent.children.numItems; i++) {
-                var item = parent.children[i];
-                if (item.name === name && item.type === 2) return item;
-                if (item.type === 2) {
-                  var found = findByName(item, name);
-                  if (found) return found;
-                }
-              }
-              return null;
-            }
-            target = findByName(root, "${escapeForExtendScript(args.bin_id)}");
-          }
-
-          if (!target) return __error("Bin not found: ${escapeForExtendScript(args.bin_id)}");
 
           function getItemDetails(item) {
             var info = {
-              nodeId: item.nodeId,
-              name: item.name,
-              type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 4 ? "file" : "unknown",
-              treePath: item.treePath
+              nodeId: __nodeIdOf(item),
+              name: "",
+              type: __projectItemTypeName(item)
             };
+            try { info.name = item.name; } catch(e) {}
+            try { info.treePath = item.treePath; } catch(e) {}
             try { info.mediaPath = item.getMediaPath(); } catch(e) {}
             try { info.offline = item.isOffline(); } catch(e) {}
             try { info.colorLabel = item.getColorLabel(); } catch(e) {}
@@ -241,10 +204,12 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
 
           function walkItems(bin, recurse, depth) {
             var items = [];
-            for (var i = 0; i < bin.children.numItems; i++) {
-              var item = bin.children[i];
+            var count = __childCount(bin);
+            for (var i = 0; i < count; i++) {
+              var item = __childAt(bin, i);
+              if (!item) continue;
               var info = getItemDetails(item);
-              if (item.type === 2 && recurse && (${maxDepth} < 0 || depth < ${maxDepth})) {
+              if (__isBinItem(item) && recurse && (${maxDepth} < 0 || depth < ${maxDepth})) {
                 info.children = walkItems(item, true, depth + 1);
                 info.childCount = info.children.length;
               }
@@ -259,8 +224,8 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
           var contents = limit < 0 ? allContents.slice(offset) : allContents.slice(offset, offset + limit);
           return __result({
             binName: target.name,
-            binNodeId: target.nodeId,
-            binPath: target.treePath,
+            binNodeId: __nodeIdOf(target),
+            binPath: (function () { try { return target.treePath; } catch (e) { return null; } })(),
             itemCount: contents.length,
             totalDirectItems: allContents.length,
             items: contents,
@@ -279,22 +244,25 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
     },
 
     get_full_sequence_info: {
-      description: "Get exhaustive information about a sequence: settings, all tracks with lock/mute/target state, all clips with positions/effects/speed/enabled state, all markers, transitions, in/out points, and work area.",
+      description: "Get bounded information about a sequence (50 clips by default; follow pagination.nextOffset; markers and transitions capped at 50 per collection): settings, all tracks with lock/mute/target state, paged clips with positions/effects/speed/enabled state, bounded markers, transitions, in/out points, and work area.",
       parameters: {
         type: "object" as const,
         properties: {
+          ...sequenceReadProperties,
           sequence_id: {
             type: "string",
             description: "Sequence name or ID. Uses active sequence if omitted.",
           },
         },
       },
-      handler: async (args: { sequence_id?: string }) => {
+      handler: async (args: SequenceReadArgs & { sequence_id?: string }) => {
         const seqLookup = args.sequence_id
           ? `var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}"); if (!seq) return __error("Sequence not found");`
           : `var seq = app.project.activeSequence; if (!seq) return __error("No active sequence");`;
 
+        const bounds = sequenceReadScript(args);
         const script = buildToolScript(`
+          ${bounds}
           ${seqLookup}
 
           // Settings
@@ -311,6 +279,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
             if (s) {
               info.frameRate = s.videoFrameRate;
               info.audioSampleRate = s.audioSampleRate;
+              info.audioSampleRateHz = __sampleRateHz(s.audioSampleRate);
               info.audioChannelType = s.audioChannelType;
               info.audioChannelCount = s.audioChannelCount;
               info.videoFieldType = s.videoFieldType;
@@ -323,12 +292,12 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
           try { info.playheadSeconds = __ticksToSeconds(seq.getPlayerPosition().ticks); } catch(e) {}
 
           // In/Out points
-          try { info.inPointSeconds = __ticksToSeconds(seq.getInPoint()); } catch(e) {}
-          try { info.outPointSeconds = __ticksToSeconds(seq.getOutPoint()); } catch(e) {}
+          try { info.inPointSeconds = __sequencePointSeconds(seq.getInPoint()); } catch(e) {}
+          try { info.outPointSeconds = __sequencePointSeconds(seq.getOutPoint()); } catch(e) {}
 
           // Work area
-          try { info.workAreaIn = __ticksToSeconds(seq.getWorkAreaInPoint()); } catch(e) {}
-          try { info.workAreaOut = __ticksToSeconds(seq.getWorkAreaOutPoint()); } catch(e) {}
+          try { info.workAreaIn = __workAreaSeconds(seq.getWorkAreaInPoint()); } catch(e) {}
+          try { info.workAreaOut = __workAreaSeconds(seq.getWorkAreaOutPoint()); } catch(e) {}
 
           // Zero point
           try { info.zeroPoint = __ticksToSeconds(seq.zeroPoint); } catch(e) {}
@@ -337,10 +306,10 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
           var markers = [];
           try {
             var m = seq.markers.getFirstMarker();
-            while (m) {
+            while (m && markers.length < 50) {
               var mInfo = {
                 name: m.name,
-                comments: m.comments,
+                comments: String(m.comments || "").substr(0, 2048),
                 startSeconds: __ticksToSeconds(m.start.ticks),
                 endSeconds: __ticksToSeconds(m.end.ticks),
                 type: m.type
@@ -351,7 +320,8 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
             }
           } catch(e) {}
           info.markers = markers;
-          info.markerCount = markers.length;
+          try { info.markerCount = seq.markers.numMarkers; } catch (markerCountError) { info.markerCount = null; }
+          info.markersTruncated = !!m;
 
           // Video tracks
           info.videoTracks = [];
@@ -369,6 +339,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
             trackInfo.clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
+              if (!__readInclude(clip, "video", t)) continue;
               var ci = {
                 index: c,
                 nodeId: clip.nodeId,
@@ -380,7 +351,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                 outPointSeconds: __ticksToSeconds(clip.outPoint.ticks),
                 mediaType: clip.mediaType
               };
-              try { ci.enabled = !clip.isDisabled(); } catch(e) { ci.enabled = true; }
+              try { ci.enabled = !__isClipDisabled(clip); } catch(e) { ci.enabled = true; }
               try { ci.speed = clip.getSpeed(); } catch(e) {}
               try { ci.reversed = clip.isSpeedReversed(); } catch(e) {}
               try { ci.isAdjustmentLayer = clip.isAdjustmentLayer(); } catch(e) {}
@@ -400,18 +371,19 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               try {
                 ci.effectCount = clip.components.numItems;
                 ci.effects = [];
-                for (var e = 0; e < clip.components.numItems; e++) {
+                for (var e = 0; e < clip.components.numItems && e < 64; e++) {
                   ci.effects.push(clip.components[e].displayName);
                 }
+                ci.effectsTruncated = ci.effectCount > ci.effects.length;
               } catch(e) {}
 
-              trackInfo.clips.push(ci);
+              __readPush(trackInfo.clips, ci);
             }
 
             // Transitions
             trackInfo.transitions = [];
             try {
-              for (var tr = 0; tr < track.transitions.numItems; tr++) {
+              for (var tr = 0; tr < track.transitions.numItems && tr < 50; tr++) {
                 var trans = track.transitions[tr];
                 trackInfo.transitions.push({
                   index: tr,
@@ -422,8 +394,9 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               }
             } catch(e) {}
 
-            trackInfo.clipCount = trackInfo.clips.length;
-            trackInfo.transitionCount = trackInfo.transitions.length;
+            trackInfo.clipCount = track.clips.numItems;
+            trackInfo.transitionCount = track.transitions ? track.transitions.numItems : 0;
+            trackInfo.transitionsTruncated = trackInfo.transitionCount > trackInfo.transitions.length;
             info.videoTracks.push(trackInfo);
           }
 
@@ -442,6 +415,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
             trackInfo.clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
+              if (!__readInclude(clip, "audio", t)) continue;
               var ci = {
                 index: c,
                 nodeId: clip.nodeId,
@@ -453,7 +427,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                 outPointSeconds: __ticksToSeconds(clip.outPoint.ticks),
                 mediaType: clip.mediaType
               };
-              try { ci.enabled = !clip.isDisabled(); } catch(e) { ci.enabled = true; }
+              try { ci.enabled = !__isClipDisabled(clip); } catch(e) { ci.enabled = true; }
               try { ci.speed = clip.getSpeed(); } catch(e) {}
               try {
                 if (clip.projectItem) {
@@ -465,16 +439,17 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               try {
                 ci.effectCount = clip.components.numItems;
                 ci.effects = [];
-                for (var e = 0; e < clip.components.numItems; e++) {
+                for (var e = 0; e < clip.components.numItems && e < 64; e++) {
                   ci.effects.push(clip.components[e].displayName);
                 }
+                ci.effectsTruncated = ci.effectCount > ci.effects.length;
               } catch(e) {}
-              trackInfo.clips.push(ci);
+              __readPush(trackInfo.clips, ci);
             }
 
             trackInfo.transitions = [];
             try {
-              for (var tr = 0; tr < track.transitions.numItems; tr++) {
+              for (var tr = 0; tr < track.transitions.numItems && tr < 50; tr++) {
                 var trans = track.transitions[tr];
                 trackInfo.transitions.push({
                   index: tr,
@@ -484,15 +459,18 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               }
             } catch(e) {}
 
-            trackInfo.clipCount = trackInfo.clips.length;
-            trackInfo.transitionCount = trackInfo.transitions.length;
+            trackInfo.clipCount = track.clips.numItems;
+            trackInfo.transitionCount = track.transitions ? track.transitions.numItems : 0;
+            trackInfo.transitionsTruncated = trackInfo.transitionCount > trackInfo.transitions.length;
             info.audioTracks.push(trackInfo);
           }
 
           info.videoTrackCount = info.videoTracks.length;
           info.audioTrackCount = info.audioTracks.length;
 
-          return __result(info);
+          info.pagination = __readReceipt();
+          if (__readError) return __error(__readError);
+          return __readResult(info);
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -513,7 +491,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { node_id: string }) => {
         const script = buildToolScript(`
           var found = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!found) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}");
+          if (!found) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}; nothing was changed.");
 
           var clip = found.clip;
           var info = {
@@ -530,7 +508,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
             mediaType: clip.mediaType
           };
 
-          try { info.enabled = !clip.isDisabled(); } catch(e) { info.enabled = true; }
+          try { info.enabled = !__isClipDisabled(clip); } catch(e) { info.enabled = true; }
           try { info.speed = clip.getSpeed(); } catch(e) {}
           try { info.reversed = clip.isSpeedReversed(); } catch(e) {}
           try { info.isSelected = clip.isSelected(); } catch(e) {}
@@ -586,7 +564,14 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                   displayName: prop.displayName
                 };
                 try { propInfo.matchName = prop.matchName; } catch(e) {}
-                try { propInfo.value = prop.getValue(0, 0); } catch(e) {}
+                var colorValue = __readColorValue(prop);
+                if (colorValue) {
+                  propInfo.value = colorValue;
+                  propInfo.valueType = "color_argb";
+                  try { if (prop.isTimeVarying()) propInfo.note = "Animated colour: this is the current value, not a per-keyframe sample."; } catch (eColorAnimation) {}
+                } else {
+                  try { propInfo.value = prop.getValue(0, 0); } catch(e) {}
+                }
                 try { propInfo.isTimeVarying = prop.isTimeVarying(); } catch(e) {}
                 try { propInfo.keyframesSupported = prop.areKeyframesSupported(); } catch(e) {}
                 try {
@@ -645,12 +630,12 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}; nothing was changed.");
 
           var info = {
             nodeId: item.nodeId,
             name: item.name,
-            type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 3 ? "root" : item.type === 4 ? "file" : "unknown",
+            type: __projectItemTypeName(item),
             treePath: item.treePath
           };
 
@@ -811,7 +796,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                 var entry = {
                   nodeId: item.nodeId,
                   name: item.name,
-                  type: item.type === 1 ? "clip" : item.type === 2 ? "bin" : item.type === 4 ? "file" : "unknown",
+                  type: __projectItemTypeName(item),
                   treePath: item.treePath
                 };
                 try { entry.mediaPath = item.getMediaPath(); } catch(e) {}
@@ -832,10 +817,11 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
     },
 
     get_timeline_gaps: {
-      description: "Find all gaps (empty spaces) on the timeline between clips. Useful for identifying where content is missing or where clips can be tightened.",
+      description: "Find a bounded page of gaps (50 by default; follow pagination.nextOffset) on the timeline between clips. Useful for identifying where content is missing or where clips can be tightened.",
       parameters: {
         type: "object" as const,
         properties: {
+          ...sequenceReadProperties,
           sequence_id: {
             type: "string",
             description: "Sequence name or ID. Uses active sequence if omitted.",
@@ -851,22 +837,28 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
           },
         },
       },
-      handler: async (args: { sequence_id?: string; track_type?: string; min_gap_seconds?: number }) => {
+      handler: async (args: SequenceReadArgs & { sequence_id?: string; min_gap_seconds?: number }) => {
         const seqLookup = args.sequence_id
           ? `var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}"); if (!seq) return __error("Sequence not found");`
           : `var seq = app.project.activeSequence; if (!seq) return __error("No active sequence");`;
         const minGap = args.min_gap_seconds ?? 0.04;
-        const trackType = args.track_type || "both";
+        if (!Number.isFinite(minGap) || minGap < 0) throw new Error("min_gap_seconds must be finite and nonnegative");
+        const bounds = sequenceReadScript(args);
 
         const script = buildToolScript(`
           ${seqLookup}
+          ${bounds}
 
           var gaps = [];
+          var trackCounts = [];
           var minGapTicks = __secondsToTicks(${minGap});
 
           function findGaps(tracks, type) {
             for (var t = 0; t < tracks.numTracks; t++) {
               var track = tracks[t];
+              __readTotalClips += track.clips.numItems;
+              trackCounts.push({ trackType: type, trackIndex: t, clipCount: track.clips.numItems });
+              if (!__readTrack(type, t)) continue;
               if (track.clips.numItems === 0) continue;
               var prevEnd = 0;
               for (var c = 0; c < track.clips.numItems; c++) {
@@ -874,8 +866,10 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                 var startTicks = parseFloat(clip.start.ticks);
                 var endTicks = parseFloat(clip.end.ticks);
                 var gapTicks = startTicks - prevEnd;
-                if (gapTicks > minGapTicks) {
-                  gaps.push({
+                if (gapTicks > minGapTicks && __readWindow(__ticksToSeconds(prevEnd), __ticksToSeconds(startTicks))) {
+                  var ordinal = __readMatched++;
+                  if (ordinal >= ${args.clip_offset ?? 0} && __readReturned < ${args.clip_limit ?? 50} && !__readBlocked)
+                  __readPush(gaps, {
                     trackType: type,
                     trackIndex: t,
                     trackName: track.name,
@@ -886,19 +880,24 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                     afterClip: clip.name
                   });
                 }
-                prevEnd = endTicks;
+                prevEnd = Math.max(prevEnd, endTicks);
               }
             }
           }
 
-          if ("${trackType}" !== "audio") findGaps(seq.videoTracks, "video");
-          if ("${trackType}" !== "video") findGaps(seq.audioTracks, "audio");
+          findGaps(seq.videoTracks, "video");
+          findGaps(seq.audioTracks, "audio");
 
-          return __result({
+          if (__readError) return __error(__readError);
+          var pagination = __readReceipt();
+          pagination.totalGaps = __readMatched;
+          return __readResult({
+            pagination: pagination,
             sequenceName: seq.name,
-            gapCount: gaps.length,
+            gapCount: __readMatched,
             minGapSeconds: ${minGap},
-            gaps: gaps
+            gaps: gaps,
+            tracks: trackCounts
           });
         `);
         return sendCommand(script, bridgeOptions);
@@ -956,7 +955,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               totalVideoClips++;
               var clip = track.clips[c];
               trackFilled += parseFloat(clip.end.ticks) - parseFloat(clip.start.ticks);
-              try { if (clip.isDisabled()) disabledClips++; } catch(e) {}
+              try { if (__isClipDisabled(clip)) disabledClips++; } catch(e) {}
               try {
                 if (clip.projectItem) {
                   var srcName = clip.projectItem.name;
@@ -1121,13 +1120,15 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
                       mediaPath: "",
                       offline: false,
                       useCount: 0,
-                      tracks: []
+                      tracks: [],
+                      trackDetails: []
                     };
                     try { mediaMap[key].mediaPath = src.getMediaPath(); } catch(e) {}
                     try { mediaMap[key].offline = src.isOffline(); } catch(e) {}
                   }
                   mediaMap[key].useCount++;
                   mediaMap[key].tracks.push(trackType + " " + t);
+                  mediaMap[key].trackDetails.push({ track: trackType + " " + t, trackType: trackType === "V" ? "video" : "audio", trackIndex: t, trackLabel: trackType + (t + 1) });
                 } catch(e) {}
               }
             }
@@ -1148,6 +1149,13 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               var trackList = [];
               for (var k in unique) { if (unique.hasOwnProperty(k)) trackList.push(k); }
               mediaMap[key].tracks = trackList;
+              var detailMap = {};
+              var trackDetails = [];
+              for (var di = 0; di < mediaMap[key].trackDetails.length; di++) {
+                var detail = mediaMap[key].trackDetails[di];
+                if (!detailMap[detail.track]) { detailMap[detail.track] = true; trackDetails.push(detail); }
+              }
+              mediaMap[key].trackDetails = trackDetails;
               if (mediaMap[key].offline) offlineUsed++;
               report.push(mediaMap[key]);
             }
@@ -1185,7 +1193,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
 
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           if (${trackIndex} >= seq.videoTracks.numTracks) return __error("Primary video track index is out of range");
           var blockers = [];
           var warnings = [];
@@ -1312,7 +1320,7 @@ export function getInspectionTools(bridgeOptions: BridgeOptions) {
               }
             }
           }
-          if (!seq) return __error(requestedSequence ? "Sequence not found: " + requestedSequence : "No active sequence");
+          if (!seq) return __error(requestedSequence ? "Sequence not found: " + requestedSequence : "No active sequence; nothing was changed.");
 
           var summary = {
             videoClips: 0,

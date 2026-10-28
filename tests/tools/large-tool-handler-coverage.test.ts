@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeOptions } from "../../src/bridge/file-bridge.js";
 
 vi.mock("../../src/bridge/file-bridge.js", () => ({
+  withBridgeWorkflow: (_options: unknown, work: () => unknown) => work(),
   sendCommand: vi.fn().mockResolvedValue({ success: true, data: { covered: true } }),
   sendRawCommand: vi.fn().mockResolvedValue({ success: true, data: { covered: true } }),
 }));
@@ -80,7 +81,8 @@ function valueFor(schema: Schema, field: string, includeOptional: boolean): unkn
   if (schema.default !== undefined) return schema.default;
   switch (schema.type) {
     case "boolean": return includeOptional;
-    case "number": return 1;
+    case "number":
+    case "integer": return 1;
     case "array": return [valueFor(schema.items ?? { type: "string" }, field, includeOptional)];
     case "object": return argsFor(schema, includeOptional);
     default: return `coverage-${field}`;
@@ -96,11 +98,17 @@ function argsFor(schema: Schema, includeOptional: boolean): Record<string, unkno
   return args;
 }
 
+function argsForTool(toolName: string, schema: Schema, includeOptional: boolean): Record<string, unknown> {
+  const args = argsFor(schema, includeOptional);
+  if (toolName === "map_source_ranges_to_timeline") delete args.media_path;
+  return args;
+}
+
 const modules: Array<[string, () => Record<string, Tool>, Set<string>?]> = [
   ["advanced", () => getAdvancedTools(bridgeOptions) as Record<string, Tool>],
   ["audio", () => getAudioTools(bridgeOptions) as Record<string, Tool>, new Set(["detect_silence", "detect_beats", "analyze_loudness", "normalize_loudness_file"])],
   ["export", () => getExportTools(bridgeOptions) as Record<string, Tool>, new Set(["validate_export_preset", "verify_delivery_file", "analyze_video_qc", "detect_source_scene_changes"])],
-  ["clipboard", () => getClipboardTools(bridgeOptions) as Record<string, Tool>],
+  ["clipboard", () => getClipboardTools(bridgeOptions) as Record<string, Tool>, new Set(["copy_effects_between_clips"])],
   ["captions", () => getCaptionTools(bridgeOptions) as Record<string, Tool>],
   ["discovery", () => getDiscoveryTools(bridgeOptions) as Record<string, Tool>],
   ["effects", () => getEffectsTools(bridgeOptions) as Record<string, Tool>],
@@ -138,7 +146,7 @@ describe("large tool handler coverage", () => {
           ["all arguments", true],
         ])(`${toolName} handles %s`, async (_label, includeOptional) => {
           const commandCount = mockedSendCommand.mock.calls.length + mockedSendRawCommand.mock.calls.length;
-          const result = await tool.handler(argsFor(tool.parameters, includeOptional));
+          const result = await tool.handler(argsForTool(toolName, tool.parameters, includeOptional));
 
           expect(result).toBeDefined();
           const nextCommandCount = mockedSendCommand.mock.calls.length + mockedSendRawCommand.mock.calls.length;
@@ -155,7 +163,7 @@ describe("large tool handler coverage", () => {
         for (const [field, property] of Object.entries(tool.parameters.properties ?? {})) {
           for (const enumValue of property.enum?.slice(1, -1) ?? []) {
             it(`${toolName} handles ${field}=${String(enumValue)}`, async () => {
-              const args = argsFor(tool.parameters, true);
+              const args = argsForTool(toolName, tool.parameters, true);
               args[field] = enumValue;
               const commandCount = mockedSendCommand.mock.calls.length + mockedSendRawCommand.mock.calls.length;
               const result = await tool.handler(args);
@@ -169,7 +177,7 @@ describe("large tool handler coverage", () => {
           }
           if (property.type === "boolean") {
             it(`${toolName} handles ${field}=false`, async () => {
-              const args = argsFor(tool.parameters, true);
+              const args = argsForTool(toolName, tool.parameters, true);
               args[field] = false;
               const commandCount = mockedSendCommand.mock.calls.length + mockedSendRawCommand.mock.calls.length;
               const result = await tool.handler(args);

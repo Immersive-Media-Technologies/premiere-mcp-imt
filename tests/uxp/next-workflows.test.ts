@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { createRequire } from "node:module";
 import { describe, expect, it, vi } from "vitest";
+import { reviewRecoveryFixture } from "./review-recovery-fixture.js";
 
 const require = createRequire(import.meta.url);
 const Commands = require("../../uxp-plugin/commands.cjs");
@@ -120,6 +123,7 @@ describe("next-wave UXP event workflows", () => {
     };
     const definitions = NextWorkflows.createNextWorkflowDefinitions({
       ppro,
+      fileExists: vi.fn(async () => false),
       events: Events.createEventJournal({ capacity: 16 }),
       workspace: { assertPathAllowed: vi.fn(async (path: string) => path) },
     });
@@ -140,6 +144,88 @@ describe("next-wave UXP event workflows", () => {
       action: "saved_as", projectId: "project-1", path: "C:/work/branch.prproj",
       outcome: "verified", verificationBoundary: "project_path_readback",
     });
+  });
+
+  it("asks for confirmOverwrite only when the Save As destination file exists (#642)", async () => {
+    const project = {
+      guid: "project-1", name: "Edit", path: "C:/work/source.prproj",
+      saveAs: vi.fn(async (path: string) => { project.path = path; return true; }),
+    };
+    const existing = new Set(["C:/work/existing.prproj"]);
+    const ppro = {
+      Project: {
+        getActiveProject: vi.fn(async () => project),
+        getProject: vi.fn(() => project),
+        open: vi.fn(), createProject: vi.fn(),
+        // Premiere 26.5.1 reports true for any *.prproj path, even a missing one.
+        isProject: vi.fn(() => true),
+      },
+      Guid: { fromString: vi.fn((value: string) => value) },
+    };
+    const definitions = NextWorkflows.createNextWorkflowDefinitions({
+      ppro,
+      events: Events.createEventJournal({ capacity: 16 }),
+      workspace: { assertPathAllowed: vi.fn(async (path: string) => path) },
+      fileExists: vi.fn(async (path: string) => existing.has(path)),
+    });
+
+    await expect(definitions["project.sessions.saveAs"].handler({
+      path: "C:/work/new-branch.prproj", expectedPath: "C:/work/source.prproj", confirmExternalWrite: true,
+    })).resolves.toMatchObject({ action: "saved_as", path: "C:/work/new-branch.prproj" });
+    await expect(definitions["project.sessions.saveAs"].handler({
+      path: "C:/work/existing.prproj", expectedPath: "C:/work/new-branch.prproj", confirmExternalWrite: true,
+    })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+  });
+
+  it.each([null, undefined, "false", "permission", "unsupported"])("refuses Save As with unknown existence (%s), even when isProject returns false", async (existence) => {
+    const project = { guid: "project-1", path: "C:/work/source.prproj", saveAs: vi.fn() };
+    const fileExists = vi.fn(async () => {
+      if (existence === "permission" || existence === "unsupported") throw Object.assign(new Error("storage unavailable"), { code: "EACCES" });
+      return existence;
+    });
+    const definitions = NextWorkflows.createNextWorkflowDefinitions({
+      ppro: { Project: { getActiveProject: async () => project, isProject: async () => false } },
+      workspace: { assertPathAllowed: async (path: string) => path }, fileExists,
+    });
+    await expect(definitions["project.sessions.saveAs"].handler({
+      path: "C:/work/destination.prproj", expectedPath: project.path, confirmExternalWrite: true,
+    })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED", message: expect.stringContaining("existence could not be verified") });
+    expect(project.saveAs).not.toHaveBeenCalled();
+  });
+
+  it("accepts explicit missing-file errors but does not treat arbitrary storage exceptions as absence", async () => {
+    const project = { guid: "project-1", path: "C:/work/source.prproj",
+      saveAs: vi.fn(async (path: string) => { project.path = path; return true; }) };
+    const definitions = NextWorkflows.createNextWorkflowDefinitions({
+      ppro: { Project: { getActiveProject: async () => project } },
+      workspace: { assertPathAllowed: async (path: string) => path },
+      fileExists: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+    });
+    await expect(definitions["project.sessions.saveAs"].handler({ path: "C:/work/new.prproj",
+      expectedPath: project.path, confirmExternalWrite: true })).resolves.toMatchObject({ outcome: "verified" });
+  });
+
+  it.each(["found", "ENOENT", "NotFoundError", "EACCES", "unsupported", "empty"])("preserves overwrite safety for native UXP storage response %s", async (response) => {
+    const project = { guid: "project-1", path: "C:/work/source.prproj",
+      saveAs: vi.fn(async (path: string) => { project.path = path; return true; }) };
+    const getEntryWithUrl = vi.fn(async () => {
+      if (response === "found") return {};
+      if (response === "empty") return null;
+      throw Object.assign(new Error("storage failure"), { code: response });
+    });
+    const module = { exports: {} as typeof NextWorkflows };
+    runInNewContext(readFileSync(new URL("../../uxp-plugin/next-workflows.cjs", import.meta.url), "utf8"), {
+      module, require: () => ({ storage: { localFileSystem: { getEntryWithUrl } } }),
+    });
+    const definitions = module.exports.createNextWorkflowDefinitions({
+      ppro: { Project: { getActiveProject: async () => project } },
+      workspace: { assertPathAllowed: async (path: string) => path },
+    });
+    const call = definitions["project.sessions.saveAs"].handler({ path: "C:\\work\\new.prproj",
+      expectedPath: project.path, confirmExternalWrite: true });
+    if (["ENOENT", "NotFoundError"].includes(response)) await expect(call).resolves.toMatchObject({ outcome: "verified" });
+    else await expect(call).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    expect(getEntryWithUrl).toHaveBeenCalledWith("file:/C:/work/new.prproj");
   });
 
   it("bounds growing-media pauses with a persisted lease and resumes on disposal", async () => {
@@ -326,34 +412,42 @@ describe("next-wave UXP event workflows", () => {
       }],
     });
 
-    const betaPropertyMedia = {
-      getStart: vi.fn(async () => ({ seconds: 99 })),
-      getDuration: vi.fn(async () => ({ seconds: 99 })),
-      start: Promise.resolve({ seconds: 3 }),
-      duration: Promise.resolve({ seconds: 12 }),
+    // Premiere 26.5 documents synchronous getStart()/getDuration() and deprecates
+    // the Promise-returning start/duration properties, so the getters win.
+    const documentedGetterMedia = {
+      getStart: vi.fn(() => ({ seconds: 3 })),
+      getDuration: vi.fn(() => ({ seconds: 12 })),
+      start: Promise.resolve({ seconds: 99 }),
+      duration: Promise.resolve({ seconds: 99 }),
     };
-    media = betaPropertyMedia;
+    media = documentedGetterMedia;
     await expect(definitions["media.health.inspect"].handler({ includeMediaTiming: true })).resolves.toMatchObject({
       items: [{
         mediaTiming: {
           available: true,
           startSeconds: 3,
           durationSeconds: 12,
-          startAccessor: "start",
-          durationAccessor: "duration",
+          startAccessor: "getStart()",
+          durationAccessor: "getDuration()",
         },
       }],
     });
-    expect(betaPropertyMedia.getStart).not.toHaveBeenCalled();
-    expect(betaPropertyMedia.getDuration).not.toHaveBeenCalled();
+    expect(documentedGetterMedia.getStart).toHaveBeenCalledOnce();
+    expect(documentedGetterMedia.getDuration).toHaveBeenCalledOnce();
 
-    const failedPropertyMedia = {
-      getStart: vi.fn(async () => ({ seconds: 99 })),
-      getDuration: vi.fn(async () => ({ seconds: 99 })),
+    // Older hosts expose only the Promise-shaped properties.
+    media = { start: Promise.resolve({ seconds: 4 }), duration: Promise.resolve({ seconds: 8 }) };
+    await expect(definitions["media.health.inspect"].handler({ includeMediaTiming: true })).resolves.toMatchObject({
+      items: [{ mediaTiming: { available: true, startSeconds: 4, durationSeconds: 8, startAccessor: "start", durationAccessor: "duration" } }],
+    });
+
+    // A throwing getter falls back to the property; a throwing property with no getter stays unavailable.
+    const failedGetterMedia = {
+      getStart: vi.fn(() => { throw new Error("getter unavailable"); }),
       get start() { throw new Error("start unavailable"); },
       duration: { seconds: 7 },
     };
-    media = failedPropertyMedia;
+    media = failedGetterMedia;
     await expect(definitions["media.health.inspect"].handler({ includeMediaTiming: true })).resolves.toMatchObject({
       items: [{
         mediaTiming: {
@@ -365,8 +459,7 @@ describe("next-wave UXP event workflows", () => {
         },
       }],
     });
-    expect(failedPropertyMedia.getStart).not.toHaveBeenCalled();
-    expect(failedPropertyMedia.getDuration).not.toHaveBeenCalled();
+    expect(failedGetterMedia.getStart).toHaveBeenCalledOnce();
 
     media = { start: { seconds: -1 }, duration: { seconds: 86400001 } };
     await expect(definitions["media.health.inspect"].handler({ includeMediaTiming: true })).resolves.toMatchObject({
@@ -427,10 +520,12 @@ describe("next-wave UXP event workflows", () => {
     await expect(registry.dispatch("source.mediaTiming.setStart", {
       projectItemId: "clip-1", expectedTiming: { startSeconds: 10, durationSeconds: 60 }, startSeconds: 12,
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await reviewRecoveryFixture(registry);
     expect(media.createSetStartAction).not.toHaveBeenCalled();
     await expect(registry.dispatch("source.mediaTiming.setStart", {
       projectItemId: "clip-1", expectedTiming: { startSeconds: 10 }, startSeconds: 12, confirmSetStart: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(registry);
     expect(media.createSetStartAction).not.toHaveBeenCalled();
 
     const firstArgs = {
@@ -458,6 +553,7 @@ describe("next-wave UXP event workflows", () => {
       updated: true, after: { startSeconds: 15, durationSeconds: 60 }, operationId: "source-start-2",
     });
     await expect(concurrentSecond).rejects.toMatchObject({ code: "UXP_STALE_TARGET" });
+    await reviewRecoveryFixture(registry);
     expect(media.createSetStartAction).toHaveBeenCalledTimes(2);
     expect(project.executeTransaction).toHaveBeenCalledTimes(2);
     expect(startSeconds).toBe(15);
@@ -466,6 +562,7 @@ describe("next-wave UXP event workflows", () => {
       projectItemId: "clip-1", expectedTiming: { startSeconds: 12, durationSeconds: 60 },
       startSeconds: 19, confirmSetStart: true,
     })).rejects.toMatchObject({ code: "UXP_STALE_TARGET" });
+    await reviewRecoveryFixture(registry);
     expect(media.createSetStartAction).toHaveBeenCalledTimes(2);
 
     await expect(registry.dispatch("source.mediaTiming.setStart", {
@@ -485,8 +582,47 @@ describe("next-wave UXP event workflows", () => {
     await expect(registry.dispatch("source.mediaTiming.setStart", {
       projectItemId: "clip-1", expectedTiming: { startSeconds: 16, durationSeconds: 59 },
       startSeconds: 19, confirmSetStart: true,
-    })).rejects.toMatchObject({ code: "UXP_COMMAND_UNAVAILABLE" });
+    })).rejects.toMatchObject({ code: "UXP_RECOVERY_REQUIRED" });
     expect(betaPromiseMedia.createSetStartAction).not.toHaveBeenCalled();
+  });
+
+  it("sets source-media start on Premiere 26.5 media whose deprecated properties return promises", async () => {
+    let startSeconds = 10;
+    const media = {
+      get start() { return Promise.resolve({ seconds: startSeconds }); },
+      get duration() { return Promise.resolve({ seconds: 60 }); },
+      getStart: vi.fn(() => ({ seconds: startSeconds })),
+      getDuration: vi.fn(() => ({ seconds: 60 })),
+      createSetStartAction: vi.fn((time: { seconds: number }) => ({ apply: () => { startSeconds = time.seconds; } })),
+    };
+    const clip = { getId: vi.fn(async () => "clip-1"), getMedia: vi.fn(async () => media) };
+    const root = { getItems: vi.fn(async () => [clip]) };
+    const project = {
+      guid: "project-1",
+      getRootItem: vi.fn(async () => root),
+      lockedAccess: vi.fn((callback: () => void) => callback()),
+      executeTransaction: vi.fn((callback: (compound: { addAction: (action: { apply: () => void }) => boolean }) => void) => {
+        callback({ addAction: (action) => { action.apply(); return true; } });
+        return true;
+      }),
+    };
+    const ppro = {
+      Project: { getActiveProject: vi.fn(async () => project) },
+      ProjectItem: { cast: vi.fn((item: unknown) => item) },
+      ClipProjectItem: { cast: vi.fn((item: unknown) => item) },
+      FolderItem: { cast: vi.fn(() => null) },
+      TickTime: { createWithSeconds: vi.fn((seconds: number) => ({ seconds })) },
+    };
+    const registry = Commands.createCommandRegistry({ ppro, Protocol });
+
+    await expect(registry.dispatch("source.mediaTiming.setStart", {
+      projectItemId: "clip-1", expectedTiming: { startSeconds: 10, durationSeconds: 60 },
+      startSeconds: 12, confirmSetStart: true, operationId: "source-start-265",
+    })).resolves.toMatchObject({
+      updated: true, outcome: "verified", before: { startSeconds: 10 }, after: { startSeconds: 12, durationSeconds: 60 },
+    });
+    expect(media.createSetStartAction).toHaveBeenCalledTimes(1);
+    expect(media.getStart).toHaveBeenCalled();
   });
 
   it("guards, serializes, replays, and reads back source-media interpretation overrides", async () => {
@@ -529,9 +665,11 @@ describe("next-wave UXP event workflows", () => {
     await expect(registry.dispatch("source.mediaOverrides.update", {
       projectItemId: "clip-1", expectedOverrides: initial, frameRate: 25,
     })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
+    await reviewRecoveryFixture(registry);
     await expect(registry.dispatch("source.mediaOverrides.update", {
       projectItemId: "clip-1", expectedOverrides: initial, frameRate: 25, confirmMediaInterpretation: true,
     })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
+    await reviewRecoveryFixture(registry);
     expect(clip.createSetOverrideFrameRateAction).not.toHaveBeenCalled();
 
     const firstArgs = {
@@ -565,6 +703,7 @@ describe("next-wave UXP event workflows", () => {
       updated: true, operationId: "source-override-2", after: { frameRate: 30, pixelAspectRatio: 4 / 3 },
     });
     await expect(concurrentSecond).rejects.toMatchObject({ code: "UXP_STALE_TARGET" });
+    await reviewRecoveryFixture(registry);
     expect(clip.createSetOverrideFrameRateAction).toHaveBeenCalledTimes(2);
     expect(clip.createSetOverridePixelAspectRatioAction).toHaveBeenCalledTimes(1);
     expect(frameRate).toBe(30);
@@ -574,6 +713,7 @@ describe("next-wave UXP event workflows", () => {
       projectItemId: "clip-1", expectedOverrides: expectedCurrent, frameRate: 24,
       confirmMediaInterpretation: true, operationId: "source-override-4",
     })).rejects.toMatchObject({ code: "UXP_STALE_TARGET" });
+    await reviewRecoveryFixture(registry);
     expect(clip.createSetOverrideFrameRateAction).toHaveBeenCalledTimes(2);
 
     clip.createSetOverrideFrameRateAction.mockImplementationOnce(() => ({ apply: () => { frameRate = 29.97; } }));

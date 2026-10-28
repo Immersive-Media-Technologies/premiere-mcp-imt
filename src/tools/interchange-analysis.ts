@@ -29,7 +29,7 @@ export interface CmxEdl {
   unrecognizedEventLines: Array<{ line: number; text: string }>;
 }
 
-const EVENT_PATTERN = /^\s*(\d{1,4})\s+(\S+)\s+(\S+)\s+([CDW])(?:\s+(\d{1,3}))?\s+(\d{2}:\d{2}:\d{2}[:;]\d{2})\s+(\d{2}:\d{2}:\d{2}[:;]\d{2})\s+(\d{2}:\d{2}:\d{2}[:;]\d{2})\s+(\d{2}:\d{2}:\d{2}[:;]\d{2})\s*$/i;
+const EVENT_PATTERN = /^\s*(\d{1,4})\s+(\S+)\s+(\S+)\s+([CDW])(?:\s+(\d{1,3}))?\s+(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})\s+(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})\s+(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})\s+(\d{2}[:;]\d{2}[:;]\d{2}[:;]\d{2})\s*$/i;
 
 export function parseCmx3600Edl(contents: string): CmxEdl {
   const events: CmxEvent[] = [];
@@ -59,9 +59,11 @@ export function parseCmx3600Edl(contents: string): CmxEdl {
 function nominalRate(rate: CmxFrameRate): number { return rate === 29.97 ? 30 : rate === 59.94 ? 60 : rate; }
 
 export function timecodeToFrames(timecode: string, frameRate: CmxFrameRate): number {
-  const match = timecode.match(/^(\d{2}):(\d{2}):(\d{2})([:;])(\d{2})$/);
-  if (!match) throw new Error(`Invalid timecode: ${timecode}`);
-  const [, hoursText, minutesText, secondsText, separator, framesText] = match;
+  // Drop-frame ends in a semicolon; Premiere also writes the other separators
+  // as semicolons (00;01;00;02). Semicolons before a colon frame separator are refused.
+  const match = timecode.match(/^(\d{2})([:;])(\d{2})([:;])(\d{2})([:;])(\d{2})$/);
+  if (!match || (match[6] === ":" && (match[2] === ";" || match[4] === ";"))) throw new Error(`Invalid timecode: ${timecode}`);
+  const [, hoursText, , minutesText, , secondsText, separator, framesText] = match;
   const hours = Number(hoursText), minutes = Number(minutesText), seconds = Number(secondsText), frames = Number(framesText);
   const nominal = nominalRate(frameRate);
   if (minutes > 59 || seconds > 59 || frames >= nominal) throw new Error(`Invalid timecode fields: ${timecode}`);
@@ -127,7 +129,40 @@ function attributes(value: string): Record<string, string> {
   return result;
 }
 
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+}
+
+/**
+ * Premiere's export_as_fcp_xml writes FCP7 XML (<xmeml>), which declares media
+ * as <file id=...><name/><pathurl>file://localhost/...</pathurl></file> and
+ * clips as <clipitem>; later <file id=.../> elements only reference the first.
+ */
+function inspectXmeml(contents: string, root: RegExpMatchArray) {
+  const assets: FcpxmlAsset[] = [];
+  const seen = new Set<string>();
+  for (const match of contents.matchAll(/<file\b([^>]*?)(?:\/>|>([\s\S]*?)<\/file>)/gi)) {
+    if (assets.length >= MAX_ASSETS) break;
+    const attrs = attributes(match[1]);
+    const body = match[2] ?? "";
+    const pathurl = /<pathurl>([^<]*)<\/pathurl>/i.exec(body);
+    if (!pathurl && attrs.id && seen.has(attrs.id)) continue;
+    if (attrs.id) seen.add(attrs.id);
+    const name = /<name>([^<]*)<\/name>/i.exec(body);
+    assets.push({ id: attrs.id ?? null, name: name ? decodeXmlEntities(name[1]) : null, source: pathurl ? decodeXmlEntities(pathurl[1].trim()) : null });
+  }
+  return {
+    format: "FCP7 XML (xmeml)", version: attributes(root[1]).version ?? null,
+    sequenceCount: [...contents.matchAll(/<sequence\b/gi)].length,
+    clipElementCount: [...contents.matchAll(/<clipitem\b/gi)].length,
+    assetCount: assets.length, assets, assetsTruncated: assets.length === MAX_ASSETS,
+    warnings: /<!DOCTYPE/i.test(contents) ? ["DOCTYPE is present; this tool inspects text only and never resolves entities"] : [],
+  };
+}
+
 export function inspectFcpxml(contents: string) {
+  const xmeml = contents.match(/<xmeml\b([^>]*)>/i);
+  if (xmeml && !/<fcpxml\b/i.test(contents)) return inspectXmeml(contents, xmeml);
   const root = contents.match(/<fcpxml\b([^>]*)>/i);
   const assets: FcpxmlAsset[] = [];
   for (const match of contents.matchAll(/<(?:asset(?![-\w])|media-rep(?![-\w]))\b([^>]*)\/?>(?:<\/[^>]+>)?/gi)) {
@@ -141,7 +176,7 @@ export function inspectFcpxml(contents: string) {
     format: "FCPXML", version: root ? attributes(root[1]).version ?? null : null, sequenceCount: sequences, clipElementCount: clips,
     assetCount: assets.length, assets, assetsTruncated: assets.length === MAX_ASSETS,
     warnings: [
-      ...(root ? [] : ["No <fcpxml> root element was found"]),
+      ...(root ? [] : ["No <fcpxml> or <xmeml> root element was found"]),
       ...( /<!DOCTYPE/i.test(contents) ? ["DOCTYPE is present; this tool inspects text only and never resolves entities"] : []),
     ],
   };
@@ -208,7 +243,7 @@ export function getInterchangeAnalysisTools(_bridgeOptions: BridgeOptions) {
       },
     },
     inspect_fcpxml_interchange: {
-      description: "Inspect a local FCPXML document's root version, sequence/clip counts, bounded asset declarations, and text-only parser warnings before deliberate Premiere import.",
+      description: "Inspect a local FCPXML or FCP7 XML (xmeml, what Premiere's export_as_fcp_xml writes) document: format, version, sequence/clip counts, bounded media declarations, and text-only parser warnings, before deliberate Premiere import.",
       parameters: { type: "object", properties: { path: { type: "string", description: "Existing local .fcpxml or .xml file" } }, required: ["path"] },
       handler: async (args: { path?: string }) => {
         try { const file = readInterchangeFile(args.path, [".fcpxml", ".xml"]); return { success: true, data: { path: file.path, ...inspectFcpxml(file.contents) } }; }
@@ -216,19 +251,29 @@ export function getInterchangeAnalysisTools(_bridgeOptions: BridgeOptions) {
       },
     },
     verify_fcpxml_media_references: {
-      description: "Verify FCPXML file:// media references only inside caller-approved existing roots. References outside those roots are never statted or exposed as local paths.",
+      description: "Verify the file:// media references of an FCPXML or FCP7 XML (xmeml) document, only inside caller-approved existing roots. References outside those roots are never statted or exposed as local paths.",
       parameters: { type: "object", properties: { path: { type: "string", description: "Existing local .fcpxml or .xml file" }, allowed_roots: { type: "array", items: { type: "string" }, description: "One to sixteen existing absolute roots that may be inspected" } }, required: ["path", "allowed_roots"] },
       handler: async (args: { path?: string; allowed_roots?: unknown }) => {
         try {
           const file = readInterchangeFile(args.path, [".fcpxml", ".xml"]), roots = parseAllowedRoots(args.allowed_roots), document = inspectFcpxml(file.contents);
           const references = document.assets.map(asset => {
             const localPath = fileUrlPath(asset.source);
-            if (!localPath) return { assetId: asset.id, name: asset.name, status: asset.source ? "non_file_url" : "missing_source" };
+            if (!asset.source) return { assetId: asset.id, name: asset.name, status: "generated_no_file" };
+            if (!localPath) return { assetId: asset.id, name: asset.name, status: "non_file_url" };
             const resolved = resolve(localPath);
             if (!roots.some(root => insideRoot(resolved, root))) return { assetId: asset.id, name: asset.name, status: "outside_allowed_roots" };
             return { assetId: asset.id, name: asset.name, status: existsSync(resolved) && statSync(resolved).isFile() ? "available" : "missing", path: resolved };
           });
-          return { success: true, data: { path: file.path, allowedRoots: roots, checkedReferenceCount: references.length, references } };
+          const generatedNoFileCount = references.filter((reference) => reference.status === "generated_no_file").length;
+          const fileReferences = references.filter((reference) => reference.status !== "generated_no_file");
+          const allAvailable = fileReferences.length > 0 && fileReferences.every((reference) => reference.status === "available");
+          return {
+            success: true,
+            data: {
+              path: file.path, format: document.format, allowedRoots: roots, checkedReferenceCount: fileReferences.length, generatedNoFileCount, allAvailable, references,
+              ...(references.length === 0 ? { warning: "No media references were found in this document, so nothing was verified." } : {}),
+            },
+          };
         } catch (error) { return { success: false, error: (error as Error).message }; }
       },
     },

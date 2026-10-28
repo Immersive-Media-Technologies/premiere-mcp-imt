@@ -18,6 +18,36 @@ const { getDiscoveryTools } = vi.hoisted(() => ({
       },
       handler: vi.fn().mockResolvedValue({ success: true, data: { found: true } }),
     },
+    mock_enum_tool: {
+      description: "Enum validation fixture",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["normal", "multiply"] },
+          operations: { type: "array", items: { type: "object", properties: { type: { type: "string", enum: ["insert_clip", "remove_clip"] } } } },
+        },
+      },
+      handler: vi.fn().mockResolvedValue({ success: true, data: {} }),
+    },
+    // Report whether scripts built during the call would track Premiere's undo stack.
+    get_mock_undo_tracking: {
+      description: "Read-only mock",
+      parameters: { type: "object", properties: {} },
+      handler: async (args: Record<string, unknown>) => ({ success: true, data: { tracking: (await import("../src/bridge/undo-tracking.js")).undoTrackingEnabled(), guard: (await import("../src/bridge/project-guard.js")).expectedProjectPath(), args } }),
+    },
+    import_mock_undo_tracking: {
+      description: "Filesystem-class mock (import_* tools add project items)",
+      parameters: { type: "object", properties: {} },
+      handler: async () => ({ success: true, data: { tracking: (await import("../src/bridge/undo-tracking.js")).undoTrackingEnabled() } }),
+    },
+    set_mock_undo_tracking: {
+      description: "Mutating mock",
+      parameters: { type: "object", properties: {} },
+      handler: async () => {
+        await Promise.resolve();
+        return { success: true, data: { tracking: (await import("../src/bridge/undo-tracking.js")).undoTrackingEnabled() } };
+      },
+    },
   })),
 }));
 
@@ -27,6 +57,7 @@ vi.mock("../src/bridge/file-bridge.js", () => ({
   sendRawCommand: vi.fn().mockResolvedValue({ success: true, data: {} }),
   getTempDir: vi.fn().mockReturnValue("/tmp/test"),
   cleanupTempDir: vi.fn(),
+  withBridgeWorkflow: (_options: unknown, work: () => Promise<unknown>) => work(),
 }));
 
 // We need the real tool modules to verify registration,
@@ -168,5 +199,75 @@ describe("SERVER_VERSION", () => {
 
   it("is a concrete semver, never the 'unknown' fallback", () => {
     expect(SERVER_VERSION).toMatch(/^\d+\.\d+\.\d+/);
+  });
+});
+
+describe("unknown tool arguments", () => {
+  it("lists enum choices for top-level and nested array fields", async () => {
+    const server = createServer({});
+    const client = new Client({ name: "enum-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const outcome = await client.callTool({ name: "mock_enum_tool", arguments: { mode: "invalid", operations: [{ type: "invalid" }] } })
+        .then((result) => (result.content as Array<{ text?: string }>).map((entry) => entry.text ?? "").join("\n"), (error: Error) => error.message);
+      expect(outcome).toContain('allowed values: "normal", "multiply"');
+      expect(outcome).toContain('allowed values: "insert_clip", "remove_clip"');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+  it("scopes the common project guard without passing it into module arguments", async () => {
+    const server = createServer({});
+    const client = new Client({ name: "project-guard-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools.find((tool) => tool.name === "get_mock_undo_tracking")?.inputSchema.properties)
+        .toHaveProperty("expected_project_path");
+      const result = await client.callTool({ name: "get_mock_undo_tracking", arguments: { expected_project_path: "/target.prproj" } });
+      expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({ guard: "/target.prproj", args: {} });
+    } finally {
+      await client.close(); await server.close();
+    }
+  });
+
+  it("rejects a misspelled argument by name instead of silently using defaults", async () => {
+    const server = createServer({});
+    const client = new Client({ name: "unknown-arg-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const outcome = await client.callTool({ name: "mock_discovery_tool", arguments: { name: "x", nmae: "y" } })
+        .then((result) => JSON.stringify(result), (error: Error) => error.message);
+      expect(outcome).toContain("unknown argument nmae; this tool accepts: name");
+      const ok = await client.callTool({ name: "mock_discovery_tool", arguments: { name: "x" } });
+      expect(ok.isError).toBeFalsy();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});
+
+describe("undo tracking is scoped to tools that change the project", () => {
+  it("tracks for a mutating tool and not for a read-only one", async () => {
+    const server = createServer({});
+    const client = new Client({ name: "undo-scope-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const read = await client.callTool({ name: "get_mock_undo_tracking", arguments: {} });
+      const write = await client.callTool({ name: "set_mock_undo_tracking", arguments: {} });
+      expect(read.structuredContent).toMatchObject({ data: { tracking: false } });
+      expect(write.structuredContent).toMatchObject({ data: { tracking: true } });
+      const imported = await client.callTool({ name: "import_mock_undo_tracking", arguments: {} });
+      expect(imported.structuredContent).toMatchObject({ data: { tracking: true } });
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });

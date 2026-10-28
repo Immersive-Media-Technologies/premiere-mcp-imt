@@ -1,5 +1,23 @@
+import { sequenceReadProperties, sequenceReadScript, type SequenceReadArgs } from "./sequence-read.js";
 import { buildToolScript, buildScript, escapeForExtendScript } from "../bridge/script-builder.js";
 import { sendCommand, sendRawCommand, BridgeOptions } from "../bridge/file-bridge.js";
+
+/** Property walk only: app/qe, identifiers, and numeric indexes. No calls or statements. */
+const SAFE_DOM_OBJECT_PATH = /^(?:app|qe)(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\])*$/;
+
+function safeDomObjectPath(objectPath: unknown): { ok: true; path: string } | { ok: false; error: string } {
+  if (typeof objectPath !== "string" || objectPath.length === 0 || objectPath.length > 512) {
+    return { ok: false, error: "object_path must be a non-empty Premiere DOM path of at most 512 characters." };
+  }
+  if (!SAFE_DOM_OBJECT_PATH.test(objectPath)) {
+    return {
+      ok: false,
+      error:
+        "object_path must be a property path starting with app or qe (for example app.project.activeSequence.videoTracks[0]). Function calls, operators, and statements are rejected because inspect_dom_object is not an unsafe-script tool.",
+    };
+  }
+  return { ok: true, path: objectPath };
+}
 
 export function getScriptingTools(bridgeOptions: BridgeOptions) {
   return {
@@ -101,7 +119,7 @@ Examples:
     },
 
     inspect_dom_object: {
-      description: `Inspect a Premiere Pro DOM object and list its properties, methods, and values. Useful for exploring the API and debugging.
+      description: `Inspect a Premiere Pro DOM object and list its properties, methods, and values. Useful for exploring the API and debugging. object_path must be a property path starting with app or qe (identifiers and numeric indexes only). Function calls, operators, and statements are rejected; use evaluate_expression with unsafe-script for those.
 
 Examples:
 - "app.project" → project properties
@@ -113,7 +131,9 @@ Examples:
         properties: {
           object_path: {
             type: "string",
-            description: "Dot-path to the DOM object to inspect (e.g., 'app.project.activeSequence')",
+            minLength: 1,
+            maxLength: 512,
+            description: "Property path starting with app or qe (e.g. 'app.project.activeSequence.videoTracks[0]'). Function calls and statements are rejected.",
           },
           max_depth: {
             type: "number",
@@ -123,7 +143,10 @@ Examples:
         required: ["object_path"],
       },
       handler: async (args: { object_path: string; max_depth?: number }) => {
+        const objectPath = safeDomObjectPath(args.object_path);
+        if (!objectPath.ok) return { success: false, error: objectPath.error };
         const maxDepth = Math.min(args.max_depth ?? 1, 3);
+        const quotedPath = escapeForExtendScript(objectPath.path);
         const script = buildToolScript(`
           function inspectObj(obj, depth, maxD) {
             if (depth > maxD) return "<max depth>";
@@ -177,24 +200,24 @@ Examples:
           }
           
           try {
-            var obj = ${args.object_path};
-            if (obj === null || obj === undefined) return __error("Object is null or undefined: ${args.object_path}");
+            var obj = ${objectPath.path};
+            if (obj === null || obj === undefined) return __error("Object is null or undefined: ${quotedPath}");
             var inspection = inspectObj(obj, 0, ${maxDepth});
             return __result({
-              path: "${args.object_path}",
+              path: "${quotedPath}",
               type: typeof obj,
               inspection: inspection
             });
           } catch(e) {
-            return __error("Cannot access: ${args.object_path} — " + e.toString());
+            return __error("Cannot access: ${quotedPath} — " + e.toString());
           }
         `);
-        return sendRawCommand(script, bridgeOptions);
+        return sendCommand(script, bridgeOptions);
       },
     },
 
     list_clip_effects: {
-      description: "List all effects/components on a clip with their properties and current values. Essential for debugging effect issues.",
+      description: "List effects/components exposed by the clip's standard DOM collection, with properties and current values. Some hosts omit QE-applied effects from this collection; absence here does not prove an effect is absent. get_effect_properties uses the same collection. Inspect Premiere's Effect Controls UI when complete QE effect presence must be confirmed.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -208,7 +231,7 @@ Examples:
       handler: async (args: { node_id: string }) => {
         const script = buildToolScript(`
           var result = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}; nothing was changed.");
           
           var clip = result.clip;
           var components = [];
@@ -224,7 +247,14 @@ Examples:
                 matchName: ""
               };
               try { info.matchName = prop.matchName; } catch(e) {}
-              try { info.value = prop.getValue(0, 0); } catch(e) {}
+              var color = __readColorValue(prop);
+              if (color) {
+                info.value = color;
+                info.valueType = "color_argb";
+                try { if (prop.isTimeVarying()) info.note = "Animated colour: this is the current value, not a per-keyframe sample."; } catch (eColorAnimation) {}
+              } else {
+                try { info.value = prop.getValue(0, 0); } catch(e) {}
+              }
               try { info.isTimeVarying = prop.isTimeVarying(); } catch(e) {}
               try { info.keyframesSupported = prop.areKeyframesSupported(); } catch(e) {}
               props.push(info);
@@ -243,6 +273,8 @@ Examples:
             trackType: result.trackType,
             trackIndex: result.trackIndex,
             componentCount: components.length,
+            enumerationScope: "standard_dom_components",
+            qeEffectsComplete: false,
             components: components
           });
         `);
@@ -251,22 +283,27 @@ Examples:
     },
 
     get_sequence_structure: {
-      description: "Get a complete structural overview of the active sequence: all tracks, all clips with positions, gaps, and clip metadata. Essential for understanding timeline state before making edits.",
+      description: "Get a bounded structural page of the active sequence (50 clips by default; follow pagination.nextOffset): all track counts, paged clips with positions, gaps, and clip metadata. Essential for understanding timeline state before making edits.",
       parameters: {
         type: "object" as const,
         properties: {
+          ...sequenceReadProperties,
           sequence_id: {
             type: "string",
+            minLength: 1,
+            maxLength: 512,
             description: "Sequence name or ID. Uses active sequence if omitted.",
           },
         },
       },
-      handler: async (args: { sequence_id?: string }) => {
+      handler: async (args: SequenceReadArgs & { sequence_id?: string }) => {
         const seqLookup = args.sequence_id
-          ? `var seq = __findSequence("${args.sequence_id}"); if (!seq) return __error("Sequence not found");`
+          ? `var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}"); if (!seq) return __error("Sequence not found");`
           : `var seq = app.project.activeSequence; if (!seq) return __error("No active sequence");`;
 
+        const bounds = sequenceReadScript(args);
         const script = buildToolScript(`
+          ${bounds}
           ${seqLookup}
           
           var videoTracks = [];
@@ -275,6 +312,7 @@ Examples:
             var clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
+              if (!__readInclude(clip, "video", t)) continue;
               var clipInfo = {
                 index: c,
                 nodeId: clip.nodeId,
@@ -287,14 +325,14 @@ Examples:
                 mediaType: clip.mediaType,
                 enabled: true
               };
-              try { clipInfo.enabled = !clip.isDisabled(); } catch(e) {}
+              try { clipInfo.enabled = !__isClipDisabled(clip); } catch(e) {}
               try { clipInfo.speed = clip.getSpeed(); } catch(e) {}
-              clips.push(clipInfo);
+              __readPush(clips, clipInfo);
             }
             videoTracks.push({
               index: t,
               name: track.name,
-              clipCount: clips.length,
+              clipCount: track.clips.numItems,
               clips: clips,
               isMuted: track.isMuted(),
               isLocked: track.isLocked()
@@ -307,7 +345,8 @@ Examples:
             var clips = [];
             for (var c = 0; c < track.clips.numItems; c++) {
               var clip = track.clips[c];
-              clips.push({
+              if (!__readInclude(clip, "audio", t)) continue;
+              __readPush(clips, {
                 index: c,
                 nodeId: clip.nodeId,
                 name: clip.name,
@@ -322,14 +361,16 @@ Examples:
             audioTracks.push({
               index: t,
               name: track.name,
-              clipCount: clips.length,
+              clipCount: track.clips.numItems,
               clips: clips,
               isMuted: track.isMuted(),
               isLocked: track.isLocked()
             });
           }
           
-          return __result({
+          if (__readError) return __error(__readError);
+          return __readResult({
+            pagination: __readReceipt(),
             name: seq.name,
             id: seq.sequenceID,
             durationSeconds: __ticksToSeconds(seq.end),

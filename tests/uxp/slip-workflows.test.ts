@@ -39,6 +39,7 @@ function slipHost(options: SlipHostOptions = {}) {
   const videoTrack = { getTrackItems: vi.fn(async () => [item]) };
   const sequence = {
     guid: "sequence-1",
+    getTimebase: vi.fn(async () => "10160640000"),
     getVideoTrackCount: vi.fn(async () => 1),
     getVideoTrack: vi.fn(async () => videoTrack),
     getAudioTrackCount: vi.fn(async () => 0),
@@ -110,33 +111,32 @@ describe("guarded documented UXP track-item slip workflow", () => {
     })).resolves.toMatchObject({
       operationId: "slip-apply-1",
       slipped: true,
+      requestedSlipBySeconds: 2.5,
+      appliedSlipBySeconds: 2.52,
       outcome: "verified",
       before: expectedSnapshot,
-      after: { ...expectedSnapshot, inSeconds: 32.5, outSeconds: 42.5 },
+      after: { ...expectedSnapshot, inSeconds: 32.52, outSeconds: 42.52 },
       verificationBoundary: "track_item_source_and_timeline_readback",
     });
-    expect(value.state).toEqual({ start: 10, end: 20, inPoint: 32.5, outPoint: 42.5 });
+    expect(value.state).toEqual({ start: 10, end: 20, inPoint: 32.52, outPoint: 42.52 });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
     expect(value.project.executeTransaction.mock.calls[0]?.[1]).toBe("Slip timeline item source");
-    expect(value.item.createSetInPointAction).toHaveBeenCalledWith({ seconds: 32.5 });
-    expect(value.item.createSetOutPointAction).toHaveBeenCalledWith({ seconds: 42.5 });
+    expect(value.item.createSetInPointAction).toHaveBeenCalledWith({ seconds: 32.52 });
+    expect(value.item.createSetOutPointAction).toHaveBeenCalledWith({ seconds: 42.52 });
   });
 
   it("requires a complete unchanged snapshot, confirmation, replay key, forward 1x state, and valid source bounds before action creation", async () => {
-    const value = slipHost();
-    await expect(value.registry.dispatch("trackItem.slip", {
-      ...target, expectedSnapshot, slipBySeconds: 1, operationId: "missing-confirmation",
-    })).rejects.toMatchObject({ code: "UXP_CONFIRMATION_REQUIRED" });
-    await expect(value.registry.dispatch("trackItem.slip", {
-      ...target, expectedSnapshot, slipBySeconds: 1, confirmSlip: true,
-    })).rejects.toMatchObject({ code: "UXP_INVALID_ARGUMENT" });
-    await expect(value.registry.dispatch("trackItem.slip", {
-      ...target, expectedSnapshot: { ...expectedSnapshot, endSeconds: 21 }, slipBySeconds: 1, confirmSlip: true, operationId: "stale",
-    })).rejects.toMatchObject({ code: "UXP_STALE_TRACK_ITEM" });
-    await expect(value.registry.dispatch("trackItem.slip", {
-      ...target, expectedSnapshot, slipBySeconds: -31, confirmSlip: true, operationId: "negative-handle",
-    })).rejects.toMatchObject({ code: "UXP_TARGET_UNSUPPORTED" });
-    expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    const attempts = [
+      { args: { ...target, expectedSnapshot, slipBySeconds: 1, operationId: "missing-confirmation" }, code: "UXP_CONFIRMATION_REQUIRED" },
+      { args: { ...target, expectedSnapshot, slipBySeconds: 1, confirmSlip: true }, code: "UXP_INVALID_ARGUMENT" },
+      { args: { ...target, expectedSnapshot: { ...expectedSnapshot, endSeconds: 21 }, slipBySeconds: 1, confirmSlip: true, operationId: "stale" }, code: "UXP_STALE_TRACK_ITEM" },
+      { args: { ...target, expectedSnapshot, slipBySeconds: -31, confirmSlip: true, operationId: "negative-handle" }, code: "UXP_TARGET_UNSUPPORTED" },
+    ];
+    for (const attempt of attempts) {
+      const value = slipHost();
+      await expect(value.registry.dispatch("trackItem.slip", attempt.args)).rejects.toMatchObject({ code: attempt.code });
+      expect(value.project.executeTransaction).not.toHaveBeenCalled();
+    }
 
     const reverse = slipHost({ reverse: true });
     await expect(reverse.registry.dispatch("trackItem.slip", {
@@ -152,6 +152,27 @@ describe("guarded documented UXP track-item slip workflow", () => {
     await expect(value.registry.dispatch("trackItem.slip", args)).resolves.toMatchObject({ outcome: "verified", replayed: true });
     expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
     expect(value.state).toEqual({ start: 10, end: 20, inPoint: 31, outPoint: 41 });
+  });
+
+  it.each(["unreadable", "sequence changed", "divergent"])("retains and replays a committed slip receipt when readback is %s", async (failure) => {
+    const value = slipHost();
+    value.project.executeTransaction.mockImplementationOnce((callback) => {
+      callback({ addAction: (action: { apply: () => void }) => { action.apply(); return true; } });
+      if (failure === "unreadable") value.item.getStartTime.mockRejectedValue(new Error("host read failed"));
+      if (failure === "sequence changed") value.project.getActiveSequence.mockResolvedValue({ guid: "other" } as never);
+      if (failure === "divergent") { value.state.start += 1; value.state.end += 1; }
+      return true;
+    });
+    const args = { ...target, expectedSnapshot, slipBySeconds: 1, confirmSlip: true, operationId: "partial-slip" };
+    const result = await value.registry.dispatch("trackItem.slip", args);
+    expect(result).toMatchObject({ slipped: false, committed: true, verified: false, partial: true,
+      outcome: "committed_unverified", rollbackPerformed: false, before: expectedSnapshot,
+      nextStep: expect.stringContaining("linked audio") });
+    if (failure === "divergent") expect(result.after).toMatchObject({ startSeconds: 11, inSeconds: 31 });
+    else expect(result.after).toBeNull();
+    if (failure === "sequence changed") await expect(value.registry.dispatch("trackItem.slip", args)).rejects.toMatchObject({ code: "UXP_OPERATION_CONFLICT" });
+    else await expect(value.registry.dispatch("trackItem.slip", args)).resolves.toMatchObject({ ...result, replayed: true });
+    expect(value.project.executeTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("serializes different operation IDs through preflight, action creation, and readback so a stale later snapshot cannot slip the wrong source", async () => {

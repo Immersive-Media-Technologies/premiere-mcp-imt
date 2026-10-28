@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { cleanupTempDirs, makeTempDir } from "../helpers/temp-dir.js";
 import {
   compareCmx3600Edls,
   getInterchangeAnalysisTools,
@@ -11,6 +12,8 @@ import {
   timecodeToFrames,
   validateCmx3600Edl,
 } from "../../src/tools/interchange-analysis.js";
+
+afterAll(cleanupTempDirs);
 
 const tools = getInterchangeAnalysisTools({ tempDir: "/tmp/interchange-analysis" });
 
@@ -22,7 +25,7 @@ const BASE_EDL = [
 ].join("\n");
 
 function writeFixture(name: string, contents: string): string {
-  const directory = mkdtempSync(join(tmpdir(), "premiere-interchange-"));
+  const directory = makeTempDir("premiere-interchange-");
   const path = join(directory, name);
   writeFileSync(path, contents);
   return path;
@@ -51,6 +54,18 @@ describe("CMX 3600 parsing and validation", () => {
     expect(() => timecodeToFrames("00:01:00;00", 29.97)).toThrow("Invalid dropped frame");
     expect(() => timecodeToFrames("00:00:60:00", 24)).toThrow("Invalid timecode fields");
     expect(() => timecodeToFrames("not timecode", 24)).toThrow("Invalid timecode");
+  });
+
+  it("accepts Premiere's all-semicolon drop-frame timecode in events", () => {
+    expect(timecodeToFrames("00;01;00;02", 29.97)).toBe(timecodeToFrames("00:01:00;02", 29.97));
+    expect(timecodeToFrames("01;00;00;00", 59.94)).toBe(timecodeToFrames("01:00:00;00", 59.94));
+    expect(() => timecodeToFrames("00;01;00;00", 29.97)).toThrow("Invalid dropped frame");
+    expect(() => timecodeToFrames("00;00;01;00", 24)).toThrow("Drop-frame separator");
+    expect(() => timecodeToFrames("00;01;00:02", 29.97)).toThrow("Invalid timecode");
+    const parsed = parseCmx3600Edl("FCM: DROP FRAME\n001  CAM_A    V     C        00;01;00;02 00;01;01;00 01;00;00;00 01;00;00;28");
+    expect(parsed.unrecognizedEventLines).toEqual([]);
+    expect(parsed.events[0]).toMatchObject({ sourceIn: "00;01;00;02", recordOut: "01;00;00;28" });
+    expect(validateCmx3600Edl(parsed, 29.97)).toMatchObject({ valid: true, totalRecordFrames: 28 });
   });
 
   it("detects duplicate IDs, invalid durations, overlaps, gaps, and invalid event timecodes", () => {
@@ -125,11 +140,11 @@ describe("FCPXML inspection and approved-root reference verification", () => {
       ],
       warnings: ["DOCTYPE is present; this tool inspects text only and never resolves entities"],
     });
-    expect(inspectFcpxml("<sequence />").warnings).toContain("No <fcpxml> root element was found");
+    expect(inspectFcpxml("<sequence />").warnings).toContain("No <fcpxml> or <xmeml> root element was found");
   });
 
   it("verifies only file URLs inside caller-approved roots and hides denied paths", async () => {
-    const root = mkdtempSync(join(tmpdir(), "premiere-interchange-root-"));
+    const root = makeTempDir("premiere-interchange-root-");
     const allowedMedia = join(root, "media.mov");
     writeFileSync(allowedMedia, "media");
     const nested = join(root, "nested");
@@ -149,13 +164,14 @@ describe("FCPXML inspection and approved-root reference verification", () => {
     expect(result).toMatchObject({
       success: true,
       data: {
-        checkedReferenceCount: 5,
+        checkedReferenceCount: 4,
+        generatedNoFileCount: 1,
         references: [
           { assetId: "r1", status: "available", path: allowedMedia },
           { assetId: "r2", status: "missing", path: missingMedia },
           { assetId: "r3", status: "outside_allowed_roots" },
           { assetId: "r4", status: "non_file_url" },
-          { assetId: "r5", status: "missing_source" },
+          { assetId: "r5", status: "generated_no_file" },
         ],
       },
     });

@@ -1,3 +1,4 @@
+import { expectedProjectPath, expectedHostTarget } from "./project-guard.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -36,6 +37,9 @@ export function sendAfterEffectsCommand(
   script: string,
   options: BridgeOptions = {},
 ): Promise<CommandResult> {
+  if (expectedProjectPath() !== undefined || expectedHostTarget() !== undefined) {
+    return Promise.resolve({ success: false, error: "expected_project_path is a Premiere CEP guard and cannot guard an After Effects command" });
+  }
   // `BridgeOptions` is also used by Premiere callers.  Its tempDir is therefore
   // deliberately ignored here: an explicit Premiere bridge directory must never
   // become the AE request/response channel.
@@ -44,5 +48,9 @@ export function sendAfterEffectsCommand(
     ...afterEffectsOptions,
     tempDir: getAfterEffectsTempDir(),
     helpers: AFTER_EFFECTS_BRIDGE_HELPERS,
+    hostLabel: "After Effects",
+    // The bundled AE panel always publishes a heartbeat; none means AE or the
+    // panel is not running, so fail now rather than after the full timeout.
+    requireHeartbeat: true,
   });
 }

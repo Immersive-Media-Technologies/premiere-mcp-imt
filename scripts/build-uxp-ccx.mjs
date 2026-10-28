@@ -241,7 +241,7 @@ async function main() {
   await mkdir(artifacts, { recursive: true });
   const output = path.join(
     artifacts,
-    `premiere-pro-mcp-uxp-${packageJson.version}-${channel}.ccx`,
+    `premiere-mcp-imt-uxp-${packageJson.version}-${channel}.ccx`,
   );
   await writeFile(output, archive);
   console.log(`Built ${path.relative(root, output)}`);

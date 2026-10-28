@@ -1,27 +1,69 @@
+import { dirname } from "node:path";
 import {
   buildToolScript,
   escapeForExtendScript,
 } from "../bridge/script-builder.js";
-import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
+import { runWithExpectedProject, runWithExpectedHostTarget } from "../bridge/project-guard.js";
+import { runWithUndoTracking } from "../bridge/undo-tracking.js";
+import { sendCommand, withBridgeWorkflow, BridgeOptions } from "../bridge/file-bridge.js";
+import { applyScratchDisks } from "./scratch-disks.js";
+
+const PROJECT_PANEL_METADATA_MIN_CHARS = 256;
+const PROJECT_PANEL_METADATA_MAX_CHARS = 200000;
+const PROJECT_PANEL_METADATA_DEFAULT_CHARS = 20000;
 
 export function getProjectTools(bridgeOptions: BridgeOptions) {
   return {
     save_project: {
-      description: "Save the current Premiere Pro project",
+      description:
+        "Save the current Premiere Pro project to its existing path. Fails when the project has never been saved (use save_project_as) or when Premiere writes no non-empty file. Fresh disk metadata verifies a save; unchanged or unreadable metadata reports committed_unverified.",
       parameters: {},
       handler: async () => {
         const script = buildToolScript(`
           var project = app.project;
           if (!project) return __error("No project is open");
-          project.save();
-          return __result({ saved: true, name: project.name, path: project.path });
+          var projectPath = String(project.path || "");
+          if (!projectPath) {
+            return __error("This project has no saved path; use save_project_as. Premiere was not asked to save.");
+          }
+          var outputFile = new File(projectPath);
+          if (!outputFile.parent || !outputFile.parent.exists) {
+            return __error("The project directory does not exist: " + outputFile.parent + "; Premiere was not asked to save.");
+          }
+          function saveFileEvidence(file) {
+            try {
+              var exists = !!file.exists;
+              var length = file.length;
+              var stamp = null;
+              try {
+                var modified = file.modified;
+                var value = modified && typeof modified.valueOf === "function" ? modified.valueOf() : null;
+                if (typeof value === "number" && isFinite(value)) stamp = value;
+              } catch (eModified) {}
+              return { exists: exists, length: typeof length === "number" && isFinite(length) ? length : null, modified: stamp };
+            } catch (eEvidence) { return null; }
+          }
+          var beforeSave = saveFileEvidence(outputFile);
+          var saveError = null;
+          try { project.save(); } catch (eSave) { saveError = String(eSave); }
+          outputFile = new File(projectPath);
+          var afterSave = saveFileEvidence(outputFile);
+          if (saveError && (!afterSave || afterSave.length === null)) return __error("Premiere save threw: " + saveError + "; disk evidence is unreadable. Inspect before retrying.", { mutationAttempted: true, mutationOutcome: "unknown", timelineChanged: null, verified: false });
+          if (!afterSave || afterSave.length === null) return __result({ saved: null, saveRequested: true, verified: false, outcome: "committed_unverified", name: project.name, path: projectPath, warning: "Save was requested, but disk evidence is unreadable; inspect the project before retrying." });
+          if (!afterSave.exists || !(afterSave.length > 0)) {
+            return __error("Premiere did not write a non-empty project file at " + projectPath + "; inspect the project before retrying.", { mutationAttempted: true, mutationOutcome: "unknown", timelineChanged: null, verified: false });
+          }
+          var fresh = beforeSave && (!beforeSave.exists || (beforeSave.length !== null && afterSave.length !== beforeSave.length) || (beforeSave.modified !== null && afterSave.modified !== null && afterSave.modified > beforeSave.modified));
+          if (saveError && !fresh) return __error("Premiere save threw: " + saveError + "; disk evidence cannot confirm a fresh write. Inspect before retrying.", { mutationAttempted: true, mutationOutcome: "unknown", timelineChanged: null, verified: false });
+          return __result({ saved: fresh ? true : null, saveRequested: true, verified: !!fresh, outcome: fresh ? "verified" : "committed_unverified", name: project.name, path: projectPath, warning: fresh ? (saveError ? "Premiere save threw after a fresh disk write was observed: " + saveError : null) : "Save was requested, but the existing file does not prove a fresh write; inspect the project before retrying." });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     save_project_as: {
-      description: "Save the current project to a new location",
+      description:
+        "Save the current project to a new .prproj path. Premiere then has the NEW copy open and closes the original, so later edits go to the copy; the result reports both paths. Fails when Premiere writes no file or leaves a pre-existing path unchanged. Use open_project to return to the original.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -34,18 +76,64 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         required: ["path"],
       },
       handler: async (args: { path: string }) => {
+        if (typeof args.path !== "string" || !/\.prproj$/i.test(args.path.trim())) {
+          return { success: false, error: "path must be a .prproj file path" };
+        }
+        const target = escapeForExtendScript(args.path.trim());
         const script = buildToolScript(`
           var project = app.project;
           if (!project) return __error("No project is open");
-          project.saveAs("${escapeForExtendScript(args.path)}");
-          return __result({ saved: true, path: "${escapeForExtendScript(args.path)}" });
+          var previousPath = String(project.path || "");
+          if (__normProjectPath(previousPath) === __normProjectPath("${target}")) {
+            return __error("That is the current project's own path; use save_project instead.");
+          }
+          var outputFile = new File("${target}");
+          if (!outputFile.parent || !outputFile.parent.exists) {
+            return __error("The Save As directory does not exist: " + outputFile.parent);
+          }
+          var existedBefore = !!outputFile.exists;
+          var lengthBefore = existedBefore ? Number(outputFile.length) : -1;
+          if (existedBefore && !isFinite(lengthBefore)) return __error("Cannot read the existing output size; Save As was not attempted.");
+          function readModified(file) {
+            try {
+              var modified = file.modified;
+              var stamp = modified && typeof modified.valueOf === "function" ? modified.valueOf() : null;
+              return typeof stamp === "number" && isFinite(stamp) ? stamp : null;
+            } catch (eModified) { return null; }
+          }
+          var modifiedBefore = existedBefore ? readModified(outputFile) : null;
+          project.saveAs("${target}");
+          if (!outputFile.exists || !(outputFile.length > 0)) return __error("Premiere did not write a non-empty project file at ${target}; inspect the active project before retrying.");
+          var modifiedAfter = readModified(outputFile);
+          if (existedBefore && Number(outputFile.length) === lengthBefore) {
+            if (modifiedBefore === null || modifiedAfter === null) {
+              return __error("Cannot verify a new project file at ${target}: the size is unchanged and a modification timestamp is unreadable. Inspect the active project before retrying.");
+            }
+            if (modifiedAfter === modifiedBefore) {
+              return __error("Premiere did not write a new project file at ${target} (the existing output was unchanged).");
+            }
+          }
+          var activePath = app.project ? String(app.project.path || "") : "";
+          var switched = __normProjectPath(activePath) === __normProjectPath("${target}");
+          return __result({
+            saved: true,
+            verified: true,
+            path: "${target}",
+            activeProjectPath: activePath,
+            previousProjectPath: previousPath,
+            previousProjectStillOpen: !!__findOpenProject(previousPath),
+            note: switched
+              ? "Premiere now has the new copy open and active; later edits change the copy. Reopen the original with open_project to keep working there."
+              : "The copy was written; the active project is unchanged."
+          });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     open_project: {
-      description: "Open a Premiere Pro project file",
+      description:
+        "Open a Premiere Pro project file and make it the active project, verifying it is open. Other open projects stay open.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -57,10 +145,49 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         required: ["path"],
       },
       handler: async (args: { path: string }) => {
+        const target = escapeForExtendScript(args.path);
         const script = buildToolScript(`
-          app.openDocument("${escapeForExtendScript(args.path)}");
+          if (!(new File("${target}")).exists) return __error("Project file not found: ${target}");
+          var existing = __findOpenProject("${target}");
+          var alreadyOpen = !!existing;
+          var opened = null;
+          // Switching projects: the undo index read at the start belongs to the old project.
+          __undoStart = null;
+          var activatedVia = "openDocument";
+          if (existing && __normProjectPath(app.project ? app.project.path : "") !== __normProjectPath("${target}")) {
+            // openDocument returns false for a project that is already open and leaves
+            // it in the background (live 25.2). Opening one of its sequences brings the
+            // project to the front; prefer the sequence it already had active.
+            var focusSequence = null;
+            try { focusSequence = existing.activeSequence; } catch (eActive) {}
+            if (!focusSequence && existing.sequences && existing.sequences.numSequences > 0) focusSequence = existing.sequences[0];
+            if (!focusSequence) return __error("${target} is already open in the background and has no sequence to bring it to the front with; switch to it in Premiere.");
+            opened = existing.openSequence(focusSequence.sequenceID);
+            activatedVia = "openSequence:" + focusSequence.name;
+            if (__normProjectPath(app.project ? app.project.path : "") !== __normProjectPath("${target}")) {
+              // Opening the timeline that already has focus is a no-op (a new empty
+              // project keeps the previous project's timeline focused), so open
+              // another of its sequences first, then return to the intended one.
+              for (var si = 0; si < existing.sequences.numSequences; si++) {
+                var otherSeq = existing.sequences[si];
+                if (String(otherSeq.sequenceID) !== String(focusSequence.sequenceID)) {
+                  existing.openSequence(otherSeq.sequenceID);
+                  opened = existing.openSequence(focusSequence.sequenceID);
+                  activatedVia = "openSequence:" + otherSeq.name + ">" + focusSequence.name;
+                  break;
+                }
+              }
+            }
+          } else if (!existing) {
+            opened = app.openDocument("${target}");
+          }
           var project = app.project;
-          return __result({ opened: true, name: project.name, path: project.path });
+          if (!project || __normProjectPath(project.path) !== __normProjectPath("${target}")) {
+            return __error("Premiere did not open " + "${target}" + " as the active project" + (opened === false ? " (openDocument returned false)" : "") + "; the active project is " + (project ? project.path : "none") + ".");
+          }
+          var activeSeq = null;
+          try { activeSeq = project.activeSequence ? project.activeSequence.name : null; } catch (eSeq) {}
+          return __result({ opened: true, verified: true, alreadyOpen: alreadyOpen, activatedVia: activatedVia, name: project.name, path: project.path, activeSequence: activeSeq, openProjects: __openProjectPaths() });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -81,7 +208,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { sequence_id: string }) => {
         const script = buildToolScript(`
           var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}");
-          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}");
+          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}; nothing was changed.");
           app.project.activeSequence = seq;
           var active = __getCurrentActiveSequence();
           if (!active || String(active.sequenceID) !== String(seq.sequenceID)) {
@@ -95,7 +222,8 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
 
     undo: {
       description:
-        "Unavailable: Premiere exposes no supported, observable undo-stack API, so a scripted undo cannot be performed or verified.",
+        "EXPERIMENTAL (undocumented QE DOM: qe.project.undo / undoStackIndex). Undo the most recent Premiere project action(s) through QE, checked step by step against Premiere's undo-stack position (stackVerified; the timeline itself is not read back). Undo history is project-wide." +
+        " Only actions Premiere records are undoable: QE edits such as razor, insert, lift and extract report undoSteps (and undoStackIndex) in their results; pass that undoSteps as count to reverse exactly that call. A marker receipt with undoTracked:false recorded no undo step: calling Undo for it would reverse an earlier action. Only CEP tool results carry undoSteps; UXP tools and workflows that send several commands are not counted. Always pass expected_undo_stack_index to check the stack position, but matching position alone does not prove which action is on top. Observed marker boundaries refuse the entire request before any step unless acknowledge_untracked_markers:true explicitly permits prior non-marker actions. The barrier persists through server/helper reloads while the CEP engine remains alive; it cannot account for marker writes before observation, after an engine reset, or through UXP, the manual UI, or other clients. Matching the QE index verifies stack position only.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -103,18 +231,44 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
             type: "number",
             description: "Number of times to undo (default: 1)",
           },
+          acknowledge_untracked_markers: {
+            type: "boolean",
+            description: "Explicitly acknowledge that QE steps reverse or restore prior non-marker actions, because marker reversal is not verified. Default false; marker boundaries refuse the entire request before any step.",
+          },
+          expected_undo_stack_index: {
+            type: "number",
+            description:
+              "Required safety guard: the undoStackIndex a tool result reported right after the call you want to reverse. The step is refused, with nothing changed, when Premiere's undo-stack position differs from it. The guard compares the position only; matching position cannot prove which action is on top.",
+          },
         },
+        required: ["expected_undo_stack_index"],
       },
-      handler: async (args: { count?: number }) => {
+      handler: async (args: { count?: number; expected_undo_stack_index?: number; acknowledge_untracked_markers?: boolean }) => {
         const count = args.count ?? 1;
         if (!Number.isInteger(count) || count < 1 || count > 100) {
           return { success: false, error: "count must be an integer from 1 through 100" };
         }
-        return {
-          success: false,
-          error:
-            "undo is unavailable because Premiere exposes no supported undo API: app.project.undo is not a function on current Premiere builds, and no undo-stack query exists to verify an undo against. No mutation was attempted. Undo the action from Premiere's Edit menu instead.",
-        };
+        const guardArg = args.expected_undo_stack_index;
+        if (!Number.isInteger(guardArg) || guardArg! < 0) {
+          return { success: false, error: "expected_undo_stack_index is required and must be a non-negative integer; undo was not attempted" };
+        }
+        const guard = String(guardArg);
+        const script = buildToolScript(`
+          __undoStart = null;
+          var expectedIndex = ${guard};
+          if (expectedIndex !== null) {
+            var currentIndex = __readUndoIndex();
+            if (currentIndex === null || typeof currentIndex === "undefined" || isNaN(Number(currentIndex))) {
+              return __jsonStringify({ success: false, error: "Premiere did not expose undoStackIndex; undo was not attempted", data: { expectedUndoStackIndex: expectedIndex } });
+            }
+            if (currentIndex !== expectedIndex) {
+              return __jsonStringify({ success: false, error: "Premiere's undo stack is at " + currentIndex + ", not the expected " + expectedIndex + ": the undo-stack position changed since that call (actions were undone or recorded), so undo was not attempted.", data: { undoStackIndex: currentIndex, expectedUndoStackIndex: expectedIndex } });
+            }
+          }
+          var outcome = __qeUndoSteps("undo", ${count}, ${args.acknowledge_untracked_markers === true ? "true" : "false"});
+          return __undoStepsResult(outcome, "undone");
+        `);
+        return sendCommand(script, bridgeOptions);
       },
     },
 
@@ -213,12 +367,14 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         const script = buildToolScript(`
           var requestedPath = "${escapeForExtendScript(requestedPath)}";
           function __normalizedProjectPath(path) {
-            return String(path || "").replace(/\\\\/g, "/").toLowerCase();
+            return __hostPathKey(path);
           }
           var beforePath = app.project ? String(app.project.path || "") : "";
           if (__normalizedProjectPath(beforePath) === __normalizedProjectPath(requestedPath)) {
             return __error("A project is already open at " + requestedPath + "; choose a new .prproj file path instead.");
           }
+          // A new project has its own undo stack; do not report a count across it.
+          __undoStart = null;
           app.newProject(requestedPath);
           var project = app.project;
           var actualPath = project ? String(project.path || "") : "";
@@ -243,7 +399,8 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
     },
 
     close_project: {
-      description: "Close the current Premiere Pro project",
+      description:
+        "Close an open Premiere Pro project: the active one, or the open project at project_path. Captures the close reply without reading torn-down project objects, then verifies closure and the active project in a separate read-only call. An unreadable verification remains committed_unverified; a native close that never returns remains unknown.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -251,18 +408,61 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
             type: "boolean",
             description: "Whether to save before closing (default: true)",
           },
+          project_path: {
+            type: "string",
+            description: "Path of the open project to close (default: the active project)",
+          },
         },
       },
-      handler: async (args: { save_first?: boolean }) => {
+      handler: async (args: { save_first?: boolean; project_path?: string }) => {
         const save = args.save_first !== false;
+        const lookup = args.project_path
+          ? `var project = __findOpenProject("${escapeForExtendScript(args.project_path)}"); if (!project) return __error("No open project at ${escapeForExtendScript(args.project_path)}; open projects: " + __openProjectPaths().join(", "));`
+          : `var project = app.project; if (!project) return __error("No project is open");`;
         const script = buildToolScript(`
-          var project = app.project;
-          if (!project) return __error("No project is open");
-          var name = project.name;
-          project.closeDocument(${save ? "1" : "0"}, ${save ? "0" : "0"});
-          return __result({ closed: true, name: name, saved: ${save} });
+          ${lookup}
+          var name = String(project.name || "");
+          var path = String(project.path || "");
+          var documentId = String(project.documentID || "");
+          if (!path && !documentId) return __error("Project identity is unreadable; nothing was closed.");
+          // No project-scoped object may be read after closeDocument returns.
+          __undoStart = null;
+          var closed = project.closeDocument(${save ? "1" : "0"}, 0);
+          return __jsonStringify({ success: true, data: { closeRequested: true, closed: null,
+            verified: false, outcome: "committed_unverified", name: name, path: path,
+            documentId: documentId, saved: ${save}, closeAccepted: closed === true ? true : (closed === false ? false : null) } });
         `);
-        return sendCommand(script, bridgeOptions);
+        return withBridgeWorkflow(bridgeOptions, async () => {
+          // Closing the last project unloads the visible panel mid-command; the
+          // headless connector engine survives the close and can reply.
+          const result = await sendCommand(script, { ...bridgeOptions, mutating: true, mutationOnTimeout: true, hostEngine: "headless" });
+          if (!result.success) return result;
+          const data = result.data as { closeRequested?: boolean; path?: string; documentId?: string };
+          if (data?.closeRequested !== true || typeof data.path !== "string" || typeof data.documentId !== "string") return result;
+          // Closure deliberately changes the active project. Only this read-only
+          // observation clears the old active-project and target guards.
+          const verification = runWithExpectedProject(undefined, () => runWithExpectedHostTarget(undefined, () => runWithUndoTracking(false, () => buildToolScript(`
+            var targetPath = "${escapeForExtendScript(data.path!)}", targetId = "${escapeForExtendScript(data.documentId!)}";
+            var projects = app.projects;
+            if (!projects || typeof projects.numProjects !== "number" || !isFinite(projects.numProjects) || projects.numProjects < 0 || Math.floor(projects.numProjects) !== projects.numProjects || projects.numProjects > 256) return __error("Open project collection is unreadable");
+            var paths = [], stillOpen = false;
+            for (var i = 0; i < projects.numProjects; i++) {
+              var candidate = projects[i], candidatePath = String(candidate.path || ""), candidateId = String(candidate.documentID || "");
+              paths.push(candidatePath);
+              if ((targetPath && __normProjectPath(candidatePath) === __normProjectPath(targetPath)) || (targetId && candidateId === targetId)) stillOpen = true;
+            }
+            var active = app.project;
+            return __result({ closed: !stillOpen, activeProjectPath: active ? String(active.path || "") : null, openProjects: paths });
+          `))));
+          let observed;
+          try { observed = await sendCommand(verification, { ...bridgeOptions, mutating: false, mutationOnTimeout: false, timeoutMs: Math.min(bridgeOptions.timeoutMs || 5000, 5000) }); }
+          catch (error) { observed = { success: false, error: String(error) }; }
+          if (!observed.success) return { success: true, data: { ...data, closed: null, verified: false, outcome: "committed_unverified", verificationError: observed.error || "Independent close verification unavailable" } };
+          const state = observed.data as { closed?: boolean; activeProjectPath?: string | null; openProjects?: string[] };
+          if (state?.closed !== true && state?.closed !== false) return { success: true, data: { ...data, closed: null, verified: false, outcome: "committed_unverified", verificationError: "Independent close verification returned no closure state" } };
+          const receipt = { ...data, ...state, verified: state.closed === true, outcome: state.closed ? "verified" : "failed" };
+          return state.closed ? { success: true, data: receipt } : { success: false, error: "Premiere still reports the requested project open.", data: receipt };
+        });
       },
     },
 
@@ -370,7 +570,8 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
     },
 
     delete_bin: {
-      description: "Delete a bin (folder) from the project panel",
+      description:
+        "Delete a bin (folder) and everything inside it from the project panel, and read back that it is gone. Deleting a bin also removes its media's clips from every sequence and deletes sequences stored in the bin, so a bin whose contents are used on a timeline — including a Sequences bin whose media lives elsewhere — is refused unless confirm_remove_from_sequences is true; the refusal lists the sequences and tracks (see find_item_usages). Bins holding offline media are refused unless allow_offline is true.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -378,21 +579,37 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
             type: "string",
             description: "Name or node ID of the bin to delete",
           },
+          confirm_remove_from_sequences: {
+            type: "boolean",
+            description: "Delete even when something inside the bin is used in a sequence, which also removes those timeline clips (default: false).",
+          },
+          allow_offline: {
+            type: "boolean",
+            description: "Also delete a bin that holds offline (missing-media) items. Premiere can open a modal while deleting missing media, which blocks every later bridge command until it is closed (default: false).",
+          },
         },
         required: ["bin_id"],
       },
-      handler: async (args: { bin_id: string }) => {
+      handler: async (args: { bin_id: string; confirm_remove_from_sequences?: boolean; allow_offline?: boolean }) => {
         const script = buildToolScript(`
           var bin = __findProjectItem("${escapeForExtendScript(args.bin_id)}");
-          if (!bin) return __error("Bin not found: ${escapeForExtendScript(args.bin_id)}");
+          if (!bin) return __error("Bin not found: ${escapeForExtendScript(args.bin_id)}; nothing was changed.");
           if (bin.type !== 2) return __error("Item is not a bin");
           var nodeId = String(bin.nodeId);
           var name = bin.name;
+          var usage = __projectItemUsage(bin);
+          if (usage.clips > 0 && ${args.confirm_remove_from_sequences === true ? "false" : "true"}) {
+            return __jsonStringify({ success: false, error: name + " holds media used by " + usage.clips + " timeline clip(s) in " + usage.sequences.join(", ") + ". Deleting the bin would remove those clips too, and this cannot be undone here, so nothing was deleted. Move the used items out first, or pass confirm_remove_from_sequences: true.", data: { code: "ITEM_IN_USE", usages: usage.details } });
+          }
+          var offline = __offlineItemsIn(bin);
+          if (offline.length > 0 && ${args.allow_offline === true ? "false" : "true"}) {
+            return __jsonStringify({ success: false, error: name + " holds offline media: " + offline.join(", ") + ". Premiere can open a modal while deleting missing media, which blocks the bridge, so nothing was deleted. Use organize_project_items_uxp with action 'remove', delete it in the Project panel, or pass allow_offline: true.", data: { code: "ITEM_OFFLINE", offlineItems: offline } });
+          }
           bin.deleteBin();
           if (__findProjectItem(nodeId)) {
             return __error("Premiere did not remove bin: " + name + ". The deletion is not reported as successful.");
           }
-          return __result({ deleted: true, verified: true, name: name, nodeId: nodeId });
+          return __result({ deleted: true, verified: true, name: name, nodeId: nodeId, timelineClipsRemoved: usage.clips, sequencesChanged: usage.sequences });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -417,18 +634,19 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { bin_id: string; new_name: string }) => {
         const script = buildToolScript(`
           var bin = __findProjectItem("${escapeForExtendScript(args.bin_id)}");
-          if (!bin) return __error("Bin not found: ${escapeForExtendScript(args.bin_id)}");
+          if (!bin) return __error("Bin not found: ${escapeForExtendScript(args.bin_id)}; nothing was changed.");
           if (bin.type !== 2) return __error("Item is not a bin");
           var oldName = bin.name;
           bin.renameBin("${escapeForExtendScript(args.new_name)}");
-          return __result({ renamed: true, oldName: oldName, newName: "${escapeForExtendScript(args.new_name)}" });
+          if (String(bin.name) !== "${escapeForExtendScript(args.new_name)}") return __error("Premiere kept the bin name " + bin.name + ".");
+          return __result({ renamed: true, verified: true, oldName: oldName, newName: bin.name });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     create_smart_bin: {
-      description: "Create a smart bin (search bin) in the project panel",
+      description: "Create a smart bin (search bin) and inspect its new identity and name. The stored search query has no getter, so creation reports committed_unverified with identity verification separately.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -444,9 +662,33 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         required: ["name", "query"],
       },
       handler: async (args: { name: string; query: string }) => {
+        if (typeof args.name !== "string" || !args.name.trim() || typeof args.query !== "string" || !args.query.trim()) {
+          return { success: false as const, error: "name and query must be non-empty strings" };
+        }
         const script = buildToolScript(`
-          app.project.rootItem.createSmartBin("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(args.query)}");
-          return __result({ created: true, name: "${escapeForExtendScript(args.name)}", query: "${escapeForExtendScript(args.query)}" });
+          var root = app.project.rootItem, before = {}, readable = true;
+          try {
+            if (!root.children || typeof root.children.numItems !== "number") throw new Error("Children unreadable");
+            for (var b = 0; b < root.children.numItems; b++) {
+              if (!root.children[b] || root.children[b].nodeId === undefined) throw new Error("Identity unreadable");
+              before[String(root.children[b].nodeId)] = true;
+            }
+          } catch (eBefore) { readable = false; }
+          root.createSmartBin("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(args.query)}");
+          var found = null;
+          try {
+            if (!root.children || typeof root.children.numItems !== "number") throw new Error("Children unreadable");
+            for (var c = 0; c < root.children.numItems; c++) {
+              var child = root.children[c];
+              if (!child || child.nodeId === undefined) throw new Error("Identity unreadable");
+              if (!before[String(child.nodeId)] && String(child.name) === "${escapeForExtendScript(args.name)}") found = child;
+            }
+          } catch (eAfter) { readable = false; }
+          if (readable && !found) return __error("Premiere produced no new smart bin with the requested name.", { created: false, verified: false, outcome: "failed" });
+          return __result({ created: readable && found ? true : null, name: found ? found.name : null,
+            requestedName: "${escapeForExtendScript(args.name)}", query: "${escapeForExtendScript(args.query)}",
+            nodeId: found ? String(found.nodeId) : null, identityVerified: !!(readable && found), verified: false,
+            outcome: "committed_unverified", verificationScope: "Only new item identity and name can be read back; the stored smart-bin query cannot be verified." });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -475,7 +717,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
               items.push({
                 nodeId: matches[i].nodeId,
                 name: matches[i].name,
-                type: matches[i].type === 1 ? "clip" : matches[i].type === 2 ? "bin" : "sequence"
+                type: __projectItemKind(matches[i])
               });
             }
           }
@@ -607,7 +849,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
 
     create_bars_and_tone: {
       description:
-        "Create a Bars and Tone synthetic media item in the project (useful for leader/calibration)",
+        "Create a Bars and Tone synthetic media item in the project (useful for leader/calibration). Returns the created item's name, nodeId, and treePath, found by reading the project back.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -641,9 +883,15 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
             description:
               "Name for the bars and tone item (default: 'Bars and Tone')",
           },
+          bin_id: {
+            type: "string",
+            description:
+              "Optional destination bin: node ID, slash-separated bin path from the project root, or bin name. The bin is resolved before anything is created; the item is moved there and its location read back.",
+          },
         },
       },
       handler: async (args: {
+        bin_id?: string;
         width?: number;
         height?: number;
         timebase?: string;
@@ -667,21 +915,52 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
           var seq = app.project.activeSequence;
           var timebase = parseFloat(${args.timebase ? `"${escapeForExtendScript(args.timebase)}"` : `seq ? seq.timebase : "254016000000"`});
           if (!isFinite(timebase) || timebase <= 0) return __error("A positive sequence timebase is required to create bars and tone.");
-          var item = app.project.newBarsAndTone(
+          var requestedName = "${escapeForExtendScript(name)}";
+          var targetBin = null;
+          ${args.bin_id !== undefined ? `targetBin = __findBin("${escapeForExtendScript(String(args.bin_id))}");
+          if (!targetBin) return __error("Bin not found: ${escapeForExtendScript(String(args.bin_id))}. Nothing was created.");` : ""}
+          // newBarsAndTone does not reliably return a ProjectItem with name and
+          // nodeId (issue #588), so diff the project tree to find what it made.
+          var beforeIds = __collectNodeIds(app.project.rootItem, {});
+          var returned = app.project.newBarsAndTone(
             ${w},
             ${h},
             timebase,
             ${parNum},
             ${parDen},
             ${audioSampleRate},
-            "${escapeForExtendScript(name)}"
+            requestedName
           );
-          if (!item) return __error("Premiere did not create the Bars and Tone project item.");
+          var item = null;
+          var returnedId = returned ? __nodeIdOf(returned) : "";
+          if (returnedId) item = __findProjectItemByNodeId(returnedId);
+          if (!item) item = __findNewProjectItem(beforeIds, requestedName);
+          if (!item) {
+            return __error(returned
+              ? "Premiere reported Bars and Tone creation, but readback found no new project item."
+              : "Premiere did not create the Bars and Tone project item.");
+          }
+          var itemName = requestedName;
+          try { itemName = item.name; } catch (eName) {}
+          var binPlacement = null;
+          if (targetBin) {
+            try { item.moveBin(targetBin); } catch (eMove) {}
+            var inBin = false;
+            try { inBin = String(item.treePath).indexOf(String(targetBin.treePath) + "\\\\") === 0; } catch (eInBin) {}
+            binPlacement = { bin: targetBin.name, moved: inBin };
+          }
+          var treePath = null;
+          try { treePath = item.treePath; } catch (eTreePath) {}
+          var placedOk = !binPlacement || binPlacement.moved;
           return __result({
             created: true,
-            verified: true,
-            name: item.name,
-            nodeId: item.nodeId,
+            verified: placedOk,
+            outcome: placedOk ? "verified" : "committed_unverified",
+            bin: binPlacement,
+            note: placedOk ? null : "The item was created but could not be confirmed in the requested bin; move it with move_item_to_bin.",
+            name: itemName,
+            nodeId: __nodeIdOf(item),
+            treePath: treePath,
             width: ${w},
             height: ${h},
             pixelAspectRatio: "${parNum}:${parDen}",
@@ -694,7 +973,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
 
     import_fcp_xml: {
       description:
-        "Open a Final Cut Pro XML file as a new Premiere project. app.openFCPXML(path, projPath) requires a destination project path; it does not merge the XML into the currently open project. verified is true only when that destination exists as a file and Premiere has that exact path open.",
+        "Import a Final Cut Pro XML file. Default mode new_project opens it as a new Premiere project: app.openFCPXML(path, projPath) requires a destination project path, and verified is true only when that destination exists as a file and Premiere has that exact path open. Mode into_open_project instead imports the XML into the currently open project with project.importFiles and succeeds only when the sequence count grew; the XML also brings its own clips, which can duplicate existing items, or Premiere can link them to existing items that point at the same media. That mode reports reusedItems (pre-existing project items and their bins that the new sequences use), so a later bin cleanup does not silently empty the new timelines.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -705,14 +984,90 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
           project_path: {
             type: "string",
             description:
-              "Full path of the new .prproj file Premiere should create for the imported timeline. Required: app.openFCPXML takes both a source and a destination path.",
+              "Full path of the new .prproj file Premiere should create for the imported timeline. Required in new_project mode (app.openFCPXML takes both a source and a destination path); ignored in into_open_project mode.",
+          },
+          mode: {
+            type: "string",
+            enum: ["new_project", "into_open_project"],
+            description: "new_project (default) opens the XML as a new project saved at project_path. into_open_project imports it into the open project.",
+          },
+          target_bin: {
+            type: "string",
+            description: "into_open_project mode only: bin name or node ID to import into. Defaults to the project root.",
           },
         },
-        required: ["path", "project_path"],
+        required: ["path"],
       },
-      handler: async (args: { path: string; project_path: string }) => {
+      handler: async (args: { path: string; project_path?: string; mode?: "new_project" | "into_open_project"; target_bin?: string }) => {
         if (typeof args.path !== "string" || !args.path.trim()) {
           return { success: false, error: "path must be a non-empty path to an FCP XML file" };
+        }
+        if (args.mode !== undefined && args.mode !== "new_project" && args.mode !== "into_open_project") {
+          return { success: false, error: "mode must be new_project or into_open_project" };
+        }
+        if (args.mode === "into_open_project") {
+          const binLookup = args.target_bin
+            ? `var targetBin = __findProjectItem("${escapeForExtendScript(args.target_bin)}");
+               if (!targetBin) return __error("Bin not found: ${escapeForExtendScript(args.target_bin)}");`
+            : `var targetBin = app.project.rootItem;`;
+          const intoScript = buildToolScript(`
+            var xmlFile = new File("${escapeForExtendScript(args.path)}");
+            if (!xmlFile.exists) return __error("FCP XML file not found on disk: ${escapeForExtendScript(args.path)}; nothing was changed.");
+            if (!app.project) return __error("No open project to import into");
+            ${binLookup}
+            var sequencesBefore = app.project.sequences.numSequences;
+            // Premiere can link the XML's clips to project items that already
+            // point at the same media instead of importing new ones. Record which
+            // items existed (and where) so the reuse can be reported: deleting the
+            // old bin later would also remove the new sequences' clips.
+            var existingItems = {};
+            var walk = function (bin, binPath) {
+              var count = __childCount(bin);
+              for (var w = 0; w < count; w++) {
+                var child = __childAt(bin, w);
+                if (!child) continue;
+                if (__isBinItem(child)) walk(child, binPath + "/" + child.name);
+                else existingItems[String(child.nodeId)] = binPath || "/";
+              }
+            };
+            walk(app.project.rootItem, "");
+            var sequenceIdsBefore = {};
+            for (var sb = 0; sb < sequencesBefore; sb++) sequenceIdsBefore[String(app.project.sequences[sb].sequenceID)] = true;
+            var importReturned = app.project.importFiles([xmlFile.fsName], true, targetBin, false);
+            var sequencesAfter = app.project.sequences.numSequences;
+            if (!(sequencesAfter > sequencesBefore)) {
+              return __jsonStringify({ success: false, error: "Premiere did not add a sequence from the FCP XML; nothing verifiable was imported.", data: { importReturned: !!importReturned, sequencesBefore: sequencesBefore, sequencesAfter: sequencesAfter } });
+            }
+            var reused = [];
+            var reusedSeen = {};
+            var newClipItems = {};
+            var newSequenceNames = [];
+            for (var sa = 0; sa < sequencesAfter; sa++) {
+              var importedSeq = app.project.sequences[sa];
+              if (sequenceIdsBefore[String(importedSeq.sequenceID)]) continue;
+              newSequenceNames.push(String(importedSeq.name));
+              var trackGroups = [importedSeq.videoTracks, importedSeq.audioTracks];
+              for (var tg = 0; tg < trackGroups.length; tg++) {
+                for (var tt = 0; tt < trackGroups[tg].numTracks; tt++) {
+                  var importedClips = trackGroups[tg][tt].clips;
+                  for (var ic = 0; ic < importedClips.numItems; ic++) {
+                    var clipItem = null;
+                    try { clipItem = importedClips[ic].projectItem; } catch (eItem) {}
+                    if (!clipItem) continue;
+                    var clipItemId = String(clipItem.nodeId);
+                    if (existingItems[clipItemId] === undefined) { newClipItems[clipItemId] = true; continue; }
+                    if (reusedSeen[clipItemId] || reused.length >= 200) continue;
+                    reusedSeen[clipItemId] = true;
+                    reused.push({ nodeId: clipItemId, name: String(clipItem.name), bin: existingItems[clipItemId] });
+                  }
+                }
+              }
+            }
+            var newItemCount = 0;
+            for (var nk in newClipItems) if (newClipItems.hasOwnProperty(nk)) newItemCount++;
+            return __result({ imported: true, verified: true, mode: "into_open_project", newSequences: sequencesAfter - sequencesBefore, newSequenceNames: newSequenceNames, sequenceCount: sequencesAfter, targetBin: targetBin.name, reusedItems: reused, reusedItemCount: reused.length, newClipItemCount: newItemCount, reuseNote: reused.length > 0 ? "The new sequences use project items that existed before this import. Deleting those items or their bins also removes these clips; check with find_item_usages first." : "No pre-existing project items are used by the new sequences." });
+          `);
+          return sendCommand(intoScript, bridgeOptions);
         }
         if (typeof args.project_path !== "string" || !args.project_path.trim()) {
           return {
@@ -723,12 +1078,12 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
         }
         const xmlPath = escapeForExtendScript(args.path);
         const projectPath = escapeForExtendScript(args.project_path);
+        const projectFolder = escapeForExtendScript(dirname(args.project_path));
         const script = buildToolScript(`
           var xmlFile = new File("${xmlPath}");
-          if (!xmlFile.exists) return __error("FCP XML file not found on disk: ${xmlPath}");
+          if (!xmlFile.exists) return __error("FCP XML file not found on disk: ${xmlPath}; nothing was changed.");
           var destinationFile = new File("${projectPath}");
-          var destinationFolder = new Folder("${projectPath}");
-          if (destinationFolder.exists) {
+          if (__isDirectory("${projectPath}")) {
             return __error("project_path exists as a directory, not a .prproj file: ${projectPath}. Choose a destination file path that does not already exist as a folder.");
           }
           if (destinationFile.exists) {
@@ -738,35 +1093,103 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
           if (typeof app.openFCPXML !== "function") {
             return __error("This Premiere build does not expose app.openFCPXML, so FCP XML cannot be imported.");
           }
+          var before = __openProjectPaths();
+          // Projects already in the folders Premiere may import into. Only a
+          // project that did not exist before this call can be treated as the
+          // intermediate copy and deleted.
+          var preexistingProjects = {};
+          // Where Premiere may write the intermediate project. Live 25.2.3 (macOS):
+          // Folder.temp is ".../T/TemporaryItems" but Premiere wrote ".../T/lv.prproj"
+          // (the process temp dir, spelled /var rather than /private/var).
+          var importRootPaths = [Folder.temp.fsName, "${projectFolder}"];
+          try { if (Folder.temp.parent) importRootPaths.push(Folder.temp.parent.fsName); } catch (eParent) {}
+          try { var tmpDir = $.getenv("TMPDIR"); if (tmpDir) importRootPaths.push(tmpDir); } catch (eEnv) {}
+          // /private/var and /var are the same directory on macOS.
+          var normImportPath = function (path) { return __normProjectPath(path).replace(/^\\/private\\//, "/").replace(/\\/+$/, ""); };
+          var projectSearchRoots = [];
+          for (var ir = 0; ir < importRootPaths.length; ir++) projectSearchRoots.push(new Folder(importRootPaths[ir]));
+          for (var pr = 0; pr < projectSearchRoots.length; pr++) {
+            var found = [];
+            // Every entry, not a "*.prproj" mask: the mask can miss "CUT.PRPROJ".
+            try { if (projectSearchRoots[pr].exists) found = projectSearchRoots[pr].getFiles() || []; } catch (eList) {}
+            for (var pf = 0; pf < found.length; pf++) preexistingProjects[normImportPath(found[pf].fsName)] = true;
+          }
           try {
-            app.openFCPXML("${xmlPath}", "${projectPath}");
+            // The second argument behaves as a folder prefix (live 25.2: "<project_path>cut.1.prproj"),
+            // so hand Premiere the destination folder and save the result to project_path below.
+            app.openFCPXML("${xmlPath}", "${projectFolder}/");
           } catch (importError) {
             return __error("Premiere could not open the FCP XML file: " + importError.toString());
           }
 
-          var openedPath = "";
-          try { openedPath = String(app.project.path); } catch (pathError) { openedPath = ""; }
-          destinationFile = new File("${projectPath}");
-          destinationFolder = new Folder("${projectPath}");
-          var destExistsAsFile = destinationFile.exists && !destinationFolder.exists;
-          function __normalizeProjectPath(value) {
-            return String(value || "").replace(/\\\\/g, "/").toLowerCase();
+          // Live 25.2: Premiere imports into a new project in the system temp folder
+          // named after the XML, and creates an empty FOLDER at project_path. Find the
+          // newly opened project and save it to the requested path.
+          var imported = null;
+          var opened = __openProjects();
+          for (var i = 0; i < opened.length; i++) {
+            var known = false;
+            for (var j = 0; j < before.length; j++) if (__normProjectPath(before[j]) === __normProjectPath(opened[i].path)) known = true;
+            if (!known) { imported = opened[i]; break; }
           }
-          var openedMatches = destExistsAsFile && openedPath
-            && __normalizeProjectPath(openedPath) === __normalizeProjectPath(destinationFile.fsName);
-          if (!destExistsAsFile && !openedPath) {
-            return __error("Premiere returned without an error, but no project file was created at ${projectPath} and no project path is readable, so the FCP XML import is not verified.");
+          if (!imported) return __error("Premiere returned without an error but opened no new project for ${xmlPath}; nothing was imported.");
+          var importedAt = String(imported.path);
+          var intermediateRemoved = false;
+          var intermediateKeptAt = null;
+          if (__normProjectPath(importedAt) !== __normProjectPath("${projectPath}")) {
+            if (__isDirectory("${projectPath}") && Folder("${projectPath}").getFiles().length === 0) Folder("${projectPath}").remove();
+            try { imported.saveAs("${projectPath}"); } catch (saveError) {}
+            // saveAs swaps the open project; look it up again rather than trusting the old object.
+            imported = __findOpenProject("${projectPath}") || imported;
+            // Only delete Premiere's intermediate copy when it sits where this call
+            // told Premiere to write (the system temp folder or the destination
+            // folder) and did not exist before the call; anything else is left on
+            // disk and reported.
+            var intermediateNorm = normImportPath(importedAt);
+            var ownedRoots = [];
+            for (var orp = 0; orp < importRootPaths.length; orp++) ownedRoots.push(normImportPath(importRootPaths[orp]));
+            var intermediateOwned = false;
+            if (/\\.prproj$/.test(intermediateNorm) && intermediateNorm.indexOf("/../") < 0 && !preexistingProjects[intermediateNorm]) {
+              for (var ri = 0; ri < ownedRoots.length; ri++) {
+                var ownedPrefix = ownedRoots[ri] ? ownedRoots[ri] + "/" : "";
+                // Direct children only: the snapshot above lists each folder's own files.
+                if (ownedPrefix && intermediateNorm.indexOf(ownedPrefix) === 0 && intermediateNorm.substring(ownedPrefix.length).indexOf("/") < 0) intermediateOwned = true;
+              }
+            }
+            if (!intermediateOwned) {
+              intermediateKeptAt = importedAt;
+            } else if (!__findOpenProject(importedAt)) {
+              var intermediate = new File(importedAt);
+              if (intermediate.exists) intermediateRemoved = intermediate.remove();
+            }
           }
-
+          var saved = new File("${projectPath}");
+          var savedIsFile = saved.exists && !__isDirectory("${projectPath}");
+          if (!savedIsFile || !__findOpenProject("${projectPath}")) {
+            return __jsonStringify({ success: false,
+              error: "Premiere imported the XML into " + importedAt + " but it could not be saved to ${projectPath}.",
+              data: { importedProjectPath: importedAt, openProjects: __openProjectPaths() } });
+          }
+          var sequences = [];
+          for (var s = 0; s < imported.sequences.numSequences && s < 50; s++) {
+            var seq = imported.sequences[s];
+            var clipCount = 0;
+            for (var v = 0; v < seq.videoTracks.numTracks; v++) clipCount += seq.videoTracks[v].clips.numItems;
+            for (var a = 0; a < seq.audioTracks.numTracks; a++) clipCount += seq.audioTracks[a].clips.numItems;
+            sequences.push({ name: seq.name, id: seq.sequenceID, clipCount: clipCount });
+          }
           return __result({
             imported: true,
-            verified: destExistsAsFile && openedMatches,
+            verified: true,
             path: "${xmlPath}",
-            projectPath: "${projectPath}",
-            openedProjectPath: openedPath,
-            verification: openedMatches
-              ? "Destination project file exists and Premiere has that exact path open. Timeline, media links, and effect fidelity are not verified."
-              : "Premiere did not open the requested destination project_path. An empty folder or a different project is not treated as verified."
+            projectPath: String(imported.path),
+            premiereImportPath: importedAt,
+            intermediateRemoved: intermediateRemoved,
+            intermediateKeptAt: intermediateKeptAt,
+            sequences: sequences,
+            activeProjectPath: app.project ? String(app.project.path) : null,
+            openProjects: __openProjectPaths(),
+            note: "The XML opened as its own project; switch between projects with open_project. Timeline, media links and effects are not compared with the source."
           });
         `);
         return sendCommand(script, bridgeOptions);
@@ -774,7 +1197,7 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
     },
 
     set_transcode_on_ingest: {
-      description: "Enable or disable transcoding on ingest for the project",
+      description: "Request enabling or disabling project transcoding on ingest. Premiere exposes no getter for independent verification, so dispatch is reported as requested_unverified.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -787,8 +1210,15 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
       },
       handler: async (args: { enabled: boolean }) => {
         const script = buildToolScript(`
-          app.project.setEnableTranscodeOnIngest(${args.enabled ? 1 : 0});
-          return __result({ set: true, transcodeOnIngest: ${args.enabled} });
+          if (!app.project || typeof app.project.setEnableTranscodeOnIngest !== "function") {
+            return __error("This Premiere build does not expose setEnableTranscodeOnIngest; no change was attempted.");
+          }
+          var hostReturn;
+          try { hostReturn = app.project.setEnableTranscodeOnIngest(${args.enabled ? 1 : 0}); }
+          catch (ingestError) {
+            return __error("Premiere threw while requesting transcode on ingest: " + ingestError.toString(), { outcome: "failed", mutationOutcome: "unknown", verified: false, mutationAttempted: true, requestedEnabled: ${args.enabled}, note: "The setter may have changed project state before throwing. Inspect Project Settings before retrying." });
+          }
+          return __result({ requestedEnabled: ${args.enabled}, requestSent: true, hostReturn: hostReturn, outcome: "requested_unverified", verified: false, verificationScope: "Premiere exposes no ingest-transcode getter; check Project Settings to confirm the requested state." });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -810,13 +1240,48 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
 
     get_project_panel_metadata: {
       description:
-        "Get the current Project-panel column layout as XML. This is schema/layout configuration, not per-item Scene/Shot/Take values; use inspect_project_panel_metadata_uxp item_columns or get_metadata for those.",
-      parameters: {},
-      handler: async () => {
+        "Get the current Project-panel column layout as XML. This is schema/layout configuration, not per-item Scene/Shot/Take values; use inspect_project_panel_metadata_uxp item_columns or get_metadata for those. Output is capped by max_chars (default 20000); when truncated is true the XML is incomplete and must not be passed to set_project_panel_metadata.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          max_chars: {
+            type: "integer",
+            minimum: PROJECT_PANEL_METADATA_MIN_CHARS,
+            maximum: PROJECT_PANEL_METADATA_MAX_CHARS,
+            description: `Maximum characters of metadata XML to return (${PROJECT_PANEL_METADATA_MIN_CHARS}-${PROJECT_PANEL_METADATA_MAX_CHARS}, default ${PROJECT_PANEL_METADATA_DEFAULT_CHARS}). Longer XML is cut at this length and reported with truncated: true and totalChars.`,
+          },
+        },
+      },
+      handler: async (args: { max_chars?: number } = {}) => {
+        const maxChars = args?.max_chars ?? PROJECT_PANEL_METADATA_DEFAULT_CHARS;
+        if (
+          typeof maxChars !== "number" ||
+          !Number.isInteger(maxChars) ||
+          maxChars < PROJECT_PANEL_METADATA_MIN_CHARS ||
+          maxChars > PROJECT_PANEL_METADATA_MAX_CHARS
+        ) {
+          return {
+            success: false,
+            error: `max_chars must be an integer between ${PROJECT_PANEL_METADATA_MIN_CHARS} and ${PROJECT_PANEL_METADATA_MAX_CHARS}`,
+          };
+        }
         const script = buildToolScript(`
           var meta = app.project.getProjectPanelMetadata();
           if (!meta) return __error("Could not retrieve project panel metadata");
-          return __result({ metadata: meta });
+          var text = String(meta);
+          var maxChars = ${maxChars};
+          var totalChars = text.length;
+          if (totalChars > maxChars) {
+            return __result({
+              metadata: text.substring(0, maxChars),
+              truncated: true,
+              totalChars: totalChars,
+              returnedChars: maxChars,
+              maxChars: maxChars,
+              note: "Metadata XML was truncated and is not well-formed. Raise max_chars (up to ${PROJECT_PANEL_METADATA_MAX_CHARS}) to read more; do not pass truncated XML to set_project_panel_metadata."
+            });
+          }
+          return __result({ metadata: text, truncated: false, totalChars: totalChars, returnedChars: totalChars, maxChars: maxChars });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -883,35 +1348,41 @@ export function getProjectTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { luminance: number }) => {
         const script = buildToolScript(`
           app.project.setGraphicsWhiteLuminance(${args.luminance});
-          return __result({ set: true, graphicsWhiteLuminance: ${args.luminance} });
+          var observed = null;
+          try { observed = app.project.getGraphicsWhiteLuminance(); } catch (eRead) {}
+          if (observed !== ${args.luminance}) return __error("Premiere's graphics white luminance reads " + observed + " instead of ${args.luminance}.");
+          return __result({ set: true, verified: true, graphicsWhiteLuminance: observed });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     set_scratch_disk_path: {
-      description: "Set the scratch disk path for a specific media type",
+      description:
+        "Set one project scratch disk (captured media, previews, auto-save, CC Libraries or Motion Graphics template media) to an existing folder or \"SameAsProject\", using Premiere's ScratchDiskType constants.",
       parameters: {
         type: "object" as const,
         properties: {
           scratch_disk_type: {
             type: "string",
-            description:
-              "Type: 'capturedVideo', 'capturedAudio', 'videoPreview', 'audioPreview', 'autoSave', 'ccLibraries'",
+            enum: ["capturedVideo", "capturedAudio", "videoPreview", "audioPreview", "autoSave", "ccLibraries", "motionGraphicsTemplateMedia"],
+            description: "Which scratch disk to set",
           },
           path: {
             type: "string",
-            description: "Full directory path for the scratch disk",
+            description: "Absolute path of an existing folder, or \"SameAsProject\"",
+          },
+          save_and_verify: {
+            type: "boolean",
+            description:
+              "Save the project afterwards and confirm the saved scratch-disk settings (default: false). Premiere has no scratch-disk getter, so without this the result is unverified.",
           },
         },
         required: ["scratch_disk_type", "path"],
       },
-      handler: async (args: { scratch_disk_type: string; path: string }) => {
-        const script = buildToolScript(`
-          app.setScratchDiskPath("${escapeForExtendScript(args.path)}", "${escapeForExtendScript(args.scratch_disk_type)}");
-          return __result({ set: true, type: "${escapeForExtendScript(args.scratch_disk_type)}", path: "${escapeForExtendScript(args.path)}" });
-        `);
-        return sendCommand(script, bridgeOptions);
+      handler: async (args: { scratch_disk_type: string; path: string; save_and_verify?: boolean }) => {
+        const key = ({ videoPreview: "videoPreviews", audioPreview: "audioPreviews" } as Record<string, string>)[args.scratch_disk_type] ?? args.scratch_disk_type;
+        return applyScratchDisks(bridgeOptions, [{ key, path: args.path }], args.save_and_verify === true);
       },
     },
   };

@@ -26,7 +26,7 @@ describe("buildScript", () => {
     expect(result).toContain("function __getAllClips(seq)");
     expect(result).toContain("function __jsonStringify(obj)");
     expect(result).toContain("function __result(data)");
-    expect(result).toContain("function __error(msg)");
+    expect(result).toContain("function __error(msg, extraData)");
   });
 
   it("preserves multi-line code blocks", () => {
@@ -120,7 +120,9 @@ describe("generated script structure", () => {
 
   it("__findProjectItem recursively searches bins", () => {
     const result = getHelpersSource();
-    expect(result).toContain("if (item.type === 2)");
+    expect(result).toContain("if (__isBinItem(item))");
+    expect(result).toContain("function __findProjectItemByNodeId(nodeId, rootItem)");
+    expect(result).toContain("var count = __childCount(rootItem);");
     expect(result).toContain("var found = __findProjectItem(nodeIdOrName, item);");
   });
 
@@ -144,7 +146,7 @@ describe("generated script structure", () => {
 
   it("__jsonStringify handles all types", () => {
     const result = getHelpersSource();
-    expect(result).toContain('if (obj === null) return "null"');
+    expect(result).toContain('if (obj === null || obj === undefined) return "null"');
     expect(result).toContain('if (typeof obj === "string")');
     expect(result).toContain('if (typeof obj === "number"');
     expect(result).toContain("if (obj instanceof Array)");
@@ -165,6 +167,85 @@ describe("helpers execute correctly in an ES3-like engine", () => {
     expect(out).toBe('{"success":true,"data":{"connected":true,"nested":{"n":1,"arr":[1,"a",false,null]}}}');
   });
 
+  it("reads work-area points as seconds and converts only tick-sized values (#642)", () => {
+    const out = runInNewContext(
+      getHelpersSource() + '\n[__workAreaSeconds("4"), __workAreaSeconds(12.5), __workAreaSeconds("1016064000000"), __workAreaSeconds("-400000"), __workAreaSeconds("n/a")].join("|");',
+      {},
+    );
+    expect(out).toBe("4|12.5|4||");
+  });
+
+  it("matches a QE clip by DOM start time past a leading gap and never returns a neighbour (#642)", () => {
+    const T = 254016000000;
+    const items = [
+      { type: "Empty", name: "gap", start: { ticks: "0" } },
+      { type: "Clip", name: "A", start: { ticks: String(5 * T) } },
+      { type: "Empty", name: "gap2", start: { ticks: String(8 * T) } },
+      { type: "Clip", name: "B", start: { ticks: String(10 * T) } },
+    ];
+    const sandbox = {
+      qeTrack: { numItems: items.length, getItemAt: (i: number) => items[i] },
+      domA: { start: { ticks: String(5 * T) } },
+      domB: { start: { ticks: String(10 * T) } },
+      domMissing: { start: { ticks: String(6 * T) } },
+      domBroken: { start: null },
+    };
+    const out = runInNewContext(
+      getHelpersSource() + `
+      var r = [];
+      r.push(__findQeClipByDomClip(qeTrack, domA).name);
+      r.push(__findQeClipByDomClip(qeTrack, domB).name);
+      r.push(__findQeClipByDomClip(qeTrack, domMissing) === null);
+      r.push(__findQeClipByDomClip(qeTrack, domBroken) === null);
+      r.push(__findQeClipByDomClip(null, domA) === null);
+      r.join("|");`,
+      sandbox,
+    );
+    expect(out).toBe("A|B|true|true|true");
+  });
+
+  it("__result always emits valid JSON for NaN, Infinity, undefined, functions, and control characters", () => {
+    // A single NaN (for example a missing Time read) or a tab/CR in a clip name
+    // or marker comment used to make the entire tool response unparseable.
+    const text = 'tab\there\r\nCRLF "q" back\\slash \u0001 \u2028 end';
+    const out = runInNewContext(
+      getHelpersSource() +
+        "\n__result({ nan: NaN, inf: -Infinity, missing: undefined, fn: function () {}, text: value, list: [1, undefined, NaN, function () {}], ok: 0.5 });",
+      { value: text },
+    ) as string;
+    expect(() => JSON.parse(out)).not.toThrow();
+    expect(JSON.parse(out)).toEqual({
+      success: true,
+      data: { nan: null, inf: null, text, list: [1, null, null, null], ok: 0.5 },
+    });
+  });
+
+  it("__error escapes control characters in messages", () => {
+    const out = runInNewContext(getHelpersSource() + '\n__error("line1\\r\\nline2\\t\\u0007");', {}) as string;
+    expect(JSON.parse(out)).toEqual({ success: false, error: "line1\r\nline2\t\u0007" });
+  });
+
+  it("__ticksToTimecode counts whole frames without float drift", () => {
+    const tc = (seconds: number, fps: number) =>
+      runInNewContext(getHelpersSource() + `\n__ticksToTimecode(${Math.round(seconds * 254016000000)}, ${fps});`, {}) as string;
+    // Live Premiere 25.2: 121.6 s at 25 fps is 3040 frames = 00:02:01:15 (was :14).
+    expect(tc(121.6, 25)).toBe("00:02:01:15");
+    expect(tc(0, 25)).toBe("00:00:00:00");
+    expect(tc(3600 + 61 + 23 / 24, 24)).toBe("01:01:01:23");
+    expect(tc(10.08, 25)).toBe("00:00:10:02");
+  });
+
+  it("__isClipDisabled reads the disabled property (Premiere 25.2 has no isDisabled())", () => {
+    const run = (clip: unknown) => runInNewContext(getHelpersSource() + "\n__isClipDisabled(clip);", { clip });
+    expect(run({ disabled: true })).toBe(true);
+    expect(run({ disabled: false })).toBe(false);
+    expect(run({ disabled: 1 })).toBe(true);
+    expect(run({ disabled: 0 })).toBe(false);
+    expect(run({ disabled: true, isDisabled: () => false })).toBe(true);
+    expect(run({ isDisabled: () => true })).toBe(true);
+    expect(run({})).toBe(false);
+  });
+
   it("a stale wrapper from an older helpers version gets replaced", () => {
     // Simulate a polluted long-lived engine: JSON.stringify is our old-style wrapper.
     const stale = { stringify: function badWrapper(o: unknown) { return "__jsonStringify" + String(o); } };
@@ -173,5 +254,236 @@ describe("helpers execute correctly in an ES3-like engine", () => {
     const json = sandbox.JSON as { stringify: (o: unknown) => string; __mcpPolyfill?: boolean };
     expect(json.__mcpPolyfill).toBe(true);
     expect(json.stringify({ ok: 1 })).toBe('{"ok":1}');
+  });
+});
+
+describe("__exportStillFrame AME fallback restores sequence in/out", () => {
+  const TICKS = 254016000000;
+
+  function FileStub(this: { fsName: string; exists: boolean; length: number; name: string; parent: { exists: boolean; getFiles: () => unknown[] }; remove: () => void; rename: () => void }, path: string) {
+    this.fsName = path;
+    this.exists = false;
+    this.length = 0;
+    this.name = path.split("/").pop() || path;
+    this.parent = { exists: true, getFiles: () => [] };
+    this.remove = () => undefined;
+    this.rename = () => undefined;
+  }
+
+  function runExport(sequence: Record<string, unknown>, atTicks = TICKS * 5) {
+    if (!sequence.getSettings) sequence.getSettings = () => ({ audioSampleRate: 48000 });
+    for (const name of ["setInPoint", "setOutPoint"]) {
+      const write = sequence[name];
+      if (typeof write === "function") sequence[name] = (seconds: number) => write(seconds < 0 ? seconds : Math.floor(seconds * 48000 + 1e-9) / 48000);
+    }
+    const sandbox: Record<string, unknown> = {
+      File: FileStub,
+      Folder: function Folder() { return {}; },
+      Time: function Time() { return { ticks: "0", getFormatted: () => "00:00:00:00" }; },
+      app: {
+        enableQE() { throw new Error("QE unavailable"); },
+        encoder: { ENCODE_IN_TO_OUT: 1 },
+        project: { activeSequence: sequence },
+      },
+    };
+    return runInNewContext(
+      `${getHelpersSource()}
+      __findStillPreset = function () { return "/tmp/still.epr"; };
+      __exportStillFrame("/tmp/frame.png", "${atTicks}");`,
+      sandbox,
+    ) as { ok: boolean; notes?: string[]; error?: string };
+  }
+
+  it("exports the requested NTSC frame after sample-grid flooring", () => {
+    let inside=10, outside=20;
+    const exported: number[][]=[];
+    runExport({ sequenceID:"sequence-1", timebase:"8475667200", getInPointAsTime:()=>({ticks:String(inside*TICKS)}), getOutPointAsTime:()=>({ticks:String(outside*TICKS)}), setInPoint:(n:number)=>{inside=n;}, setOutPoint:(n:number)=>{outside=n;}, exportAsMediaDirect:()=>{exported.push([inside,outside]);} },8475667200);
+    expect(exported).toHaveLength(1);
+    expect(exported[0][0]).toBeGreaterThanOrEqual(1001/30000);
+    expect(exported[0][1]).toBeGreaterThanOrEqual(2*1001/30000);
+    expect([inside,outside]).toEqual([10,20]);
+  });
+  it("keeps a frame just above an audio sample on or after its actual start", () => {
+    let inside=10,outside=20;
+    const frame=Math.round(TICKS/239),target=49*frame,exported:number[]=[];
+    runExport({sequenceID:"sequence-1",timebase:String(frame),getInPointAsTime:()=>({ticks:String(inside*TICKS)}),getOutPointAsTime:()=>({ticks:String(outside*TICKS)}),setInPoint:(n:number)=>{inside=n;},setOutPoint:(n:number)=>{outside=n;},exportAsMediaDirect:()=>{exported.push(inside);}},target);
+    expect(exported).toHaveLength(1);
+    expect(exported[0]*TICKS).toBeGreaterThanOrEqual(target);
+  });
+  it("does not export when the host ignores temporary range writes", () => {
+    let exports=0;
+    runExport({ sequenceID:"sequence-1", timebase:"8475667200", getInPointAsTime:()=>({ticks:String(10*TICKS)}), getOutPointAsTime:()=>({ticks:String(20*TICKS)}), setInPoint:()=>{}, setOutPoint:()=>{}, exportAsMediaDirect:()=>{exports++;} },8475667200);
+    expect(exports).toBe(0);
+  });
+  it("rejects a negative still-export boundary before writing marks", () => {
+    let writes=0;
+    runExport({ sequenceID:"sequence-1", timebase:"8475667200", getInPointAsTime:()=>({ticks:"0"}), getOutPointAsTime:()=>({ticks:String(20*TICKS)}), setInPoint:()=>{writes++;}, setOutPoint:()=>{writes++;}, exportAsMediaDirect:()=>{} },-1);
+    expect(writes).toBe(0);
+  });
+  it("does not change in/out when Premiere cannot read them", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    const result = runExport({
+      name: "Seq",
+      timebase: String(TICKS / 24),
+      getPlayerPosition() { return { ticks: String(TICKS * 5) }; },
+      getInPointAsTime() { throw new Error("getInPointAsTime unavailable"); },
+      getOutPointAsTime() { throw new Error("getOutPointAsTime unavailable"); },
+      setInPoint(value: number) { marks.inPoint = value; },
+      setOutPoint(value: number) { marks.outPoint = value; },
+      exportAsMediaDirect() { throw new Error("export should not run"); },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.notes?.join(" ")).toMatch(/could not read sequence in\/out points/);
+    expect(marks).toEqual({ inPoint: 10, outPoint: 20 });
+  });
+
+  it("restores both marks when setOutPoint throws after setInPoint", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    const result = runExport({
+      name: "Seq",
+      timebase: String(TICKS / 24),
+      getPlayerPosition() { return { ticks: String(TICKS * 5) }; },
+      getInPointAsTime() { return { ticks: String(marks.inPoint * TICKS) }; },
+      getOutPointAsTime() { return { ticks: String(marks.outPoint * TICKS) }; },
+      setInPoint(value: number) { marks.inPoint = value; },
+      setOutPoint(value: number) {
+        if (value < 10) throw new Error("rejected one-frame out point");
+        marks.outPoint = value;
+      },
+      exportAsMediaDirect() { throw new Error("export should not run"); },
+    });
+    expect(result.ok).toBe(false);
+    expect(marks.inPoint).toBe(10);
+    expect(marks.outPoint).toBe(20);
+  });
+
+  it("restores the original in/out after a successful AME still export", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    let exported = false;
+    const result = runExport({
+      name: "Seq",
+      timebase: String(TICKS / 24),
+      getPlayerPosition() { return { ticks: String(TICKS * 5) }; },
+      getInPointAsTime() { return { ticks: String(marks.inPoint * TICKS) }; },
+      getOutPointAsTime() { return { ticks: String(marks.outPoint * TICKS) }; },
+      setInPoint(value: number) { marks.inPoint = value; },
+      setOutPoint(value: number) { marks.outPoint = value; },
+      exportAsMediaDirect() { exported = true; },
+    });
+    expect(exported).toBe(true);
+    expect(result.notes?.join(" ")).toMatch(/AME preset/);
+    expect(marks).toEqual({ inPoint: 10, outPoint: 20 });
+  });
+
+  it("fails closed when restore setters no-op after the one-frame export", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    const result = runExport({
+      name: "Seq",
+      timebase: String(TICKS / 24),
+      getPlayerPosition() { return { ticks: String(TICKS * 5) }; },
+      getInPointAsTime() { return { ticks: String(marks.inPoint * TICKS) }; },
+      getOutPointAsTime() { return { ticks: String(marks.outPoint * TICKS) }; },
+      setInPoint(value: number) {
+        if (Math.abs(value - 10) < 0.0001) return;
+        marks.inPoint = value;
+      },
+      setOutPoint(value: number) {
+        if (Math.abs(value - 20) < 0.0001) return;
+        marks.outPoint = value;
+      },
+      exportAsMediaDirect() { return true; },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/unrestored/);
+    expect(result.notes?.join(" ")).toMatch(/could not be restored after the one-frame export/);
+    expect(marks.inPoint).toBe(5);
+    expect(marks.outPoint).toBeCloseTo(5 + 1 / 24, 8);
+  });
+
+  it("does not treat an unrestored one-frame window as the next AME restore baseline", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    let exportCount = 0;
+    const sequence = {
+      name: "Seq",
+      timebase: String(TICKS / 24),
+      getPlayerPosition() { return { ticks: String(TICKS * 5) }; },
+      getInPointAsTime() { return { ticks: String(marks.inPoint * TICKS) }; },
+      getOutPointAsTime() { return { ticks: String(marks.outPoint * TICKS) }; },
+      setInPoint(value: number) {
+        if (Math.abs(value - 10) < 0.0001) return;
+        marks.inPoint = Math.floor(value * 48000) / 48000;
+      },
+      setOutPoint(value: number) {
+        if (Math.abs(value - 20) < 0.0001) return;
+        marks.outPoint = Math.floor(value * 48000) / 48000;
+      },
+      exportAsMediaDirect() { exportCount += 1; return true; },
+    };
+    const sandbox: Record<string, unknown> = {
+      File: FileStub,
+      Folder: function Folder() { return {}; },
+      Time: function Time() { return { ticks: "0", getFormatted: () => "00:00:00:00" }; },
+      app: {
+        enableQE() { throw new Error("QE unavailable"); },
+        encoder: { ENCODE_IN_TO_OUT: 1 },
+        project: { activeSequence: sequence },
+      },
+    };
+    const result = runInNewContext(
+      `${getHelpersSource()}
+      __findStillPreset = function () { return "/tmp/still.epr"; };
+      var first = __exportStillFrame("/tmp/frame1.png", "${TICKS * 5}");
+      var second = __exportStillFrame("/tmp/frame2.png", "${TICKS * 8}");
+      ({ first: first, second: second });`,
+      sandbox,
+    ) as { first: { ok: boolean; recoveryRequired?: boolean }; second: { ok: boolean; recoveryRequired?: boolean; notes?: string[] } };
+    expect(result.first).toMatchObject({ ok: false, recoveryRequired: true });
+    expect(result.second).toMatchObject({ ok: false, recoveryRequired: true });
+    expect(result.second.notes?.join(" ")).toMatch(/previous still export left sequence in\/out unrestored/);
+    expect(exportCount).toBe(1);
+    expect(marks.inPoint).toBe(5);
+    expect(marks.outPoint).toBeCloseTo(5 + 1 / 24, 8);
+  });
+
+  it("preserves later user mark changes and reports recovery instead of restoring stale marks", () => {
+    const marks = { inPoint: 10, outPoint: 20 };
+    const result = runExport({
+      name: "Seq", sequenceID: "sequence-1", timebase: String(TICKS / 24),
+      getInPointAsTime() { return { ticks: String(marks.inPoint * TICKS) }; },
+      getOutPointAsTime() { return { ticks: String(marks.outPoint * TICKS) }; },
+      setInPoint(value: number) { marks.inPoint = value; },
+      setOutPoint(value: number) { marks.outPoint = value; },
+      exportAsMediaDirect() { marks.inPoint = 40; marks.outPoint = 50; return true; },
+    });
+    expect(result).toMatchObject({ ok: false, recoveryRequired: true, mutationOutcome: "unknown" });
+    expect(result.error).toContain("concurrent");
+    expect(marks).toEqual({ inPoint: 40, outPoint: 50 });
+  });
+});
+
+describe("escapeForExtendScript and ES3 line terminators", () => {
+  it("escapes U+2028, U+2029 and other control characters so the literal still parses and round-trips", () => {
+    const value = "Line\u2028break\u2029para\u0000nul\u000bvt\u001fus \"q\" back\\slash";
+    const escaped = escapeForExtendScript(value);
+    expect(escaped).not.toMatch(new RegExp("[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u2028\\u2029]"));
+    expect(escaped).toContain("\\u2028");
+    expect(runInNewContext(`"${escaped}"`)).toBe(value);
+  });
+});
+
+describe("lone surrogates", () => {
+  it("escapes lone surrogates but keeps valid pairs, in both escapers", async () => {
+    const { escapeForAfterEffects } = await import("../../src/bridge/after-effects-script-builder.js");
+    const value = "pair 🎬 ok, lone high \uD800 end, lone low \uDC00 end, U+2028 \u2028";
+    for (const escape of [escapeForExtendScript, escapeForAfterEffects]) {
+      const escaped = escape(value);
+      expect(escaped).toContain("🎬");
+      expect(escaped).toContain("\\ud800");
+      expect(escaped).toContain("\\udc00");
+      expect(escaped).toContain("\\u2028");
+      // A UTF-8 round trip (the command file) no longer loses the lone surrogates.
+      const written = Buffer.from(`"${escaped}"`, "utf8").toString("utf8");
+      expect(runInNewContext(written)).toBe(value);
+    }
   });
 });

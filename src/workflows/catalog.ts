@@ -2,6 +2,36 @@ import { z } from "zod";
 
 export const WORKFLOW_CATALOG = [
   {
+    id: "exact-timeline-review",
+    title: "Predict and verify an exact timeline edit",
+    summary: "Capture a session-bound tick snapshot, review completeness and source handles, predict a supported edit, preview exact target bindings, apply once, then verify continuity against fresh readback.",
+    recommendedTools: ["inspect_timeline_snapshot", "predict_timeline_edit", "preview_extended_edit_plan", "apply_extended_edit_plan", "verify_timeline_postconditions"],
+  },
+  {
+    id: "scene-source-review",
+    title: "Create reviewed scene markers and subclips",
+    summary: "Review measured source candidates, approve exact segments, bind the saved project and source identity, then create verified source markers or audio-inclusive subclips in a new bin. Detector candidates never authorize cuts.",
+    recommendedTools: ["plan_scene_segments", "preview_scene_review_workflow", "apply_scene_review_workflow"],
+  },
+  {
+    id: "interchange-turnover",
+    title: "Review interchange loss and audio turnover",
+    summary: "Inspect bounded OTIO/XML artifacts and per-feature loss reports, prepare marker or ALE tables, and review an audio-post turnover contract before separately using an available native export. Parsing does not prove editor round-trip fidelity.",
+    recommendedTools: ["inspect_otio_interchange", "inspect_interchange_loss_report", "export_review_markers", "preview_facility_metadata_intake", "plan_audio_post_turnover"],
+  },
+  {
+    id: "temporal-delivery-proof",
+    title: "Render and check a delivery artifact",
+    summary: "Preflight a saved exact CEP sequence, directly export to a new destination and independently verify hash, format and optional decoded QC. Use a measured multi-frame oracle for temporal checks; generic encoder events never verify an artifact.",
+    recommendedTools: ["can_execute", "export_and_verify", "verify_temporal_render_artifact", "inspect_rendered_video_scopes", "build_edit_review_evidence"],
+  },
+  {
+    id: "operation-recovery",
+    title: "Reconcile an uncertain host operation",
+    summary: "Inspect recovery receipts and current target state, review a revision-bound acknowledgement, and keep consumed mutation IDs consumed. Cancellation of a local worker never cancels accepted native work.",
+    recommendedTools: ["inspect_operation_recovery", "acknowledge_operation_recovery", "inspect_workflow_job", "wait_workflow_job"],
+  },
+  {
     id: "film-editorial",
     title: "Review film editorial coverage and handoff",
     summary: "Capture source and timeline context, supply an explicit film manifest, inspect coverage and review layouts, resolve revision-bound notes and turnover exceptions, then use separately guarded host tools for approved edits and exports.",
@@ -60,7 +90,7 @@ export const WORKFLOW_CATALOG = [
     title: "Review and update clip metadata",
     summary: "Inspect visible Project-panel columns first, then named project/XMP fields. Request full XML only when needed. Writes use field_name/value or complete XML, or a locked UXP field/packet transaction with readback; schema creation does not set per-item values.",
     recommendedTools: ["get_metadata", "get_xmp_metadata", "inspect_project_panel_metadata_uxp", "manage_metadata_uxp", "set_metadata", "set_xmp_metadata"],
-    promptNotes: "Prefer inspect_project_panel_metadata_uxp action item_columns or manage_metadata_uxp inspect_fields / get_metadata parse_fields. Request full project-metadata XML or XMP only when a named field is missing. Premiere-private project metadata is not file XMP. Do not treat premiere://project/metadata as a packet dump. Writes use field_name/value or complete XML, or a UXP update_field/update with readback; never fall back from a failed UXP write to CEP.",
+    promptNotes: "Prefer inspect_project_panel_metadata_uxp action item_columns or manage_metadata_uxp inspect_fields / get_metadata parse_fields. CEP metadata reads default to bounded parsed fields with personal data omitted. Raw packets require explicit packet flags (include_raw for get_xmp_metadata) and include_sensitive true; source paths require include_media_path true. Request raw packets only with user authorization for their personal-data disclosure. Premiere-private project metadata is not file XMP. Do not treat premiere://project/metadata as a packet dump. Writes use field_name/value or complete XML, or a UXP update_field/update with readback. set_xmp_metadata accepts a nonempty patch of at most 256 leaf fields, verifies every requested leaf, fails on mismatches, and reports unreadable post-write state as committed_unverified; inspect before retrying; never fall back from a failed UXP write to CEP.",
   },
   {
     id: "project-organization",
@@ -115,6 +145,36 @@ export const WORKFLOW_CATALOG = [
     title: "Preview a workflow recipe",
     summary: "Select a built-in or workspace-local declarative recipe, review its allowlisted tool manifest, then execute each step through the normal guarded tools.",
     recommendedTools: ["search_workflow_recipes", "preview_workflow_recipe", "get_premiere_state"],
+  },
+  {
+    id: "dialogue-candidate-review",
+    title: "Review dialogue cuts with padding",
+    summary: "Inspect captured dialogue candidates with words in context, explicitly keep or reject cuts, and review unioned source-time removal before a separate guarded derivative preview.",
+    recommendedTools: ["review_dialogue_candidates", "preview_derived_dialogue_sequence_uxp"],
+  },
+  {
+    id: "quote-paper-edit",
+    title: "Review a quote paper edit",
+    summary: "Order explicitly approved source quotes and return running timings plus an inline spreadsheet-safe CSV before any multi-source host assembly.",
+    recommendedTools: ["review_quote_paper_edit"],
+  },
+  {
+    id: "batch-copy-review",
+    title: "Review batch text changes",
+    summary: "Compare inspected MOGRT text or supplied caption-artifact copy with literal or proposed changes, preserve original text, and approve exact fields before fresh host readback.",
+    recommendedTools: ["review_text_changes", "get_mogrt_component"],
+  },
+  {
+    id: "sync-evidence-review",
+    title: "Review camera and recorder matches",
+    summary: "Compare supplied independent offset estimates, resolve conflicts, and explicitly approve camera-recorder matches before a separate host sequence preview.",
+    recommendedTools: ["review_sync_evidence", "preview_derived_dialogue_sequence_uxp"],
+  },
+  {
+    id: "broll-placement-review",
+    title: "Review owned-footage B-roll picks",
+    summary: "Review caller-proposed footage against dialogue, reasons and alternatives, approve non-overlapping video-only placements, then inspect occupancy in a fresh edit-plan preview.",
+    recommendedTools: ["review_broll_placements", "preview_edit_plan"],
   },
 ] as const;
 

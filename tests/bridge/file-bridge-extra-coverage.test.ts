@@ -16,6 +16,16 @@ import {
 import { execFileSync } from "node:child_process";
 import { cleanupTempDir, sendCommand } from "../../src/bridge/file-bridge.js";
 
+// File transport unit tests isolate ownership; real multi-process lease behavior
+// is exercised by host-lease.test.ts using the actual filesystem.
+vi.mock("../../src/bridge/host-lease.js", () => ({
+  withHostLease: async (_directory: string, _timeout: number, work: () => Promise<unknown>) => work(),
+  ownsHostLease: () => false,
+  inspectHostRecovery: () => ({ version: 1, recoveryRequired: false, recoveryRevision: null }),
+  markHostRecovery: vi.fn(),
+  HostLeaseError: class extends Error {},
+}));
+
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
@@ -106,6 +116,72 @@ describe("file bridge fallback and cleanup branches", () => {
     await expect(response).resolves.toMatchObject({
       success: false,
       error: expect.stringContaining("modal dialog"),
+    });
+  });
+
+  it("fails at once instead of waiting for the hard cap when the busy file has not changed for 10 s (crashed panel)", async () => {
+    fs.exists.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_")) return false;
+      if (value.includes("busy_")) return true;
+      return true;
+    });
+    const staleSince = Date.now() - 60_000;
+    fs.stat.mockImplementation(((path) => ({
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      mode: 0o700,
+      mtimeMs: String(path).includes("busy_") ? staleSince : Date.now(),
+      size: 64,
+    })) as unknown as typeof statSync);
+    const response = sendCommand("var stuck = true;", { tempDir: "/tmp/stuck-busy-bridge", timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(response).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("CEP panel appears stuck"),
+    });
+  });
+
+  it("keeps waiting for a claimed command while its own busy file is still being refreshed", async () => {
+    let responded = false;
+    fs.exists.mockImplementation((path) => {
+      const value = String(path);
+      if (value.includes("res_")) return responded;
+      if (value.includes("busy_")) return !responded;
+      if (value.includes("cmd_")) return false; // CEP claimed the command before starting it
+      return true;
+    });
+    fs.stat.mockImplementation((() => ({
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      mode: 0o700,
+      mtimeMs: Date.now(),
+      size: 64,
+    })) as unknown as typeof statSync);
+    fs.read.mockReturnValue('{"success":true,"data":{"imported":5}}');
+
+    const response = sendCommand("var longImport = true;", { tempDir: "/tmp/fresh-busy-bridge", timeoutMs: 100 });
+    let settled = false;
+    void response.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toBe(false);
+    responded = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(response).resolves.toMatchObject({ success: true, data: { imported: 5 } });
+  });
+
+  it("names the configured host in the no-connector timeout", async () => {
+    fs.exists.mockImplementation((path) => !String(path).includes("res_") && !String(path).includes("busy_"));
+    fs.stat.mockImplementation((() => ({
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      mode: 0o700,
+      mtimeMs: Date.now(),
+    })) as unknown as typeof statSync);
+    const response = sendCommand("var ae = true;", { tempDir: "/tmp/ae-bridge", timeoutMs: 50, hostLabel: "After Effects" });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(response).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("Is the MCP connector panel running in After Effects?"),
     });
   });
 

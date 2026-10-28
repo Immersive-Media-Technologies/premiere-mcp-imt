@@ -22,9 +22,12 @@ Feature-specific limits are in each feature's reference; this file holds what ap
 ## Export
 - 26.5 **Match Source** matches audio channels and sample rate, auto-downmixes, and warns when the format cannot carry the source layout (e.g. 5.1) instead of silently going stereo — read the warning, pick a format that carries the layout. Scripted exports: `verify_delivery_conformance {output_path, audio_channels, audio_sample_rate_hz}`.
 - `export_sequence` hands off to Adobe Media Encoder; queue acceptance is not a finished render → verify the output file.
+- Long renders (whole episodes): `export_sequence_job_start` returns at once; poll `get_export_job_status {job_id}` until `completed` (verified when Media Encoder reported completion and the file is stable).
+- A command that does not return: `get_bridge_telemetry` tells a busy panel from one blocked by a modal dialog (Missing Media, a stuck export) without sending a command; the user closes the dialog.
 
 ## Scripting limits that look like bugs
 - No clip-speed API: speed operations report Unavailable.
+- Gaussian Blur in Premiere 26 is the new blur (`AE.Impact_Blur_FX`): its strength is `Amount`, not `Blurriness`; `get_effect_properties` lists the parameters in the UI language — use the English name.
 - QE `rippleDelete` and the DOM ripple flag do not work on 26.x; `ripple_delete` ripples explicitly and verifies.
 
 Sources: helpx.adobe.com/premiere/desktop/edit-projects/edit-with-generative-ai/generative-extend-overview

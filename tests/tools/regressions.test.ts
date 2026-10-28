@@ -1,13 +1,15 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { runInNewContext } from "node:vm";
-import { getHelpersSource } from "../../src/bridge/script-builder.js";
+import { escapeForExtendScript, getHelpersSource } from "../../src/bridge/script-builder.js";
 import { BridgeOptions } from "../../src/bridge/file-bridge.js";
 
+vi.mock("../../src/tools/media-evidence.js", () => ({ probeMediaDurationTicks: vi.fn().mockResolvedValue(3600 * 254016000000) }));
+
 vi.mock("../../src/bridge/file-bridge.js", () => ({
-  sendCommand: vi.fn().mockResolvedValue({ success: true, data: {} }),
+  sendCommand: vi.fn().mockResolvedValue({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "/fixture/source.mp4" } }),
   sendRawCommand: vi.fn().mockResolvedValue({ success: true, data: {} }),
   getTempDir: vi.fn().mockReturnValue("/tmp/test"),
   cleanupTempDir: vi.fn(),
@@ -16,7 +18,7 @@ vi.mock("../../src/bridge/file-bridge.js", () => ({
 import { sendCommand } from "../../src/bridge/file-bridge.js";
 import { getMarkerTools } from "../../src/tools/markers.js";
 import { getExportTools } from "../../src/tools/export.js";
-import { getUtilityTools } from "../../src/tools/utility.js";
+import { getUtilityTools, sequenceFrameTicks } from "../../src/tools/utility.js";
 import { getTrackTargetingTools } from "../../src/tools/track-targeting.js";
 import { getEffectsTools } from "../../src/tools/effects.js";
 import { getClipboardTools } from "../../src/tools/clipboard.js";
@@ -27,8 +29,11 @@ import { getMediaTools } from "../../src/tools/media.js";
 import { getTextTools } from "../../src/tools/text.js";
 import { getKeyframeTools } from "../../src/tools/keyframes.js";
 import { getCaptionTools } from "../../src/tools/captions.js";
+import { getInspectionTools } from "../../src/tools/inspection.js";
 import { getSequenceTools } from "../../src/tools/sequence.js";
 import { getPlayheadTools } from "../../src/tools/playhead.js";
+import { getAudioTools } from "../../src/tools/audio.js";
+import { getCompetitorGapTools } from "../../src/tools/competitor-gaps.js";
 
 const mockedSendCommand = vi.mocked(sendCommand);
 const bridgeOptions: BridgeOptions = { tempDir: "/tmp/test-bridge", timeoutMs: 5000 };
@@ -57,7 +62,7 @@ async function scriptFor(tool: { handler: (args: never) => Promise<unknown> }, a
   mockedSendCommand.mockClear();
   await tool.handler(args as never);
   expect(mockedSendCommand).toHaveBeenCalled();
-  return mockedSendCommand.mock.calls[0][0] as string;
+  return mockedSendCommand.mock.calls.at(-1)[0] as string; // SEC #712: trim/slip send evidence+script
 }
 
 /**
@@ -78,9 +83,38 @@ async function executePixelAspectRatioScript(sequence: unknown, ratio = "1.4222"
   })));
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); mockedSendCommand.mockResolvedValue({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "/fixture/source.mp4" } }); });
 
 describe("real-host social sequence regressions", () => {
+  // #691: QE's newSequence silently ignores forward-slash preset paths on
+  // Windows, so the handler must hand the host native separators and give a
+  // missing file its own precise error.
+  it("normalizes forward-slash preset_path to native separators before the QE call", async () => {
+    const realFile = join(process.cwd(), "package.json");
+    const forwardSlashed = realFile.split(sep).join("/");
+    const script = await scriptFor(sequence.create_sequence_from_preset, { name: "PresetPathTest", preset_path: forwardSlashed });
+    expect(script).toContain(escapeForExtendScript(resolve(forwardSlashed)));
+    if (process.platform === "win32") {
+      // en Windows los separadores nativos difieren del original: el script no
+      // debe llevar el path forward-slashed (falla silenciosa de QE, #691)
+      expect(script).not.toContain(escapeForExtendScript(forwardSlashed));
+    }
+  });
+
+  it("create_sequence also normalizes preset_path and reports missing files (#714)", async () => {
+    const forwardReal = join(process.cwd(), "package.json").split(sep).join("/");
+    const script = await scriptFor(sequence.create_sequence, { name: "Create714", preset_path: forwardReal });
+    expect(script).toContain(escapeForExtendScript(resolve(forwardReal)));
+    await expect(sequence.create_sequence.handler({ name: "X", preset_path: "C:/no/such.sqpreset" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("Preset file not found") });
+  });
+
+  it("reports a missing preset file precisely instead of a bare QE failure", async () => {
+    await expect(sequence.create_sequence_from_preset.handler({
+      name: "PresetPathTest",
+      preset_path: join(process.cwd(), "no-such-dir", "no-such-preset.sqpreset"),
+    })).resolves.toMatchObject({ success: false, error: expect.stringContaining("Preset file not found") });
+  });
+
   const sequence = getSequenceTools(bridgeOptions);
   const playhead = getPlayheadTools(bridgeOptions);
   const utility = getUtilityTools(bridgeOptions);
@@ -98,15 +132,43 @@ describe("real-host social sequence regressions", () => {
     expect(script).toContain("id: reframed.sequenceID");
   });
 
+  it("resizes the reframed sequence to the requested frame (live 25.2: 9:16 of 1080p came out 607x1080)", async () => {
+    const run = async (accept: boolean) => {
+      const settings = { videoFrameWidth: 607, videoFrameHeight: 1080 };
+      const reframed = {
+        name: "Vertical",
+        sequenceID: "v-1",
+        frameSizeHorizontal: 607,
+        frameSizeVertical: 1080,
+        getSettings: () => ({ ...settings }),
+        setSettings: (next: typeof settings) => { if (accept) Object.assign(settings, next); },
+      };
+      const script = await scriptFor(sequence.auto_reframe_sequence, { target_width: 1080, target_height: 1920, new_name: "Vertical" });
+      const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+        app: { project: { activeSequence: { name: "Recap", autoReframeSequence: () => reframed } } },
+      })));
+      return { result, settings };
+    };
+    const ok = await run(true);
+    expect(ok.result).toMatchObject({
+      success: true,
+      data: { width: 1080, height: 1920, premiereFrameSize: "607x1080", resizedToRequest: true, verified: true },
+    });
+    expect(ok.settings).toEqual({ videoFrameWidth: 1080, videoFrameHeight: 1920 });
+    await expect(run(false)).resolves.toMatchObject({
+      result: { success: false, error: expect.stringContaining("did not accept the requested 1080x1920"), data: { id: "v-1" } },
+    });
+  });
+
   it("sets and reads sequence in/out points in seconds with verification", async () => {
     const setScript = await scriptFor(playhead.set_sequence_in_out_points, { in_seconds: 0, out_seconds: 60 });
-    expect(setScript).toContain("seq.setInPoint(0)");
-    expect(setScript).toContain("seq.setOutPoint(60)");
-    expect(setScript).not.toContain("__secondsToTicks(60)");
-    expect(setScript).toContain("Math.abs(observedOut - 60)");
+    expect(setScript).toContain("seq.setInPoint(inWriteSeconds)");
+    expect(setScript).toContain("seq.setOutPoint(outWriteSeconds)");
+    expect(setScript).toContain("requestedOutTicks = __secondsToTicks(60)");
+    expect(setScript).toContain("Math.abs(observedOut - appliedOutSeconds)");
 
     const getScript = await scriptFor(playhead.get_sequence_in_out_points, {});
-    expect(getScript).toContain("outSeconds: Number(seq.getOutPoint())");
+    expect(getScript).toContain("__sequencePointSeconds(seq.getOutPoint())");
     expect(getScript).not.toContain("__ticksToSeconds(seq.getOutPoint())");
   });
 
@@ -116,9 +178,17 @@ describe("real-host social sequence regressions", () => {
     expect(workArea).toContain("seq.getWorkAreaOutPoint()");
     expect(workArea).not.toContain("seq.workInPoint");
     expect(workArea).not.toContain("seq.workOutPoint");
+    expect(workArea).toContain("inSeconds: __workAreaSeconds(inPoint)");
+    expect(workArea).not.toContain("__ticksToSeconds(inPoint)");
+
+    const setArea = await codeFor(playhead.set_work_area, { in_seconds: 4, out_seconds: 12 });
+    expect(setArea).toContain("seq.setWorkAreaInPoint(requestedIn)");
+    expect(setArea).toContain("requestedInRaw = __secondsToTicks(4)");
+    expect(setArea).toContain("Premiere did not apply the work area");
+    expect(setArea).toContain('outcome: verified ? "verified" : "committed_unverified"');
 
     const enabled = await codeFor(sequence.is_work_area_enabled, {});
-    expect(enabled).toContain("seq.isWorkAreaEnabled()");
+    expect(enabled).toContain("__workAreaEnabled(seq)");
     expect(enabled).not.toContain("seq.isWorkAreaBarEnabled()");
   });
 
@@ -137,17 +207,17 @@ describe("issue #6 — markers must use seconds, not ticks", () => {
   it("add_marker passes seconds straight to createMarker", async () => {
     const script = await scriptFor(markers.add_marker, { time_seconds: 2.0 });
 
-    expect(script).toContain("createMarker(2)");
+    expect(script).toContain("markers.createMarker(appliedMarkerSeconds)");
     // The old bug: __secondsToTicks(2) -> 508032000000 handed to createMarker(),
     // placing the marker ~508 billion seconds down the timeline.
     expect(script).not.toContain("__secondsToTicks(2).toString()");
     expect(script).not.toMatch(/createMarker\(parseFloat/);
   });
 
-  it("add_marker sets marker.end in seconds when given a duration", async () => {
+  it("add_marker verifies exact start and end ticks when given a duration", async () => {
     const script = await scriptFor(markers.add_marker, { time_seconds: 2.0, duration_seconds: 3.0 });
 
-    expect(script).toContain("marker.end = 5");
+    expect(script).toContain("__setMarkerRangeTicks(marker, appliedMarkerTicks, exactEndTicks)");
     expect(script).not.toMatch(/marker\.end = __secondsToTicks/);
   });
 
@@ -157,6 +227,15 @@ describe("issue #6 — markers must use seconds, not ticks", () => {
     expect(script).toContain("startSeconds: marker.start.seconds");
     expect(script).toContain("endSeconds: marker.end.seconds");
     expect(script).not.toContain("__ticksToSeconds(marker.start.ticks)");
+    expect(script).toContain("guid: __markerGuid(marker)");
+    expect(script).toContain("marker.getColorByIndex()");
+  });
+
+  it("keeps zero-based media track strings and adds 1-based track labels", async () => {
+    const script = await scriptFor(getInspectionTools(bridgeOptions).get_used_media_report, {});
+    expect(script).toContain('tracks.push(trackType + " " + t)');
+    expect(script).toContain('trackLabel: trackType + (t + 1)');
+    expect(script).toContain("mediaMap[key].trackDetails = trackDetails");
   });
 
   it("delete_marker still compares ticks against ticks", async () => {
@@ -179,6 +258,7 @@ describe("issue #7 — no calls to nonexistent ExtendScript methods", () => {
       item_id: "clip1",
       action: "create",
       output_path: "/tmp/proxy.mov",
+      preset_path: "/tmp/proxy.epr",
     });
 
     // ProjectItem has no createProxy(); proxies must go through Media Encoder.
@@ -193,13 +273,18 @@ describe("issue #7 — no calls to nonexistent ExtendScript methods", () => {
     expect(script).not.toContain("Proxy creation started");
   });
 
-  it("manage_proxies 'toggle' reports the state it actually set", async () => {
+  it("manage_proxies 'toggle' flips Premiere's app-level proxy setting and reads it back (live: app.project.isProxyEnabled is not a function)", async () => {
+    let enabled = 0;
     const script = await scriptFor(exportTools.manage_proxies, { item_id: "clip1", action: "toggle" });
-
-    // The old code reported !isProxyEnabled() *after* flipping it — i.e. the inverse
-    // of the truth, every single time.
-    expect(script).toContain("proxiesEnabled: enabled");
-    expect(script).not.toContain("proxiesEnabled: !app.project.isProxyEnabled()");
+    const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+      app: {
+        project: { rootItem: { children: { numItems: 1, 0: { nodeId: "clip1", name: "Clip", type: 1 } } } },
+        getEnableProxies: () => enabled,
+        setEnableProxies: (value: number) => { enabled = value; },
+      },
+    })));
+    expect(result).toMatchObject({ success: true, data: { proxiesEnabled: true, verified: true } });
+    expect(enabled).toBe(1);
   });
 
   it("get_encoder_presets never calls encoder.getFormatList()", async () => {
@@ -239,21 +324,40 @@ describe("issue #9 — frame export uses the QE DOM and verifies the file landed
     });
   }
 
-  it("sets and restores the AME one-frame range in seconds", () => {
+  it("sets and restores the AME one-frame range in sample-aware seconds", () => {
     const helpers = getHelpersSource();
 
     // Sequence.setInPoint/setOutPoint accept seconds. Passing ticks here made
     // the fallback target an enormous range and prevented a still from landing.
-    expect(helpers).toContain("seq.setInPoint(__ticksToSeconds(startTicks))");
-    expect(helpers).toContain("seq.setOutPoint(__ticksToSeconds(startTicks + frameTicks))");
-    expect(helpers).toContain("seq.setInPoint(__ticksToSeconds(savedIn))");
-    expect(helpers).toContain("seq.setOutPoint(__ticksToSeconds(savedOut))");
+    expect(helpers).toContain("seq.setInPoint(__sequenceMarkWriteSeconds(seq, startTicks, false))");
+    expect(helpers).toContain("seq.setOutPoint(__sequenceMarkWriteSeconds(seq, startTicks + frameTicks, false))");
+    expect(helpers).toContain("seq.setInPoint(__sequenceMarkWriteSeconds(seq, savedIn, true))");
+    expect(helpers).toContain("seq.setOutPoint(__sequenceMarkWriteSeconds(seq, savedOut, true))");
     expect(helpers).not.toContain("seq.setInPoint(String(startTicks))");
+    // If either in or out cannot be read, refuse the one-frame mutation rather
+    // than leaving the sequence pinned to the still-export range.
+    expect(helpers).toContain("savedIn === null || savedIn === undefined || savedOut === null || savedOut === undefined");
+    expect(helpers).toContain("could not read sequence in/out points, so they were not changed");
+    expect(helpers).toContain("sequence in/out could not be restored after the one-frame export");
   });
 });
 
 // Defects found while reviewing PR #3 (repair 6 broken tools on Premiere Pro 2026).
 describe("PR #3 follow-ups — color_correct and export_sequence", () => {
+  // #712: trim_clip and slip_edit must refuse source windows past the media's
+  // own end (Premiere would otherwise extend the clip over nonexistent frames
+  // and report verified: true).
+  it("trim_clip and slip_edit scripts carry the ffprobe media-duration guard", async () => {
+    vi.mocked(sendCommand).mockResolvedValueOnce({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "C:/media/clip.mp4" } } as never);
+    const trim = await scriptFor(getTimelineTools(bridgeOptions, { probeMediaDurationSeconds: async () => 5 }).trim_clip, { node_id: "clip-1", new_out_seconds: 39 });
+    expect(trim).not.toContain("projectItem.getOutPoint()");
+    expect(trim).toContain("__sourceWindowError(clip, 1270080000000,");
+    vi.mocked(sendCommand).mockResolvedValueOnce({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "C:/media/clip.mp4" } } as never);
+    const slip = await scriptFor(getAdvancedTools(bridgeOptions, { probeMediaDurationSeconds: async () => 10 }).slip_edit, { node_id: "clip-1", offset_seconds: 2 });
+    expect(slip).toContain("__sourceWindowError(result.clip, 2540160000000,");
+  });
+
+
   const effects = getEffectsTools(bridgeOptions);
   const exportTools = getExportTools(bridgeOptions);
 
@@ -289,6 +393,66 @@ describe("PR #3 follow-ups — color_correct and export_sequence", () => {
     expect(code).not.toContain("Adobe Media Encoder 2025");
     expect(code).not.toContain("Adobe Media Encoder 2026");
   });
+
+  it("export_sequence fails closed when Premiere rejects the render or writes no file", async () => {
+    const script = await scriptFor(exportTools.export_sequence, { output_path: "/tmp/out.mp4" });
+
+    expect(script).toContain("var exportResult = seq.exportAsMediaDirect(");
+    expect(script).toContain('if (exportResult === false) return __error("Premiere rejected the sequence export; nothing was written to " + outputPath + ".")');
+    expect(script).toContain("if (!written.exists || written.length <= 0)");
+    expect(script).toContain("verified: true");
+  });
+
+  it("export_as_fcp_xml fails closed when Premiere writes no file or leaves the old file unchanged", async () => {
+    const script = await scriptFor(exportTools.export_as_fcp_xml, { output_path: "/tmp/export.xml" });
+
+    expect(script).toContain("seq.exportAsFinalCutProXML(outputFile.fsName)");
+    expect(script).toContain('if (!outputFile.exists || !(outputFile.length > 0)) return __error("Premiere did not write the requested FCP XML file.")');
+    expect(script).toContain("the existing output was unchanged");
+    expect(script).toContain("verified: true");
+  });
+
+  it("treats a missing or unchanged export file as failure, not success", async () => {
+    const advanced = getAdvancedTools(bridgeOptions);
+
+
+
+    const projectScript = await scriptFor(advanced.export_as_project, { output_path: "/tmp/export.prproj" });
+    const xmlScript = await scriptFor(exportTools.export_as_fcp_xml, { output_path: "/tmp/export.xml" });
+    const sequenceScript = await scriptFor(exportTools.export_sequence, {
+      output_path: "/tmp/out.mp4",
+      preset_path: temporaryPreset(),
+    });
+
+    function run(script: string, file: { exists: boolean; length: number; modified: string }, sequence: Record<string, unknown>) {
+      function FileStub(this: { fsName: string; parent: { exists: boolean } }, path: string) {
+        this.fsName = path;
+        Object.defineProperty(this, "exists", { get: () => file.exists });
+        Object.defineProperty(this, "length", { get: () => file.length });
+        Object.defineProperty(this, "modified", { get: () => file.modified });
+        this.parent = { exists: true, toString() { return "/tmp"; } };
+      }
+      return JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+        File: FileStub,
+        app: { project: { activeSequence: sequence }, encoder: { ENCODE_ENTIRE: 1, ENCODE_WORKAREA: 2 } },
+      })));
+    }
+
+    const stale = { exists: true, length: 42, modified: "old" };
+    expect(run(projectScript, stale, { exportAsProject() {} }).error).toMatch(/existing output was unchanged/);
+    expect(run(xmlScript, stale, { exportAsFinalCutProXML() {} }).error).toMatch(/existing output was unchanged/);
+    // export_sequence refuses an existing output unless overwrite is true (#648).
+    expect(run(sequenceScript, stale, { exportAsMediaDirect() { return undefined; } }).error).toMatch(/A file already exists at \/tmp\/out\.mp4/);
+
+    const missing = { exists: false, length: 0, modified: "" };
+    expect(run(projectScript, missing, { exportAsProject() {} }).error).toMatch(/did not write the requested project file/);
+    expect(run(xmlScript, missing, { exportAsFinalCutProXML() {} }).error).toMatch(/did not write the requested FCP XML file/);
+    expect(run(sequenceScript, missing, { exportAsMediaDirect() { return true; } }).error).toMatch(/Premiere did not write \/tmp\/out\.mp4/);
+
+    const written = { exists: false, length: 0, modified: "" };
+    const write = () => { written.exists = true; written.length = 99; written.modified = "new"; };
+    expect(run(projectScript, written, { exportAsProject: write })).toMatchObject({ success: true, data: { exported: true, verified: true } });
+  });
 });
 
 describe("script-builder helpers used by the fixes are actually defined", () => {
@@ -302,7 +466,7 @@ describe("script-builder helpers used by the fixes are actually defined", () => 
       "function __firstWrittenFile(",
       "function __findStillPreset(",
       "function __collectAllPresets(",
-      "function __findProxyPreset(",
+      "function __listProxyPresetCandidates(",
       "function __findH264Preset(",
       "function __adobeAppFolders(",
       "function __collectEprFiles(",
@@ -328,8 +492,21 @@ describe("issue #189 — Premiere 26.3 capability boundaries and macOS presets",
     expect(helpers).toContain("function __adobeApplicationResourceFolder(");
     expect(helpers).toContain('"/Contents/"');
     expect(helpers).toContain('"MediaIO/systempresets"');
-    expect(code).toContain('__presetSearchText("H.264")');
-    expect(code).toContain("__presetSearchText(p.name)");
+    expect(code).toContain("__collectAllPresets()");
+  });
+
+  it("labels each preset's real container and ranks format matches first (live: 'H264 ...' presets in the MooV folder write .mov)", async () => {
+    const ame = "/Applications/Adobe Media Encoder 2025/Adobe Media Encoder 2025.app/Contents/MediaIO/systempresets";
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { presets: [
+      { name: "H264 Match Source - High bitrate", path: `${ame}/3F3F3F3F_4D6F6F56/H264 Match Source - High bitrate.epr`, format: "3F3F3F3F_4D6F6F56" },
+      { name: "Match Source - High bitrate", path: `${ame}/4E49434B_48323634/Match Source - High bitrate.epr`, format: "4E49434B_48323634" },
+      { name: "Waveform Audio 48kHz 16-bit", path: `${ame}/3F3F3F3F_57415645/Waveform Audio 48kHz 16-bit.epr`, format: "3F3F3F3F_57415645" },
+    ] } });
+    const result = await trackTargeting.get_encoder_presets.handler({ format: "H.264" }) as { success: boolean; data: { presets: Array<Record<string, unknown>> } };
+    expect(result.data.presets.map((p) => [p.name, p.formatLabel, p.extension])).toEqual([
+      ["Match Source - High bitrate", "H.264 (MP4)", "mp4"],
+      ["H264 Match Source - High bitrate", "QuickTime (MOV)", "mov"],
+    ]);
   });
 
   it("never calls unsupported speed setters", async () => {
@@ -439,39 +616,257 @@ describe("issue #196 — empty Premiere 26.x QE effect catalogs", () => {
 });
 
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/129
-describe("issue #129 — CEP component removal is capability-gated", () => {
+// Premiere 25.2 has no DOM Component.remove(), but QE exposes a targeted
+// qeClip.getComponentAt(i).remove() in the same order as the DOM components.
+describe("issue #129 — effect removal uses the targeted QE component remove and verifies", () => {
   const effects = getEffectsTools(bridgeOptions);
   const clipboard = getClipboardTools(bridgeOptions);
+  const advanced = getAdvancedTools(bridgeOptions);
 
+  function removalHost(names: string[], options: { qeRemoveNoop?: boolean; noQeFor?: string[]; noQeAt?: number[]; matchNames?: Record<string, string>; trackType?: "video" | "audio" } = {}) {
+    const list = names.map((displayName) => ({ displayName, matchName: options.matchNames?.[displayName] ?? displayName }));
+    const components = new Proxy({}, { get: (_t, key) => (key === "numItems" ? list.length : list[Number(key)]) });
+    const clip = { nodeId: "clip1", name: "Speaker", start: { ticks: "0" }, end: { ticks: "254016000000" }, components };
+    const qeClip = {
+      type: "Clip",
+      start: { ticks: "0" },
+      getComponentAt: (index: number) => (options.noQeFor?.includes(list[index]?.displayName) || options.noQeAt?.includes(index) ? null : {
+        name: list[index]?.displayName,
+        remove: () => { if (!options.qeRemoveNoop) list.splice(index, 1); return true; },
+      }),
+      removeEffects: () => { throw new Error("broad removeEffects must not be used"); },
+    };
+    const qeTrack = { numItems: 1, getItemAt: () => qeClip };
+    const track = { numTracks: 1, 0: { clips: { numItems: 1, 0: clip } } };
+    const seq = options.trackType === "audio"
+      ? { sequenceID: "s", videoTracks: { numTracks: 0 }, audioTracks: track }
+      : { sequenceID: "s", videoTracks: track, audioTracks: { numTracks: 0 } };
+    mockedSendCommand.mockImplementation(async (script: string) => JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+      app: { enableQE: () => {}, project: { activeSequence: seq } },
+      qe: { project: { getActiveSequence: () => ({ getVideoTrackAt: () => qeTrack, getAudioTrackAt: () => qeTrack }) } },
+    }))));
+    return list;
+  }
+  const names = (list: Array<{ displayName: string }>) => list.map((c) => c.displayName);
+
+  it("remove_effect removes the named effect through QE and verifies", async () => {
+    const list = removalHost(["Opacity", "Motion", "Gaussian Blur", "Lumetri Color"]);
+    await expect(effects.remove_effect.handler({ node_id: "clip1", effect_name: "Gaussian Blur" })).resolves.toMatchObject({ success: true, data: { verified: true } });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Lumetri Color"]);
+  });
+
+  it("remove_effect by index removes exactly that component", async () => {
+    const list = removalHost(["Opacity", "Motion", "Gaussian Blur", "Lumetri Color"]);
+    await expect(effects.remove_effect.handler({ node_id: "clip1", effect_index: 3 })).resolves.toMatchObject({ success: true });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Gaussian Blur"]);
+  });
+
+  it("remove_effect_by_name removes every instance", async () => {
+    const list = removalHost(["Opacity", "Motion", "Gaussian Blur", "Tint", "Gaussian Blur"]);
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Gaussian Blur" })).resolves.toMatchObject({ success: true, data: { removed: 2 } });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Tint"]);
+  });
+
+  it("remove_all_effects keeps built-in components and never calls removeEffects()", async () => {
+    const list = removalHost(["Opacity", "Motion", "Lumetri Color", "Gaussian Blur"]);
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { verified: true } });
+    expect(names(list)).toEqual(["Opacity", "Motion"]);
+  });
+
+  it("refuses to remove built-in components", async () => {
+    removalHost(["Opacity", "Motion"]);
+    await expect(effects.remove_effect.handler({ node_id: "clip1", effect_name: "Motion" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("built-in") });
+  });
+
+  it("reports failure when Premiere keeps the effect", async () => {
+    removalHost(["Opacity", "Motion", "Lumetri Color"], { qeRemoveNoop: true });
+    const result = await advanced.remove_all_effects.handler({ node_id: "clip1" });
+    expect(result.success).toBe(false);
+  });
+
+  // Adapted from the original #129 guards: a component with no removal path
+  // is a capability error, and nothing is removed before every match is checked.
   it.each([
-    ["index", { node_id: "clip1", effect_index: 3 }],
+    ["index", { node_id: "clip1", effect_index: 2 }],
     ["name", { node_id: "clip1", effect_name: "Amplify" }],
-  ])("remove_effect by %s guards an unavailable Component.remove()", async (_mode, args) => {
-    const code = await codeFor(effects.remove_effect, args);
-
-    expect(code).toContain('typeof component.remove !== "function"');
-    expect(code).toContain("No safe targeted QE fallback exists");
-    expect(code).toContain("return __error(removal.error)");
-    expect(code).not.toContain("qeClip.removeEffects()");
+  ])("remove_effect by %s returns a capability error when neither Component.remove() nor QE can remove it", async (_mode, args) => {
+    const list = removalHost(["Opacity", "Motion", "Amplify"], { noQeFor: ["Amplify"] });
+    await expect(effects.remove_effect.handler(args)).resolves.toMatchObject({ success: false, error: expect.stringContaining("Capability error") });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Amplify"]);
   });
 
-  it("preflights every matching component before remove_effect_by_name mutates any", async () => {
-    const code = await codeFor(clipboard.remove_effect_by_name, {
-      node_id: "clip1",
-      effect_name: "Amplify",
+  it("preflights every matching component before remove_effect_by_name removes any", async () => {
+    // Removal runs highest index first: the later Amplify is removable, the
+    // earlier one (index 1) is not, so without the preflight one would go.
+    const list = removalHost(["Opacity", "Amplify", "Tint", "Amplify"], { noQeAt: [1] });
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Amplify" })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("No matching components were removed"),
     });
-
-    expect(code).toContain("var matches = []");
-    expect(code).toContain("if (!canRemoveComponent(component))");
-    expect(code).toContain("No matching components were removed");
-    expect(code).not.toContain("qeClip.removeEffects()");
-    expect(code.indexOf("if (!canRemoveComponent(component))"))
-      .toBeLessThan(code.lastIndexOf("component.remove()"));
+    expect(names(list)).toEqual(["Opacity", "Amplify", "Tint", "Amplify"]);
   });
 
-  it("documents the capability boundary in each targeted removal tool", () => {
-    expect(effects.remove_effect.description).toContain("capability error");
-    expect(clipboard.remove_effect_by_name.description).toContain("capability error");
+  // Match names seen live on Premiere 25.2.3 (#674); display names are localized.
+  // IMT: Premiere's own dictionaries name every built-in in German, so effects can be told apart.
+  it("removes effects on a German host whose built-ins Premiere's dictionaries name", async () => {
+    const german = { Deckkraft: "AE.ADBE Opacity", Bewegung: "AE.ADBE Motion", "Lumetri-Farbe": "AE.ADBE Lumetri" };
+    const list = removalHost(["Deckkraft", "Bewegung", "Lumetri-Farbe"], { matchNames: german });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Lumetri-Farbe"] } });
+    expect(names(list)).toEqual(["Deckkraft", "Bewegung"]);
+  });
+
+  it("never removes a localized built-in whose match name is not confirmed (Time Remapping)", async () => {
+    const german = { Deckkraft: "AE.ADBE Opacity", Bewegung: "AE.ADBE Motion", Zeitverzerrung: "ADBE Time Remapping", "Lumetri-Farbe": "AE.ADBE Lumetri" };
+    const list = removalHost(["Bewegung", "Deckkraft", "Zeitverzerrung", "Lumetri-Farbe"], { matchNames: german });
+    // IMT: a Time Remapping match-name spelling marks a built-in in any language; only the effect goes
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Lumetri-Farbe"] } });
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Zeitverzerrung" })).resolves.toMatchObject({ success: false });
+    expect(names(list)).toEqual(["Bewegung", "Deckkraft", "Zeitverzerrung"]);
+  });
+
+  it("refuses to remove a localized built-in picked by index", async () => {
+    const list = removalHost(["Deckkraft", "Bewegung", "Lumetri-Farbe"], { matchNames: { Deckkraft: "AE.ADBE Opacity", Bewegung: "AE.ADBE Motion", "Lumetri-Farbe": "AE.ADBE Lumetri" } });
+    await expect(effects.remove_effect.handler({ node_id: "clip1", effect_index: 0 })).resolves.toMatchObject({ success: false, error: expect.stringContaining("built-in") });
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Bewegung" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("built-in") });
+    expect(names(list)).toEqual(["Deckkraft", "Bewegung", "Lumetri-Farbe"]);
+  });
+
+  it("removes effects from a mono audio clip, which has Volume but no Channel Volume (live 25.2.3)", async () => {
+    const list = removalHost(["Volume", "DeNoise"], { trackType: "audio", matchNames: { Volume: "Internal Volume Mono", DeNoise: "AE.ADBE DeNoise" } });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { verified: true, removedEffects: ["DeNoise"] } });
+    expect(names(list)).toEqual(["Volume"]);
+  });
+
+  it("removes effects from an English 5.1 clip by its Internal match names", async () => {
+    const surround = { Volume: "Internal Volume 5.1", "Channel Volume": "Internal Channel Volume 5.1", DeNoise: "AE.ADBE DeNoise" };
+    const list = removalHost(["Volume", "Channel Volume", "DeNoise"], { trackType: "audio", matchNames: surround });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["DeNoise"] } });
+    expect(names(list)).toEqual(["Volume", "Channel Volume"]);
+  });
+
+  it("refuses on a localized audio host, since Panner's match name is not confirmed (French 5.1)", async () => {
+    const french = { Volume: "Internal Volume 5.1", "Volume des canaux": "Internal Channel Volume 5.1", "Réduction du bruit": "AE.ADBE DeNoise" };
+    const list = removalHost(["Volume", "Volume des canaux", "Réduction du bruit"], { trackType: "audio", matchNames: french });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("localized names (Volume des canaux)") });
+    expect(names(list)).toEqual(["Volume", "Volume des canaux", "Réduction du bruit"]);
+  });
+
+  // es-ES display names measured live on Premiere 26.5.2 (#674): video
+  // Opacidad / Movimiento / Movimiento del vector; audio Volumen / Volumen del
+  // canal. The localized-host refusal must no longer fire there.
+  it("removes effects on a Spanish (es-ES) host whose built-in names are measured", async () => {
+    const spanish = { Opacidad: "AE.ADBE Opacity", Movimiento: "AE.ADBE Motion", "Desenfoque gaussiano": "AE.Impact_Blur_FX" };
+    const list = removalHost(["Opacidad", "Movimiento", "Desenfoque gaussiano"], { matchNames: spanish });
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Desenfoque gaussiano" })).resolves.toMatchObject({ success: true, data: { verified: true } });
+    expect(names(list)).toEqual(["Opacidad", "Movimiento"]);
+  });
+
+  it("removes effects from a Spanish mono audio clip, keeping Volumen", async () => {
+    const spanishMono = { Volumen: "Internal Volume Mono", DeEsser: "AE.ADBE DeEsser" };
+    const list = removalHost(["Volumen", "DeEsser"], { trackType: "audio", matchNames: spanishMono });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["DeEsser"] } });
+    expect(names(list)).toEqual(["Volumen"]);
+  });
+
+  it("classifies a touched Balance (Equilibrio / Internal Audio Balance) as built-in, not as a localized host (live 26.5.2 es-ES)", async () => {
+    const spanishBalance = {
+      Volumen: "Internal Volume Stereo",
+      "Volumen del canal": "Internal Channel Volume Stereo",
+      Equilibrio: "Internal Audio Balance",
+      DeEsser: "AE.ADBE DeEsser",
+    };
+    const list = removalHost(["Volumen", "Volumen del canal", "Equilibrio", "DeEsser"], { trackType: "audio", matchNames: spanishBalance });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["DeEsser"] } });
+    expect(names(list)).toEqual(["Volumen", "Volumen del canal", "Equilibrio"]);
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Equilibrio" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("built-in") });
+  });
+
+  it("classifies an English touched Balance as built-in too (live 25.2.3 en-US macOS data)", async () => {
+    // Display names and match names reported from a Premiere 25.2.3 en-US macOS
+    // host (#674): a stereo clip with Balance applied refused removal before the
+    // English name joined the table. DeEsser's real match name on that host is a
+    // GUID, encoded here to keep the fake honest.
+    const englishBalance = {
+      Volume: "Internal Volume Stereo",
+      "Channel Volume": "Internal Channel Volume Stereo",
+      Balance: "Internal Audio Balance",
+      DeEsser: "ffbe710f-cd69-4139-ad26-65603616d9d4",
+    };
+    const list = removalHost(["Volume", "Channel Volume", "Balance", "DeEsser"], { trackType: "audio", matchNames: englishBalance });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["DeEsser"] } });
+    expect(names(list)).toEqual(["Volume", "Channel Volume", "Balance"]);
+    await expect(clipboard.remove_effect_by_name.handler({ node_id: "clip1", effect_name: "Balance" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("built-in") });
+  });
+
+  it("keeps a Spanish graphic's layers (Movimiento del vector, Texto) while removing effects", async () => {
+    const graphicEs = { Opacidad: "AE.ADBE Opacity", Movimiento: "AE.ADBE Motion", "Movimiento del vector": "AE.ADBE Graphic Group", Texto: "AE.ADBE Text", Tinte: "AE.ADBE Tint" };
+    const list = removalHost(["Opacidad", "Movimiento", "Movimiento del vector", "Texto", "Tinte"], { matchNames: graphicEs });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Tinte"] } });
+    expect(names(list)).toEqual(["Opacidad", "Movimiento", "Movimiento del vector", "Texto"]);
+  });
+
+  it("removes effects on an Italian host whose built-ins Premiere's dictionaries name", async () => {
+    const italian = { "Opacità": "AE.ADBE Opacity", Movimento: "AE.ADBE Motion", "Colore Lumetri": "AE.ADBE Lumetri" };
+    const list = removalHost(["Opacità", "Movimento", "Colore Lumetri"], { matchNames: italian });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Colore Lumetri"] } });
+    expect(names(list)).toEqual(["Opacità", "Movimento"]);
+  });
+
+  it("still refuses on a host language Premiere's dictionaries do not name (#674)", async () => {
+    const swedish = { Opacitet: "AE.ADBE Opacity", "Rörelse": "AE.ADBE Motion", "Lumetri-färg": "AE.ADBE Lumetri" };
+    const list = removalHost(["Opacitet", "Rörelse", "Lumetri-färg"], { matchNames: swedish });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("localized names") });
+    expect(names(list)).toEqual(["Opacitet", "Rörelse", "Lumetri-färg"]);
+  });
+
+  it("keeps a graphic's own layers (Vector Motion, Text) by match name", async () => {
+    const graphic = { "Vector Motion": "AE.ADBE Graphic Group", Text: "AE.ADBE Text", Opacity: "AE.ADBE Opacity", Motion: "AE.ADBE Motion", Tint: "AE.ADBE Tint" };
+    const list = removalHost(["Opacity", "Motion", "Vector Motion", "Text", "Tint"], { matchNames: graphic });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Tint"] } });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Vector Motion", "Text"]);
+  });
+
+  it("keeps a stock lower third's shape layers by match name (live 25.2.3: AE.ADBE Shape)", async () => {
+    const lowerThird = { "Vector Motion": "AE.ADBE Graphic Group", Shape: "AE.ADBE Shape", Text: "AE.ADBE Text", Opacity: "AE.ADBE Opacity", Motion: "AE.ADBE Motion", Tint: "AE.ADBE Tint" };
+    const list = removalHost(["Opacity", "Motion", "Vector Motion", "Shape", "Text", "Shape", "Tint"], { matchNames: lowerThird });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Tint"] } });
+    expect(names(list)).toEqual(["Opacity", "Motion", "Vector Motion", "Shape", "Text", "Shape"]);
+  });
+
+  it("keeps a localized shape layer that Premiere's dictionaries name (German Form)", async () => {
+    const list = removalHost(["Form", "Lumetri-Farbe"], { matchNames: { Form: "AE.ADBE Shape", "Lumetri-Farbe": "AE.ADBE Lumetri" } });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Lumetri-Farbe"] } });
+    expect(names(list)).toEqual(["Form"]);
+  });
+
+  it("keeps a built-in without a match name when its UI-language name is known (German Deckkraft)", async () => {
+    const list = removalHost(["Deckkraft", "Lumetri-Farbe"], { matchNames: { Deckkraft: "", "Lumetri-Farbe": "AE.ADBE Lumetri" } });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { removedEffects: ["Lumetri-Farbe"] } });
+    expect(names(list)).toEqual(["Deckkraft"]);
+  });
+
+  it("refuses, removing nothing, when a component reports no match name and an unknown name", async () => {
+    const list = removalHost(["Opacitet", "Lumetri-Farbe"], { matchNames: { Opacitet: "", "Lumetri-Farbe": "AE.ADBE Lumetri" } });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("no match name") });
+    expect(names(list)).toEqual(["Opacitet", "Lumetri-Farbe"]);
+  });
+
+  it("removes audio effects when the audio built-ins are recognized", async () => {
+    const list = removalHost(["Volume", "Channel Volume", "Panner", "DeNoise"], { trackType: "audio" });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: true, data: { verified: true } });
+    expect(names(list)).toEqual(["Volume", "Channel Volume", "Panner"]);
+  });
+
+  it("says a silent QE no-op did not take effect, not that effects were removed", async () => {
+    removalHost(["Opacity", "Motion", "Lumetri Color"], { qeRemoveNoop: true });
+    await expect(advanced.remove_all_effects.handler({ node_id: "clip1" })).resolves.toMatchObject({ success: false, error: expect.stringContaining("did not take effect: the clip still has Opacity, Motion, Lumetri Color") });
+  });
+
+  it("documents the capability boundary and the experimental QE path in each removal tool", () => {
+    for (const tool of [effects.remove_effect, clipboard.remove_effect_by_name, advanced.remove_all_effects]) {
+      expect(tool.description).toContain("capability error");
+      expect(tool.description).toContain("EXPERIMENTAL");
+    }
   });
 });
 
@@ -482,12 +877,56 @@ describe("issue #37 — sequence frame rate uses ticks per frame", () => {
   it("converts fps to a Time duration and verifies the applied ticks", async () => {
     const script = await scriptFor(utility.set_sequence_frame_rate, { frame_rate: 30 });
 
-    expect(script).toContain("TICKS_PER_SECOND / requestedFps");
+    expect(script).toContain("var requestedTicks = 8467200000;");
     expect(script).toContain("var frameDuration = new Time()");
     expect(script).toContain("frameDuration.ticks = requestedTicks.toString()");
     expect(script).toContain("settings.videoFrameRate = frameDuration");
     expect(script).toContain("Math.abs(appliedTicks - requestedTicks) > 1");
     expect(script).not.toContain("settings.videoFrameRate = 30");
+  });
+
+  it("uses Premiere's exact NTSC timebases for 23.976, 29.97 and 59.94", async () => {
+    expect(sequenceFrameTicks(23.976)).toMatchObject({ ticks: 10594584000, ntsc: true });
+    expect(sequenceFrameTicks(29.97)).toMatchObject({ ticks: 8475667200, ntsc: true });
+    expect(sequenceFrameTicks(59.94)).toMatchObject({ ticks: 4237833600, ntsc: true });
+    expect(sequenceFrameTicks(29.97).exactFrameRate).toBeCloseTo(30000 / 1001, 9);
+    expect(sequenceFrameTicks(25)).toMatchObject({ ticks: 10160640000, ntsc: false });
+    expect(sequenceFrameTicks(29.9)).toMatchObject({ ntsc: false });
+    const script = await scriptFor(utility.set_sequence_frame_rate, { frame_rate: 29.97 });
+    expect(script).toContain("var requestedTicks = 8475667200;");
+  });
+
+  it("reports clips Premiere re-snaps to the new frame grid", async () => {
+    // Live 26.5.2: a 29.97 -> 25 -> 29.97 round trip moved 21 of 44 clips by a frame.
+    const TPS = 254016000000;
+    const old = TPS * 1001 / 30000;
+    const clip = (nodeId: string, startFrames: number, endFrames: number) => ({
+      nodeId,
+      start: { ticks: String(startFrames * old) }, end: { ticks: String(endFrames * old) }, inPoint: { ticks: "0" },
+    });
+    const clips = [clip("on-grid", 0, 1200), clip("off-grid", 1201, 1256)];
+    const settings: Record<string, unknown> = { videoFrameRate: { ticks: String(old) } };
+    const seq = {
+      name: "Seq",
+      videoTracks: { numTracks: 1, 0: { clips: Object.assign({ numItems: clips.length }, clips) } },
+      audioTracks: { numTracks: 0 },
+      getSettings: () => ({ ...settings }),
+      setSettings: (next: { videoFrameRate: { ticks: string } }) => {
+        settings.videoFrameRate = { ticks: next.videoFrameRate.ticks };
+        const frame = parseFloat(next.videoFrameRate.ticks);
+        for (const c of clips) {
+          c.start.ticks = String(Math.round(parseFloat(c.start.ticks) / frame) * frame);
+          c.end.ticks = String(Math.round(parseFloat(c.end.ticks) / frame) * frame);
+        }
+      },
+    };
+    function Time(this: { ticks: string }) { this.ticks = "0"; }
+    const script = await scriptFor(utility.set_sequence_frame_rate, { frame_rate: 25 });
+    const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, { Time, app: { project: { activeSequence: seq } } })));
+    expect(result).toMatchObject({ success: true, data: { verified: true, clipsMoved: 1, clipsMissing: 0 } });
+    expect(result.data.movedClips).toHaveLength(1);
+    expect(result.data.movedClips[0].clip).toBe("V0:off-grid");
+    expect(result.data.warning).toContain("1 clip(s) moved");
   });
 
   it("rejects invalid frame rates before sending a Premiere command", async () => {
@@ -554,6 +993,25 @@ describe("issue #335 — pixel aspect ratio must fail closed on unsupported CEP 
     });
   });
 
+  it("accepts a request that already matches Premiere's read-only num:den ratio (live 25.2)", async () => {
+    const readOnly: Record<string, string> = {};
+    Object.defineProperty(readOnly, "videoPixelAspectRatio", {
+      get: () => "1:1",
+      set: () => { throw new TypeError("Cannot set property videoPixelAspectRatio"); },
+    });
+    const setSettings = vi.fn();
+    const sequence = { name: "Square", getSettings: () => readOnly, setSettings };
+    await expect(executePixelAspectRatioScript(sequence, "1.0")).resolves.toMatchObject({
+      success: true,
+      data: { alreadySet: true, hostRatio: "1:1", verified: true },
+    });
+    expect(setSettings).not.toHaveBeenCalled();
+    await expect(executePixelAspectRatioScript(sequence, "1.4222")).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("rejected the sequence pixel-aspect-ratio update"),
+    });
+  });
+
   it("treats a false host result and mismatched readback as unverified", async () => {
     await expect(executePixelAspectRatioScript({
       name: "Rejected return value",
@@ -585,8 +1043,26 @@ describe("issue #335 — pixel aspect ratio must fail closed on unsupported CEP 
 
     expect(result).toEqual({
       success: true,
-      data: { ratio: "1.4222", sequence: "Verified sequence", verified: true },
+      data: { ratio: "1.4222", observedRatio: "1.4222", sequence: "Verified sequence", verified: true },
     });
+  });
+
+  it("compares the ratio numerically so host formatting does not fail a correct update (#642)", async () => {
+    for (const [requested, hostFormat] of [["1.0", "1"], ["1.0", "1:1"], ["1.4222", "1.42222"], ["2", "2.0"]]) {
+      const readback = { videoPixelAspectRatio: "0.9" };
+      const result = await executePixelAspectRatioScript({
+        name: "Formatted",
+        getSettings: vi.fn().mockReturnValueOnce(readback).mockReturnValueOnce({ videoPixelAspectRatio: hostFormat }),
+        setSettings: () => true,
+      }, requested);
+      expect(result).toMatchObject({ success: true, data: { ratio: requested, observedRatio: hostFormat, verified: true } });
+    }
+    const wrong = await executePixelAspectRatioScript({
+      name: "Wrong",
+      getSettings: vi.fn().mockReturnValueOnce({ videoPixelAspectRatio: "0.9" }).mockReturnValueOnce({ videoPixelAspectRatio: "0.9091" }),
+      setSettings: () => true,
+    }, "1.0");
+    expect(wrong).toMatchObject({ success: false, error: expect.stringContaining("reads back as 0.9091") });
   });
 
   it("rejects non-string aspect ratios before sending a Premiere command", async () => {
@@ -601,6 +1077,96 @@ describe("issue #335 — pixel aspect ratio must fail closed on unsupported CEP 
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/235
 describe("issue #235 — CEP tool calls use the host's documented argument types", () => {
   const utility = getUtilityTools(bridgeOptions);
+  // #710: audio volume tools must recognize localized built-ins (es-ES
+  // Volumen / Internal Volume Stereo, property Nivel) — previously they only
+  // matched English names and failed with "is this an audio clip?".
+  it("set_clip_volume and get_clip_volume recognize localized Volume components", async () => {
+    const setScript = await scriptFor(tracks.set_clip_volume, { node_id: "clip-1", volume_db: -3 });
+    expect(setScript).toContain("Volumen");
+    expect(setScript).toContain("Internal Volume");
+    expect(setScript).toContain("Nivel");
+    const getScript = await scriptFor(tracks.get_clip_volume, { node_id: "clip-1" });
+    expect(getScript).toContain("Volumen");
+    expect(getScript).toContain("Nivel");
+  });
+
+  it.each([
+    ["localized display name", "Volumen", ""],
+    ["locale-independent match name", "Other language", "Internal Volume Stereo"],
+  ])("writes and reads audio volume through %s", async (_label, displayName, matchName) => {
+    let level = 1;
+    const keyValues = new Map<string, number>();
+    const property = {
+      displayName: "Nivel",
+      setValue(value: number) { level = value; },
+      getValue() { return level; },
+      setTimeVarying() {},
+      addKey() {},
+      setValueAtKey(time: { ticks: string }, value: number) { keyValues.set(time.ticks, value); },
+      getValueAtTime(time: { ticks: string }) { return keyValues.get(time.ticks); },
+      getKeys() { return Array.from(keyValues.keys()).map((ticks) => ({ ticks })); },
+    };
+    const component = { displayName, matchName, properties: { numItems: 1, 0: property } };
+    const clip = { nodeId: "audio-1", name: "Audio", getSpeed: () => 1, isSpeedReversed: () => false, inPoint: { ticks: "0" }, start: { ticks: "0" }, end: { ticks: String(3 * 254016000000) }, duration: { ticks: String(3 * 254016000000) }, components: { numItems: 1, 0: component } };
+    const track = { clips: { numItems: 1, 0: clip } };
+    const sequence = { videoTracks: { numTracks: 0 }, audioTracks: { numTracks: 1, 0: track } };
+    function Time(this: { ticks: string }) { this.ticks = "0"; }
+    mockedSendCommand.mockImplementation(async (script: string) =>
+      JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, { app: { project: { activeSequence: sequence } }, Time }))));
+
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: -3 })).resolves.toMatchObject({
+      success: true, data: { requestedVolumeDb: -3, clamped: false },
+    });
+    expect(level).toBeGreaterThan(0);
+    expect(level).toBeLessThan(1);
+    const readback = await tracks.get_clip_volume.handler({ node_id: "audio-1" });
+    expect(readback).toMatchObject({ success: true, data: { clip: "Audio" } });
+    expect((readback as { data: { volumeDb: number } }).data.volumeDb).toBeCloseTo(-3, 3);
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: 100 })).resolves.toMatchObject({
+      success: true, data: { requestedVolumeDb: 100, volumeDb: 15, level: 1, clamped: true },
+    });
+    await expect(tracks.set_clips_volume.handler({ track_index: 0, volume_db: -6 })).resolves.toMatchObject({
+      success: true, data: { applied: 1, skipped: 0 },
+    });
+    const audio = getAudioTools(bridgeOptions);
+    await expect(audio.adjust_audio_levels.handler({ node_id: "audio-1", level_db: -4 })).resolves.toMatchObject({
+      success: true, data: { adjusted: true, verified: true },
+    });
+    await expect(audio.add_audio_keyframes.handler({ node_id: "audio-1", keyframes: [{ time_seconds: 1, level_db: -6 }] })).resolves.toMatchObject({
+      success: true, data: { keyframesAdded: 1, verified: true },
+    });
+    const competitor = getCompetitorGapTools(bridgeOptions);
+    await expect(competitor.setup_ducking.handler({ node_id: "audio-1", ducking_windows: [] })).resolves.toMatchObject({
+      success: true, data: { updated: true, verified: true },
+    });
+    const originalSetter = property.setValue;
+    Object.assign(property, { setValue: () => {} });
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: -20 })).resolves.toMatchObject({
+      success: false, data: { outcome: "not_applied", verified: false, timelineChanged: false },
+    });
+    property.setValue = originalSetter;
+    let invalidReads = 0;
+    Object.assign(property, { getValue: () => ++invalidReads === 1 ? level : true });
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: 15 })).resolves.toMatchObject({
+      success: true, data: { outcome: "committed_unverified", verified: false, level: null },
+    });
+    let throwingReads = 0;
+    property.getValue = () => { if (++throwingReads > 1) throw new Error("readback unavailable"); return level; };
+    const unreadable = await tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: -3 });
+    expect(unreadable).toMatchObject({
+      success: true,
+      data: { outcome: "committed_unverified", requestedVolumeDb: -3, volumeDb: null },
+    });
+    Object.assign(property, { getValue: () => level, setValue: () => { throw new Error("setter refused before write"); } });
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: -12 })).resolves.toMatchObject({
+      success: false, data: { outcome: "not_applied", verified: false, timelineChanged: false, level },
+    });
+    Object.assign(property, { getValue: () => level, setValue: (value: number) => { level = value; throw new Error("setter failed after write"); } });
+    await expect(tracks.set_clip_volume.handler({ node_id: "audio-1", volume_db: -8 })).resolves.toMatchObject({
+      success: false, data: { outcome: "committed_unverified", verified: false, timelineChanged: true },
+    });
+  });
+
   const tracks = getTrackTargetingTools(bridgeOptions);
   const project = getProjectTools(bridgeOptions);
 
@@ -614,13 +1180,13 @@ describe("issue #235 — CEP tool calls use the host's documented argument types
     expect(script).toContain("Premiere did not apply the requested sequence pixel aspect ratio");
   });
 
-  it("clears sequence points with seconds derived from their tick values", async () => {
+  it("clears sequence points with the unset value and keeps tick-derived bounds as the fallback", async () => {
     const script = await scriptFor(tracks.clear_sequence_in_out, {});
 
-    expect(script).toContain("var zeroSeconds = __ticksToSeconds(seq.zeroPoint)");
-    expect(script).toContain("var endSeconds = __ticksToSeconds(seq.end)");
-    expect(script).toContain("seq.setInPoint(zeroSeconds)");
-    expect(script).toContain("seq.setOutPoint(endSeconds)");
+    expect(script).toContain("seq.setInPoint(-400000)");
+    expect(script).toContain("seq.setOutPoint(-400000)");
+    expect(script).toContain("__ticksToSeconds(seq.zeroPoint)");
+    expect(script).toContain("__ticksToSeconds(seq.end)");
     expect(script).not.toContain("seq.zeroPoint.ticks");
   });
 
@@ -640,7 +1206,8 @@ describe("issue #235 — CEP tool calls use the host's documented argument types
     expect(script).toContain("1,");
     expect(script).toContain("48000,");
     expect(script).toContain('"Bars"');
-    expect(script).toContain("if (!item) return __error");
+    expect(script).toContain("var beforeIds = __collectNodeIds(");
+    expect(script).toContain("__findNewProjectItem(beforeIds, requestedName)");
   });
 
   it("writes the Anti-flicker numeric stream value and verifies it", async () => {
@@ -699,11 +1266,56 @@ describe("issue #237 — reported mutations must be observable or fail", () => {
   const project = getProjectTools(bridgeOptions);
   const tracks = getTrackTargetingTools(bridgeOptions);
   const media = getMediaTools(bridgeOptions);
+
+  // #713: a missing import path must fail fast in the handler — importFiles
+  // with a nonexistent path opens a blocking modal in Premiere that wedges the
+  // CEP bridge until a restart.
+  it("refuses import_media with missing paths before Premiere is contacted", async () => {
+    await expect(media.import_media.handler({ file_paths: ["C:/no/existe.mp4"] })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("File(s) not found"),
+    });
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+  });
+
+  it("refuses import_folder with a nonexistent folder before Premiere is contacted", async () => {
+    const missing = join(process.cwd(), "__missing_import_folder_713__");
+    await expect(media.import_folder.handler({ folder_path: missing })).resolves.toMatchObject({
+      success: false, error: expect.stringContaining("not found"),
+    });
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty arrays and directories before host contact (#725 FAM-5)", async () => {
+    expect(media.import_media.parameters.properties.file_paths).toMatchObject({ minItems: 1, items: { minLength: 1 } });
+    await expect(media.import_media.handler({ file_paths: [] })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("at least one non-empty path"),
+    });
+    const dir = join(process.cwd());
+    const dirForward = dir.split(sep).join("/");
+    await expect(media.import_media.handler({ file_paths: [dirForward] })).resolves.toMatchObject({
+      success: false, error: expect.stringContaining("Use import_folder"),
+    });
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+    await expect(media.import_folder.handler({ folder_path: join(process.cwd(), "package.json") })).resolves.toMatchObject({
+      success: false, error: expect.stringContaining("not a directory"),
+    });
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+  });
+
+  it("resolves forward-slash import paths to native separators before embedding them", async () => {
+    const forward = join(process.cwd(), "package.json").split(sep).join("/");
+    const script = await scriptFor(media.import_media, { file_paths: [forward] });
+    expect(script).toContain(escapeForExtendScript(resolve(forward)));
+  });
   const exports = getExportTools(bridgeOptions);
 
   it("makes trim tools read back their claimed changes", async () => {
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { projectDocumentId: "project", sequenceId: "seq", linkedNodeIds: [], entries: [{ nodeId: "clip-1", mediaPath: "/tmp/clip.mp4", position: "0|1|0|1", trackType: "video", trackIndex: 0, clipIndex: 0 }] } });
     const slide = await scriptFor(advanced.slide_edit, { node_id: "clip-1", offset_seconds: 1 });
     const slip = await scriptFor(advanced.slip_edit, { node_id: "clip-1", offset_seconds: 1 });
+    mockedSendCommand.mockResolvedValueOnce({ success: true, data: { projectDocumentId: "project", sequenceId: "seq", linkedNodeIds: [], entries: [{ nodeId: "clip-1", mediaPath: "/tmp/clip.mp4", position: "0|1|0|1", trackType: "video", trackIndex: 0, clipIndex: 0 }] } });
     const roll = await scriptFor(advanced.roll_edit, { node_id: "clip-1", offset_seconds: 1 });
 
     expect(slide).toContain("The slide edit returned without an observable timeline change");
@@ -754,6 +1366,15 @@ describe("issue #237 — reported mutations must be observable or fail", () => {
     expect(omf).toContain("Premiere did not write the requested OMF file");
     expect(exports.export_omf.parameters.properties.include_pan).toMatchObject({ type: "boolean" });
   });
+
+  it("export_as_project fails closed when Premiere writes no file or leaves the old file unchanged", async () => {
+    const script = await scriptFor(advanced.export_as_project, { output_path: "/tmp/export.prproj" });
+
+    expect(script).toContain("seq.exportAsProject(outputFile.fsName)");
+    expect(script).toContain('if (!outputFile.exists || !(outputFile.length > 0)) return __error("Premiere did not write the requested project file.")');
+    expect(script).toContain("the existing output was unchanged");
+    expect(script).toContain("verified: true");
+  });
 });
 
 // https://github.com/leancoderkavy/premiere-pro-mcp/issues/238
@@ -770,31 +1391,116 @@ describe("issue #238 — AME uses canonical paths and documented encodeFile posi
 
     expect(queued).toContain("var outputFile = new File");
     expect(queued).toContain("var jobId = encoder.encodeSequence");
-    expect(queued).toContain("Queue presence and output-file creation are not verified");
+    expect(queued).toContain("encoder.ENCODE_IN_TO_OUT");
+    expect(queued).not.toContain("0, // workAreaType");
+    // Queueing remains an unverified handoff. Batch start is opt-in because it
+    // affects every ready AME job, including jobs unrelated to this call.
+    expect(queued).toContain("Batch startup and output-file creation are not verified by this tool");
+    expect(queued).toContain("if (false)");
+    expect(queued).toContain("app.encoder.startBatch()");
     expect(projectItem).toContain("outputFile.fsName");
     expect(projectItem).toContain("var jobId = app.encoder.encodeProjectItem");
   });
 
-  it("passes work area before removal and never passes undefined Time values", async () => {
-    const wholeFile = await scriptFor(exports.encode_file, {
-      input_path: "/tmp/source.mov",
-      output_path: "/tmp/render.mp4",
-      preset_path: "/tmp/preset.epr",
+  it("escapes quoted output and preset paths before building the sequence handoff", async () => {
+    const queued = await scriptFor(exports.add_to_render_queue, {
+      output_path: '/tmp/render "quoted".mp4',
+      preset_path: temporaryPreset(),
     });
-    const range = await scriptFor(exports.encode_file, {
-      input_path: "/tmp/source.mov",
+    expect(queued).toContain('render \\"quoted\\".mp4');
+    expect(queued).toContain("encoder.ENCODE_IN_TO_OUT");
+  });
+
+  it("uses the documented encodeFile signature without a workArea argument (live: 'Illegal Parameter type')", async () => {
+    const run = async (args: Record<string, unknown>) => {
+      const calls: unknown[][] = [];
+      const script = await scriptFor(exports.encode_file, { input_path: "/tmp/source.mov", output_path: "/tmp/render.mp4", preset_path: "/tmp/preset.epr", ...args });
+      function Time(this: { seconds: number }) { this.seconds = 0; }
+      function File(this: { exists: boolean; fsName: string; parent: { exists: boolean } }, path: string) { this.exists = true; this.fsName = path; this.parent = { exists: true }; }
+      const result = JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+        Time, File,
+        app: {
+          project: { path: "/tmp/p.prproj" },
+          encoder: {
+            launchEncoder: () => true,
+            startBatch: () => true,
+            encodeFile: (...callArgs: unknown[]) => {
+              calls.push(callArgs);
+              if (typeof callArgs[3] !== "boolean" || (callArgs.length > 4 && !(callArgs[4] instanceof Time))) throw new Error("Illegal Parameter type");
+              return "job-1";
+            },
+          },
+        },
+      })));
+      return { result, calls };
+    };
+    const whole = await run({});
+    expect(whole.result).toMatchObject({ success: true, data: { jobId: "job-1", range: "entire" } });
+    expect(whole.calls[0]).toHaveLength(4);
+    const ranged = await run({ in_seconds: 24.4, out_seconds: 34.9 });
+    expect(ranged.result).toMatchObject({ success: true, data: { range: { inSeconds: 24.4, outSeconds: 34.9 } } });
+    expect(ranged.calls[0]).toHaveLength(6);
+  });
+});
+
+// https://github.com/leancoderkavy/premiere-pro-mcp/issues/615
+describe("issue #615 — encode_file passes natively typed arguments", () => {
+  const exports = getExportTools(bridgeOptions);
+  const base = { input_path: "/tmp/source.mov", output_path: "/tmp/render.mp4", preset_path: "/tmp/preset.epr" };
+
+  it("passes String paths, a Boolean removal flag, and Time in/out points", async () => {
+    const script = await scriptFor(exports.encode_file, base);
+
+    expect(script).toContain('var presetFile = new File("/tmp/preset.epr")');
+    expect(script).toContain("if (!presetFile.exists) return __error");
+    expect(script).toContain("var removeUponCompletion = true;");
+    expect(script).toContain("String(inputFile.fsName), String(outputFile.fsName), String(presetFile.fsName), removeUponCompletion)");
+    expect(script).not.toMatch(/,\s*workArea,/);
+  });
+
+  it("emits a false Boolean when remove_on_completion is false, with or without a range", async () => {
+    const noRange = await scriptFor(exports.encode_file, { ...base, remove_on_completion: false });
+    const range = await scriptFor(exports.encode_file, { ...base, remove_on_completion: false, in_seconds: 1, out_seconds: 3 });
+
+    for (const script of [noRange, range]) {
+      expect(script).toContain("var removeUponCompletion = false;");
+    }
+    expect(range).toContain("srcIn.seconds = 1;");
+    expect(range).toContain("srcOut.seconds = 3;");
+  });
+
+  it("passes a Boolean removal flag to encodeProjectItem", async () => {
+    const item = { item_id: "item-1", output_path: "/tmp/render.mp4", preset_path: "/tmp/preset.epr" };
+    const keep = await scriptFor(exports.encode_project_item, { ...item, remove_on_completion: false });
+    const remove = await scriptFor(exports.encode_project_item, item);
+
+    expect(keep).toMatch(/ENCODE_IN_TO_OUT,\s*false\s*\)/);
+    expect(remove).toMatch(/ENCODE_IN_TO_OUT,\s*true\s*\)/);
+  });
+
+  it("passes a Boolean removal flag from manage_proxies create and encodeSequence", async () => {
+    const proxy = await scriptFor(exports.manage_proxies, {
+      item_id: "item-1",
+      action: "create",
+      output_path: "/tmp/proxy.mov",
+      preset_path: "/tmp/proxy.epr",
+    });
+    const queued = await scriptFor(exports.add_to_render_queue, {
       output_path: "/tmp/render.mp4",
-      preset_path: "/tmp/preset.epr",
-      in_seconds: 1,
-      out_seconds: 2,
+      preset_path: temporaryPreset(),
     });
 
-    expect(wholeFile).toContain("var srcIn = new Time()");
-    expect(wholeFile).toContain("var workArea = 0");
-    expect(range).toContain("var workArea = 1");
-    expect(range).toContain("workArea,");
-    expect(range).not.toContain("var srcIn = undefined");
-    expect(range).toContain("var jobId = app.encoder.encodeFile");
+    expect(proxy).toMatch(/ENCODE_ENTIRE,\s*true\s*\)/);
+    expect(proxy).not.toMatch(/ENCODE_ENTIRE,\s*1\s*\)/);
+    expect(queued).toContain("encoder.encodeSequence(");
+    expect(queued).toContain("encoder.ENCODE_IN_TO_OUT");
+    expect(queued).toContain("true // removeUponCompletion");
+    expect(queued).not.toMatch(/encodeSequence\([\s\S]*\b1\s*\/\/\s*removeOnCompletion/);
+  });
+
+  it("escapes a user preset path before embedding it", async () => {
+    const script = await scriptFor(exports.encode_file, { ...base, preset_path: 'C:\\p\\a"b.epr' });
+    expect(script).toContain('new File("C:\\\\p\\\\a\\"b.epr")');
   });
 });
 
@@ -856,9 +1562,9 @@ describe("issue #324 — duplicate media requires distinct project-item node IDs
     const script = await scriptFor(utility.get_duplicate_media, {});
 
     expect(script).toContain("var nodeId = String(item.nodeId || \"\")");
-    expect(script).toContain("pathMap[mp] = { items: [], nodeIds: {} }");
-    expect(script).toContain("if (!pathMap[mp].nodeIds[nodeId])");
-    expect(script).toContain("pathMap[path].items.length > 1");
+    expect(script).toContain("items: [], nodeIds: {} }");
+    expect(script).toContain("if (!pathMap[key].nodeIds[nodeId])");
+    expect(script).toContain("group.items.length > 1");
     expect(script).not.toContain("pathMap[path].length > 1");
   });
 });
@@ -869,7 +1575,7 @@ describe("issue #326 — sequence creation requires project-collection readback"
 
   it("does not report a QE-active sequence as created unless it is discoverable", async () => {
     const script = await scriptFor(sequence.create_sequence, {
-      name: "Verified Sequence", preset_path: "/tmp/sequence.sqpreset",
+      name: "Verified Sequence", preset_path: join(process.cwd(), "package.json"),
     });
     expect(script).toContain("var beforeSequenceIds = {}");
     expect(script).toContain("var sequenceId = String(seq.sequenceID)");
@@ -878,6 +1584,62 @@ describe("issue #326 — sequence creation requires project-collection readback"
     expect(script).toContain("var created = __findSequence(sequenceId)");
     expect(script).toContain("no creation success is reported");
     expect(script).toContain("verified: true");
+  });
+
+  it("applies the same new-ID readback to create_sequence_from_preset", async () => {
+    const script = await scriptFor(sequence.create_sequence_from_preset, {
+      name: "Interview", preset_path: join(process.cwd(), "package.json"),
+    });
+    expect(script).toContain("var beforeSequenceIds = {}");
+    expect(script).toContain("if (beforeSequenceIds[sequenceId])");
+    expect(script).toContain("did not create a new sequence");
+    expect(script).toContain("var created = __findSequence(sequenceId)");
+    expect(script).toContain("no creation success is reported");
+    expect(script).toContain("verified: true");
+  });
+
+  it("fails closed when create_sequence_from_preset would claim the already-active sequence", async () => {
+    const existing = { name: "Interview", sequenceID: "seq-existing" };
+    const sequences = new Proxy({}, {
+      get: (_t, k) => (k === "numSequences" ? 1 : existing),
+    });
+    mockedSendCommand.mockImplementation(async (script: string) =>
+      JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+        app: {
+          enableQE() {},
+          project: { sequences, activeSequence: existing },
+        },
+        qe: { project: { newSequence() {} } },
+      }))));
+
+    await expect(sequence.create_sequence_from_preset.handler({
+      name: "Interview",
+      preset_path: join(process.cwd(), "package.json"),
+    })).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("already existed before the preset request"),
+    });
+  });
+
+  it.each([false, true])("verifies a fresh active sequence only when present in the collection (%s)", async (listed) => {
+    const existing = { name: "Old", sequenceID: "seq-existing" };
+    const created = { name: "Interview", sequenceID: "seq-created" };
+    const items = [existing];
+    const project = {
+      activeSequence: existing,
+      sequences: new Proxy({}, { get: (_t, k) => k === "numSequences" ? items.length : items[Number(k)] }),
+    };
+    mockedSendCommand.mockImplementation(async (script: string) =>
+      JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+        app: { enableQE() {}, project },
+        qe: { project: { newSequence() { project.activeSequence = created; if (listed) items.push(created); } } },
+      }))));
+    const result = await sequence.create_sequence_from_preset.handler({ name: "Interview", preset_path: join(process.cwd(), "package.json") });
+    if (listed) {
+      expect(result).toMatchObject({ success: true, data: { created: true, verified: true, id: "seq-created", name: "Interview" } });
+    } else {
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining("did not add the new sequence to the project collection") });
+    }
   });
 });
 
@@ -906,7 +1668,7 @@ describe("QE still frames are addressed by timecode and macOS bundles are resolv
 
     expect(helpers).toContain("function __qeTimecodeForTicks(");
     expect(helpers).toContain("getFormatted(fr, displayFormat)");
-    expect(helpers).toContain("fn.call(qeSeq, at.timecode, basePath)");
+    expect(helpers).toContain("fn.call(qeSeq, at.timecode, qeBase)");
     expect(helpers).not.toContain("fn.call(qeSeq, outputPath, w, h)");
     // The timecode argument alone selects the frame; the editor's playhead is left alone.
     expect(helpers).not.toContain("seq.setPlayerPosition(String(ticks))");
@@ -941,7 +1703,7 @@ describe("issue #503 — trim_clip partial write rollback prevents clip corrupti
   it("rolls back source metadata when partial write is detected", async () => {
     const script = await scriptFor(timeline.trim_clip, { node_id: "clip-1", new_in_seconds: 0.3 });
 
-    expect(script).toContain("if (sourceMetadataChanged)");
+    expect(script).toContain("if (sourceMetadataChanged || timelineMoved)");
     expect(script).toContain("restoredIn.ticks = originalInPointTicks");
     expect(script).toContain("restoredOut.ticks = originalOutPointTicks");
     expect(script).toContain("afterResult.clip.inPoint = restoredIn");
@@ -969,7 +1731,7 @@ describe("issue #503 — trim_clip partial write rollback prevents clip corrupti
     const script = await scriptFor(timeline.trim_clip, { node_id: "clip-1", new_in_seconds: 0.3 });
 
     // Partial write path: sourceMetadataChanged is true
-    expect(script).toContain("if (sourceMetadataChanged)");
+    expect(script).toContain("if (sourceMetadataChanged || timelineMoved)");
     expect(script).toContain("rolled back to its original state");
 
     // No-op path: sourceMetadataChanged is false
@@ -988,5 +1750,76 @@ describe("issue #503 — trim_clip partial write rollback prevents clip corrupti
     const script = await scriptFor(timeline.trim_clip, { node_id: "clip-1", new_in_seconds: 0.3 });
 
     expect(script).toContain("the clip could not be re-found for rollback");
+  });
+});
+
+describe("sequence settings setters verify their readback", () => {
+  const utility = getUtilityTools(bridgeOptions);
+  const run = async (tool: { handler: (args: never) => Promise<unknown> }, args: unknown, accept: boolean) => {
+    const settings: Record<string, number> = { videoFrameWidth: 1920, videoFrameHeight: 1080, videoFieldType: 0, videoDisplayFormat: 1, audioDisplayFormat: 0 };
+    const script = await scriptFor(tool, args);
+    return JSON.parse(String(runInNewContext(`${getHelpersSource()}\n${script}`, {
+      app: { project: { activeSequence: { name: "Seq", getSettings: () => ({ ...settings }), setSettings: (next: Record<string, number>) => { if (accept) Object.assign(settings, next); } } } },
+    })));
+  };
+
+  it("fails when Premiere ignores a frame size, field type or display format", async () => {
+    await expect(run(utility.set_sequence_resolution, { width: 1080, height: 1920 }, true)).resolves.toMatchObject({ success: true, data: { verified: true } });
+    await expect(run(utility.set_sequence_resolution, { width: 1080, height: 1920 }, false)).resolves.toMatchObject({ success: false, error: expect.stringContaining("got 1920x1080") });
+    await expect(run(utility.set_sequence_field_type, { field_type: 1 }, false)).resolves.toMatchObject({ success: false, error: expect.stringContaining("field type") });
+    await expect(run(utility.set_sequence_display_format, { video_display_format: 9 }, false)).resolves.toMatchObject({ success: false, error: expect.stringContaining("video display format") });
+    await expect(run(utility.set_sequence_display_format, { video_display_format: 9, audio_display_format: 1 }, true)).resolves.toMatchObject({ success: true, data: { videoDisplayFormat: 109, audioDisplayFormat: 201, verified: true } });
+    await expect(run(utility.set_sequence_display_format, { video_display_format: 102, audio_display_format: 200 }, true)).resolves.toMatchObject({ success: true, data: { videoDisplayFormat: 102, audioDisplayFormat: 200, verified: true } });
+  });
+
+  it("rejects out-of-range values before touching the host", async () => {
+    await expect(utility.set_sequence_resolution.handler({ width: 0, height: 1080 })).resolves.toMatchObject({ success: false });
+    await expect(utility.set_sequence_field_type.handler({ field_type: 7 })).resolves.toMatchObject({ success: false });
+    await expect(utility.set_sequence_display_format.handler({})).resolves.toMatchObject({ success: false });
+    await expect(utility.set_sequence_display_format.handler({ video_display_format: 114 })).resolves.toMatchObject({ success: false, error: expect.stringContaining("100 to 113") });
+    await expect(utility.set_sequence_display_format.handler({ audio_display_format: 2 })).resolves.toMatchObject({ success: false, error: expect.stringContaining("200") });
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+  });
+});
+
+describe("#712 rework: media bound from real ffprobe duration (owner review)", () => {
+  it("the media bound comes from ffprobe duration, not the editable source Out mark", async () => {
+    vi.mocked(sendCommand).mockResolvedValueOnce({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "C:/media/clip.mp4" } } as never);
+    const tools = getTimelineTools(bridgeOptions, { probeMediaDurationSeconds: async () => 10 });
+    await tools.trim_clip.handler({ node_id: "clip-1", new_out_seconds: 15 });
+    const script = mockedSendCommand.mock.calls.at(-1)[0] as string;
+    expect(script).toContain("__sourceWindowError(clip, 2540160000000,");
+    expect(script).toContain('if (trimWindowError) return __editFail(trimWindowError)');
+    expect(script).not.toContain("projectItem.getOutPoint()");
+  });
+
+  it("does not infer unlimited still media from an image filename when duration is unknown", async () => {
+    vi.mocked(sendCommand).mockResolvedValueOnce({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "C:/media/still.png" } } as never);
+    const tools = getTimelineTools(bridgeOptions, { probeMediaDurationSeconds: async () => null });
+    await expect(tools.trim_clip.handler({ node_id: "clip-1", new_out_seconds: 15 })).resolves.toMatchObject({ success: false, error: expect.stringContaining("Physical media duration") });
+    expect(mockedSendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("slip_edit carries the same ffprobe-evidence bound", async () => {
+    vi.mocked(sendCommand).mockResolvedValueOnce({ success: true, data: { projectId: "project", sequenceId: "seq", mediaPath: "C:/media/clip.mp4" } } as never);
+    const tools = getAdvancedTools(bridgeOptions, { probeMediaDurationSeconds: async () => 10 });
+    await tools.slip_edit.handler({ node_id: "clip-1", offset_seconds: 2 });
+    const script = mockedSendCommand.mock.calls.at(-1)[0] as string;
+    expect(script).toContain("__sourceWindowError(result.clip, 2540160000000,");
+  });
+});
+
+describe("source evidence preserves lookup failures", () => {
+  it.each(["trim", "slip"])("%s preserves a missing-clip error and never probes or mutates", async operation => {
+    const failure = { success: false, error: "Clip not found" };
+    mockedSendCommand.mockResolvedValueOnce(failure);
+    const probe = vi.fn().mockResolvedValue(10);
+    const tool = operation === "trim"
+      ? getTimelineTools(bridgeOptions, { probeMediaDurationSeconds: probe }).trim_clip
+      : getAdvancedTools(bridgeOptions, { probeMediaDurationSeconds: probe }).slip_edit;
+    const args = operation === "trim" ? { node_id: "missing", new_out_seconds: 12 } : { node_id: "missing", offset_seconds: 2 };
+    await expect(tool.handler(args as never)).resolves.toEqual(failure);
+    expect(probe).not.toHaveBeenCalled();
+    expect(mockedSendCommand).toHaveBeenCalledTimes(1);
   });
 });

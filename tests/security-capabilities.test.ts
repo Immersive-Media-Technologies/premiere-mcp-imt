@@ -54,12 +54,31 @@ describe("capability profiles", () => {
     expect(capabilityForTool("manage_markers_uxp")).toBe("edit");
     expect(capabilityForTool("list_markers_uxp")).toBe("inspect");
     expect(capabilityForTool("get_project_info")).toBe("inspect");
+    expect(capabilityForTool("map_source_ranges_to_timeline")).toBe("inspect");
     expect(capabilityForTool("preview_transcript_edit_uxp")).toBe("inspect");
     expect(capabilityForTool("plan_transcript_rough_cut_uxp")).toBe("inspect");
     expect(capabilityForTool("create_context_edit_plan")).toBe("inspect");
     expect(capabilityForTool("search_project_context")).toBe("inspect");
     expect(capabilityForTool("ping")).toBe("inspect");
     expect(capabilityForTool("trim_clip")).toBe("edit");
+  });
+
+  it("requires filesystem authority before an export-extension lookup can inspect a local preset", async () => {
+    expect(capabilitiesForToolInvocation("get_export_file_extension", { preset_path: "/tmp/preset.epr" }))
+      .toEqual(["inspect", "filesystem"]);
+    const handler = vi.fn(async () => "ok");
+    const guarded = guardToolHandler("get_export_file_extension", handler, resolveCapabilities("inspect"), () => "preset-op");
+    await expect(guarded({ preset_path: "/tmp/preset.epr" })).rejects.toMatchObject({ code: "CAPABILITY_DENIED", capability: "filesystem" });
+    expect(handler).not.toHaveBeenCalled();
+    expect(isToolPermitted("get_export_file_extension", resolveCapabilities("inspect"))).toBe(false);
+  });
+  it("requires inspect, edit and filesystem authority for probed adjacent edits", async () => {
+    for (const name of ["roll_edit", "slide_edit"]) {
+      expect(capabilitiesForToolInvocation(name, { node_id: "c1", offset_seconds: 1 })).toEqual(["inspect", "edit", "filesystem"]);
+      const handler = vi.fn(async () => "ok");
+      await expect(guardToolHandler(name, handler, resolveCapabilities("inspect,edit"), () => "adjacent-op")({})).rejects.toMatchObject({ code: "CAPABILITY_DENIED", capability: "filesystem" });
+      expect(handler).not.toHaveBeenCalled();
+    }
   });
 
   it("enforces inspect and edit profiles instead of only guarding unsafe tools", async () => {
@@ -248,6 +267,7 @@ describe("capability profiles", () => {
     ["manage_sequence_display_format_uxp", "inspect"],
     ["manage_sequence_range_uxp", "inspect"],
     ["manage_sequence_playhead_uxp", "inspect"],
+    ["manage_work_area_uxp", "inspect"],
     ["manage_app_preferences_uxp", "inspect"],
     ["manage_timeline_source_label_uxp", "inspect"],
     ["inspect_project_insertion_bin_uxp", undefined],
@@ -289,6 +309,7 @@ describe("capability profiles", () => {
     ["manage_sequence_display_format_uxp", "update", ["edit"]],
     ["manage_sequence_range_uxp", "update", ["edit"]],
     ["manage_sequence_playhead_uxp", "set", ["edit"]],
+    ["manage_work_area_uxp", "set", ["edit"]],
     ["manage_app_preferences_uxp", "set", ["edit"]],
     ["manage_timeline_source_label_uxp", "update", ["edit"]],
     ["import_project_media_uxp", "files", ["edit", "filesystem"]],
@@ -342,6 +363,14 @@ describe("capability profiles", () => {
     expect(report.backends.uxp.events).toContain("premiere.state.changed");
     expect(report.backends.uxp.operationSemantics.atomicRollback).toBe(false);
     expect(report.authority.disabled).toContain("unsafe-script");
+  });
+
+  it("declares the CEP areas Premiere exposes no automation API for", () => {
+    const report = buildPlatformCapabilityReport(resolveCapabilities("inspect"), "darwin");
+    const unsupported = report.backends.cep.delivery.unsupported;
+    expect(Object.keys(unsupported).sort()).toEqual(["captionTrackStyle", "cloudPublish", "contentCredentials", "edl", "otio", "renderAndReplace"]);
+    expect(unsupported.captionTrackStyle).toMatch(/No documented Premiere ExtendScript, QE DOM, or UXP API/);
+    expect(unsupported.captionTrackStyle).toContain("get_caption_style_guidance");
   });
 
   it("does not claim Premiere host support on Linux", () => {
@@ -606,7 +635,14 @@ describe("isToolPermitted", () => {
 
   it("agrees with capabilityForTool for every capability in the profile", () => {
     const config = resolveCapabilities("edit");
-    expect(capabilityForTool("trim_clip")).toBe("edit");
-    expect(isToolPermitted("trim_clip", config)).toBe(true);
+    expect(capabilityForTool("move_clip")).toBe("edit");
+    expect(isToolPermitted("move_clip", config)).toBe(true);
+  });
+});
+
+ it("reports edit-plan previews as requiring CEP host inspection", () => {
+  expect(deriveToolOperationalCapability("preview_edit_plan", { description: "Inspect edit targets" }, resolveCapabilities("inspect"))).toMatchObject({
+    backend: "CEP/ExtendScript", backends: ["cep", "extendscript"], verificationBoundary: "host_response", hostVerificationRequired: true,
+    authority: { required: "inspect", enabled: true },
   });
 });

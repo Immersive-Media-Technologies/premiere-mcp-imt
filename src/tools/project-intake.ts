@@ -4,9 +4,11 @@ import {
   buildProjectIntakeReport,
   MAX_PROJECT_INTAKE_ITEMS,
 } from "../intake/project-intake.js";
+import { getProjectStructureAuditTools, type ProjectStructureAuditDependencies } from "./project-structure-audit.js";
 
 export interface ProjectIntakeToolDependencies {
   captureSnapshot?: (maxItems: number) => Promise<CommandResult>;
+  structureAudit?: ProjectStructureAuditDependencies;
 }
 
 function boundedMaxItems(value: unknown): number {
@@ -32,10 +34,17 @@ export function projectIntakeCaptureScript(maxItems: number): string {
 
     function itemType(item) {
       if (item.type === 2) return "bin";
+      // Sequences are type 1 like clips but have no media file (live: every
+      // sequence was flagged EXTENSION_UNAVAILABLE).
+      try { if (typeof item.isSequence === "function" && item.isSequence()) return "sequence"; } catch(e) {}
       if (item.type === 1 || item.type === 4) return "clip";
       return "other";
     }
 
+    // Smart bins list references to items that live in other bins, so the same
+    // node can be reached twice; report each item once (live: "duplicate ids").
+    var seen = {};
+    var skippedReferences = 0;
     function walk(parent, parentId, depth) {
       if (!parent || !parent.children || depth > 32) {
         if (depth > 32) truncated = true;
@@ -44,6 +53,8 @@ export function projectIntakeCaptureScript(maxItems: number): string {
       for (var i = 0; i < parent.children.numItems; i++) {
         if (items.length >= maximumItems) { truncated = true; return; }
         var item = parent.children[i];
+        if (seen[String(item.nodeId)]) { skippedReferences++; continue; }
+        seen[String(item.nodeId)] = true;
         var entry = {
           id: String(item.nodeId),
           name: String(item.name),
@@ -89,6 +100,7 @@ export function getProjectIntakeTools(
     ?? ((maxItems: number) => sendCommand(projectIntakeCaptureScript(maxItems), bridgeOptions));
 
   return {
+    ...getProjectStructureAuditTools(bridgeOptions, dependencies.structureAudit),
     preview_project_intake: {
       description: "Inspect a bounded Premiere project against an explicit facility intake template and return a path-redacted report plus a non-mutating organization proposal. It never changes Premiere or persists the template.",
       parameters: {

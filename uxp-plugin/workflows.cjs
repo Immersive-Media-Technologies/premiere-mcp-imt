@@ -110,7 +110,7 @@
       const wantedId = input.projectItemId || "", wantedName = input.projectItemName || "";
       if (!wantedId && !wantedName) return selectedClipProjectItem(project);
       if (typeof project.getRootItem !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "This Premiere build cannot enumerate project items");
-      const root = await project.getRootItem(), queue = root ? [root] : [], nameMatches = [];
+      const root = folderView(await project.getRootItem()), queue = root ? [root] : [], nameMatches = [];
       while (queue.length) {
         const folder = queue.shift();
         if (!folder || typeof folder.getItems !== "function") continue;
@@ -121,7 +121,9 @@
           if (!wantedId && wantedName && String(item.name || "") === wantedName) {
             try { nameMatches.push(castClipProjectItem(item)); } catch (_) {}
           }
-          if (isFolderItem(item)) queue.push(item);
+          // Items from getItems() are ProjectItems; nested bins only expose getItems() after FolderItem.cast.
+          const folderItem = folderView(item);
+          if (folderItem) queue.push(folderItem);
         }
       }
       if (wantedId) throw commandError("UXP_TARGET_NOT_FOUND", "projectItemId was not found or is not a media clip");
@@ -155,15 +157,23 @@
       try { return ppro.ProjectItem.cast(item) || item; } catch (_) { return item; }
     }
 
-    function isFolderItem(item) {
-      if (!ppro.FolderItem || typeof ppro.FolderItem.cast !== "function") return false;
-      try { return !!ppro.FolderItem.cast(item); } catch (_) { return false; }
+    function folderView(item) {
+      if (!item) return null;
+      if (ppro.FolderItem && typeof ppro.FolderItem.cast === "function") {
+        try {
+          const folder = ppro.FolderItem.cast(item);
+          if (folder && typeof folder.getItems === "function") return folder;
+        } catch (_) {}
+      }
+      return typeof item.getItems === "function" ? item : null;
     }
 
     async function projectItemIdentifier(item) {
-      const projectItem = castProjectItem(item);
+      // Match the sibling source/proxy lookups: prefer a direct getId, then ProjectItem.cast.
+      const projectItem = item && typeof item.getId === "function" ? item : castProjectItem(item);
       if (!projectItem || typeof projectItem.getId !== "function") return "";
-      const id = await projectItem.getId();
+      let id;
+      try { id = await projectItem.getId(); } catch (_) { return ""; }
       return id == null ? "" : String(id);
     }
 
@@ -374,7 +384,8 @@
       const after = await chainSnapshot(chain), verified = after.count === before + 1;
       return mutationResult(verified, {
         applied: true, mediaType: input.mediaType, trackIndex: input.trackIndex, clipIndex: input.clipIndex,
-        effectId: input.effectId, insertionIndex: input.insertionIndex, beforeCount: before, after
+        effectId: input.effectId, insertionIndex: input.insertionIndex, beforeCount: before, after,
+        renderVerified: false, verificationScope: "Component-chain count only; verify live playback or rendered output before delivery."
       }, "effect_chain_count_readback", "Add " + input.mediaType + " effect");
     }
 
@@ -396,7 +407,8 @@
       const after = await chainSnapshot(chain), verified = after.count === before - 1;
       return mutationResult(verified, {
         removed: true, mediaType: input.mediaType, trackIndex: input.trackIndex, clipIndex: input.clipIndex,
-        componentIndex: input.componentIndex, expectedEffectId: input.expectedEffectId, beforeCount: before, after
+        componentIndex: input.componentIndex, expectedEffectId: input.expectedEffectId, beforeCount: before, after,
+        renderVerified: false, verificationScope: "Component-chain count only; verify live playback or rendered output before delivery."
       }, "effect_chain_count_readback", "Remove " + input.mediaType + " effect");
     }
 
@@ -715,7 +727,8 @@
       const evidence = [], verified = await verifyChainDeltas(prepared, 1, evidence);
       return mutationResult(verified, {
         applied: prepared.length, mediaType: input.mediaType, effectId: input.effectId,
-        insertionIndex: input.insertionIndex, evidence
+        insertionIndex: input.insertionIndex, evidence,
+        renderVerified: false, verificationScope: "Component-chain count only; verify live playback or rendered output before delivery."
       }, "selected_effect_chain_count_readback", "Add effect to selected clips");
     }
 
@@ -742,7 +755,8 @@
       const evidence = [], verified = await verifyChainDeltas(prepared, -1, evidence);
       return mutationResult(verified, {
         removed: prepared.length, mediaType: input.mediaType, componentIndex: input.componentIndex,
-        expectedEffectId: input.expectedEffectId, evidence
+        expectedEffectId: input.expectedEffectId, evidence,
+        renderVerified: false, verificationScope: "Component-chain count only; verify live playback or rendered output before delivery."
       }, "selected_effect_chain_count_readback", "Remove effect from selected clips");
     }
 
@@ -1222,6 +1236,11 @@
       assertCommitted(committed, "metadata update");
       const after = await metadataSnapshot(clip);
       const verified = (!hasProject || after.projectMetadata === projectMetadata) && (!hasXmp || after.xmpMetadata === xmpMetadata);
+      // Premiere 26.5.1 can commit the transaction yet leave the packet untouched
+      // (#642). A readback identical to the snapshot is a failure, not success.
+      if (!verified && after.projectMetadata === before.projectMetadata && after.xmpMetadata === before.xmpMetadata) {
+        throw commandError("UXP_METADATA_NOT_APPLIED", "Premiere committed the metadata transaction but the metadata read back unchanged. The update was not applied.");
+      }
       return mutationResult(verified, { updated: true, updatedFields, metadata: after }, "metadata_readback", "Update clip metadata");
     }
 
@@ -1454,6 +1473,9 @@
       let readback = "";
       try { readback = propertyString(new xmp.XMPMeta(afterXml || "").getProperty(namespace, name)); } catch (_) {}
       const verified = readback === value;
+      if (!verified && readback === current) {
+        throw commandError("UXP_METADATA_NOT_APPLIED", "Premiere committed the metadata field transaction but " + name + " still reads back its previous value. The update was not applied.");
+      }
       return mutationResult(verified, {
         updated: true, packet, namespace, name, value: readback, requestedValue: value
       }, "metadata_field_readback", "Update clip metadata field");

@@ -1,7 +1,8 @@
 import { buildToolScript, escapeForExtendScript } from "../bridge/script-builder.js";
 import { sendCommand, BridgeOptions } from "../bridge/file-bridge.js";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { describePresetFolder } from "./encoder-formats.js";
 
 /**
  * Find a default .sqpreset on this machine for create_sequence without preset_path.
@@ -99,6 +100,13 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
               "creating a sequence without a preset opens a modal dialog in Premiere 26+, which would freeze scripting.",
           };
         }
+        // QE's newSequence silently ignores forward-slash preset paths on Windows
+        // (#714, same root cause as #691): resolve to native separators, and give
+        // a missing file its own precise error instead of the bare QE failure.
+        const resolvedPresetPath = resolve(presetPath);
+        if (!existsSync(resolvedPresetPath)) {
+          return { success: false as const, error: `Preset file not found: ${resolvedPresetPath}` };
+        }
 
         const script = buildToolScript(`
           var beforeSequenceIds = {};
@@ -106,7 +114,7 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
             beforeSequenceIds[String(app.project.sequences[i].sequenceID)] = true;
           }
           app.enableQE();
-          qe.project.newSequence("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(presetPath)}");
+          qe.project.newSequence("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(resolvedPresetPath)}");
           var seq = app.project.activeSequence;
           if (!seq || seq.name !== "${escapeForExtendScript(args.name)}") {
             return __error("Failed to create sequence from preset: ${escapeForExtendScript(presetPath)}");
@@ -140,17 +148,29 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { sequence_id: string }) => {
         const script = buildToolScript(`
           var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}");
-          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}");
+          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}; nothing was changed.");
           
+          // Report the copy itself: Premiere names every copy "<name> Copy", so a caller
+          // looking it up by name can land on an older copy (live: a rerun edited the
+          // previous run's copy). Diff the sequence IDs to find the new one.
+          var existingIds = {};
+          for (var before = 0; before < app.project.sequences.numSequences; before++) existingIds[String(app.project.sequences[before].sequenceID)] = true;
           seq.clone();
-          return __result({ duplicated: true, originalName: seq.name });
+          var copy = null;
+          for (var after = 0; after < app.project.sequences.numSequences; after++) {
+            var candidate = app.project.sequences[after];
+            if (!existingIds[String(candidate.sequenceID)]) { copy = candidate; break; }
+          }
+          if (!copy) return __error("Premiere did not create a copy of " + seq.name);
+          return __result({ duplicated: true, verified: true, originalName: seq.name, originalId: seq.sequenceID, name: copy.name, id: copy.sequenceID });
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     delete_sequence: {
-      description: "Delete a sequence from the project",
+      description:
+        "Delete a sequence from the project and read back that it is gone. A sequence nested on another timeline is refused unless confirm_remove_from_sequences is true, matching delete_project_item; deleting it would remove or orphan those nested clips.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -158,22 +178,39 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
             type: "string",
             description: "Sequence name or ID to delete",
           },
+          confirm_remove_from_sequences: {
+            type: "boolean",
+            description: "Delete even when this sequence is nested on another timeline, which also removes those nested clips (default: false).",
+          },
         },
         required: ["sequence_id"],
       },
-      handler: async (args: { sequence_id: string }) => {
+      handler: async (args: { sequence_id: string; confirm_remove_from_sequences?: boolean }) => {
         const script = buildToolScript(`
           var project = app.project;
           var seq = __findSequence("${escapeForExtendScript(args.sequence_id)}");
-          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}");
+          if (!seq) return __error("Sequence not found: ${escapeForExtendScript(args.sequence_id)}; nothing was changed.");
           var sequenceId = String(seq.sequenceID);
           var name = seq.name;
+          var usage = { clips: 0, sequences: [], details: [] };
+          var item = null;
+          try { item = seq.projectItem; } catch (eItem) {}
+          if (!item) {
+            if (${args.confirm_remove_from_sequences === true ? "false" : "true"}) {
+              return __jsonStringify({ success: false, error: name + " has no readable project item, so nested timeline usage could not be checked. Nothing was deleted. Inspect find_item_usages or pass confirm_remove_from_sequences: true.", data: { code: "ITEM_USAGE_UNKNOWN" } });
+            }
+          } else {
+            usage = __projectItemUsage(item);
+            if (usage.clips > 0 && ${args.confirm_remove_from_sequences === true ? "false" : "true"}) {
+              return __jsonStringify({ success: false, error: name + " is used by " + usage.clips + " timeline clip(s) in " + usage.sequences.join(", ") + ". Deleting it would remove those nested clips too, and this cannot be undone here, so nothing was deleted. Remove the nested clips first, or pass confirm_remove_from_sequences: true.", data: { code: "ITEM_IN_USE", usages: usage.details } });
+            }
+          }
           var accepted = project.deleteSequence(seq);
           if (accepted === false) return __error("Premiere rejected deletion of sequence: " + name);
           if (__findSequence(sequenceId)) {
             return __error("Premiere did not remove sequence: " + name + ". The deletion is not reported as successful.");
           }
-          return __result({ deleted: true, verified: true, name: name, id: sequenceId });
+          return __result({ deleted: true, verified: true, name: name, id: sequenceId, timelineClipsRemoved: usage.clips, sequencesChanged: usage.sequences });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -246,11 +283,11 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { ignore_track_targeting?: boolean }) => {
         const script = buildToolScript(`
           var seq = __getCurrentActiveSequence();
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
 
-          var before = [];
+          var before = {};
           for (var i = 0; i < app.project.sequences.numSequences; i++) {
-            before.push(String(app.project.sequences[i].sequenceID));
+            before[String(app.project.sequences[i].sequenceID)] = true;
           }
           var newSeq = seq.createSubsequence(${args.ignore_track_targeting ? "true" : "false"});
           if (!newSeq) return __error("Failed to create subsequence");
@@ -262,7 +299,7 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
               break;
             }
           }
-          if (!exists || before.indexOf(newId) !== -1) {
+          if (!exists || before[newId] === true) {
             return __error("Premiere did not expose a newly created subsequence in the current project");
           }
           return __result({
@@ -279,7 +316,7 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
     },
 
     auto_reframe_sequence: {
-      description: "Auto-reframe a sequence for a different aspect ratio",
+      description: "Auto-reframe a sequence into a new sequence of target_width x target_height. Premiere derives the new sequence from the source height (a 1080p source at 9:16 comes out 607x1080), so the tool then sets the requested frame size and verifies it; the Auto Reframe effect refits to the new size.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -339,14 +376,43 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
           var newName = "${escapeForExtendScript(requestedName || "")}" || (seq.name + " - Auto Reframe ${numerator}x${denominator}");
           var reframed = seq.autoReframeSequence(${numerator}, ${denominator}, "${motionPreset}", newName, ${args.use_nested_sequences === true});
           if (!reframed) return __error("Premiere did not create an auto-reframed sequence");
+          // Premiere keeps the source height (1920x1080 at 9:16 gives 607x1080). Resize to the
+          // requested frame; the Auto Reframe effect refits to the new frame size by itself.
+          var targetWidth = ${args.target_width};
+          var targetHeight = ${args.target_height};
+          var premiereWidth = Number(reframed.frameSizeHorizontal);
+          var premiereHeight = Number(reframed.frameSizeVertical);
+          var resized = false;
+          if (premiereWidth !== targetWidth || premiereHeight !== targetHeight) {
+            var sizeError = null;
+            try {
+              var reframedSettings = reframed.getSettings();
+              reframedSettings.videoFrameWidth = targetWidth;
+              reframedSettings.videoFrameHeight = targetHeight;
+              reframed.setSettings(reframedSettings);
+            } catch (eResize) {
+              sizeError = eResize.toString();
+            }
+            var appliedSettings = null;
+            try { appliedSettings = reframed.getSettings(); } catch (eRead) {}
+            if (sizeError || !appliedSettings || Number(appliedSettings.videoFrameWidth) !== targetWidth || Number(appliedSettings.videoFrameHeight) !== targetHeight) {
+              return __jsonStringify({ success: false,
+                error: "Premiere created the auto-reframed sequence at " + premiereWidth + "x" + premiereHeight + " but did not accept the requested " + targetWidth + "x" + targetHeight + " frame size" + (sizeError ? " (" + sizeError + ")" : "") + ".",
+                data: { name: reframed.name, id: reframed.sequenceID, width: premiereWidth, height: premiereHeight } });
+            }
+            resized = true;
+          }
           return __result({
             reframed: true,
             sourceName: seq.name,
             name: reframed.name,
             id: reframed.sequenceID,
             requestedAspectRatio: "${numerator}:${denominator}",
-            observedWidth: reframed.frameSizeHorizontal,
-            observedHeight: reframed.frameSizeVertical
+            width: targetWidth,
+            height: targetHeight,
+            premiereFrameSize: premiereWidth + "x" + premiereHeight,
+            resizedToRequest: resized,
+            verified: true
           });
         `);
         return sendCommand(script, bridgeOptions);
@@ -354,7 +420,10 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
     },
 
     unnest_sequence: {
-      description: "Unnest a nested sequence on the timeline, replacing it with the contents of the nested sequence",
+      description:
+        "Unnest a nested sequence clip, replacing it with the nested sequence's clips at their exact source in/out and timeline positions. " +
+        "Refuses without changing anything when the nest is trimmed, retimed, linked to a partner clip, contains items that also carry the other media type (Premiere's Track.overwriteClip would place that media on the matching track and overwrite the clips there), or when the destination range is occupied or locked. " +
+        "Re-reads every placed clip and reports failure with Undo guidance if any start or source range differs. Nested clips are re-placed from their project items, so effects, keyframes, and transitions inside the nest are not carried over.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -368,10 +437,10 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { node_id: string }) => {
         const script = buildToolScript(`
           var seq = __getCurrentActiveSequence();
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           
           var result = __findClip("${escapeForExtendScript(args.node_id)}");
-          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}");
+          if (!result) return __error("Clip not found: ${escapeForExtendScript(args.node_id)}; nothing was changed.");
           
           var clip = result.clip;
           var clipName = clip.name;
@@ -382,7 +451,13 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
           // Check if the project item is a sequence (type 3 = sequence)
           // For nested sequences, the projectItem should reference another sequence
           var nestedSeq = null;
-          for (var i = 0; i < app.project.sequences.numSequences; i++) {
+          for (var si = 0; si < app.project.sequences.numSequences && !nestedSeq; si++) {
+            var byItem = app.project.sequences[si];
+            try {
+              if (byItem.projectItem && String(byItem.projectItem.nodeId) === String(projectItem.nodeId)) nestedSeq = byItem;
+            } catch (eSeqItem) {}
+          }
+          for (var i = 0; i < app.project.sequences.numSequences && !nestedSeq; i++) {
             var s = app.project.sequences[i];
             if (s.name === projectItem.name || s.sequenceID === projectItem.nodeId) {
               nestedSeq = s;
@@ -422,70 +497,238 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
           }
 
           var reference = linkedReferences[0];
+          var mediaType = reference.mediaType === "video" ? 1 : 2;
           var tracks = reference.mediaType === "video" ? nestedSeq.videoTracks : nestedSeq.audioTracks;
           var targetTracks = reference.mediaType === "video" ? seq.videoTracks : seq.audioTracks;
+          var frameTicks = seq.timebase ? parseFloat(seq.timebase) : NaN;
+          if (!frameTicks || isNaN(frameTicks)) frameTicks = TICKS_PER_SECOND / 24;
+          var refStart = parseFloat(startTicks);
+          var refIn = parseFloat(reference.clip.inPoint.ticks);
+          var refOut = parseFloat(reference.clip.outPoint.ticks);
+          var refNodeId = String(reference.clip.nodeId);
+
+          function isRetimed(trackItem) {
+            try {
+              if (typeof trackItem.getSpeed === "function" && Math.abs(trackItem.getSpeed() - 1) > 0.0001) return true;
+              if (typeof trackItem.isSpeedReversed === "function" && trackItem.isSpeedReversed()) return true;
+            } catch (eSpeed) {}
+            return false;
+          }
+          function secondsLabel(ticks) {
+            return String(Math.round(__ticksToSeconds(ticks) * 1000) / 1000) + "s";
+          }
+
+          if (isRetimed(reference.clip)) {
+            return __error("Unnest refused; nothing was changed. The nested clip has a speed change or is reversed, so placing its contents at normal speed would change what plays.");
+          }
+          if (__isTrackLocked(targetTracks[reference.trackIndex])) {
+            return __error("Unnest refused; nothing was changed. The nested clip's " + reference.mediaType + " track " + reference.trackIndex + " is locked.");
+          }
+
+          // Preflight: plan every placement and prove it is safe before touching
+          // the timeline. Every refusal below returns before any mutation.
           var planned = [];
           var expectedByTrack = [];
+          var contentStart = null;
+          var contentEnd = null;
           for (var t = 0; t < tracks.numTracks; t++) {
             var targetTrackIndex = reference.trackIndex + t;
-            if (targetTrackIndex >= targetTracks.numTracks) {
-              return __error("Cannot unnest safely because the destination " + reference.mediaType + " track " + targetTrackIndex + " does not exist. No clips were changed.");
-            }
             expectedByTrack[t] = 0;
             for (var c = 0; c < tracks[t].clips.numItems; c++) {
               var nestedClip = tracks[t].clips[c];
+              if (targetTrackIndex >= targetTracks.numTracks) {
+                return __error("Cannot unnest safely because the destination " + reference.mediaType + " track " + targetTrackIndex + " does not exist. No clips were changed.");
+              }
               if (!nestedClip.projectItem) {
                 return __error("Cannot unnest safely because a nested " + reference.mediaType + " clip has no project item. No clips were changed.");
               }
+              if (isRetimed(nestedClip)) {
+                return __error("Unnest refused; nothing was changed. Nested clip " + nestedClip.name + " has a speed change or is reversed, so it cannot be re-placed with the same timing.");
+              }
+              var nestedStart = parseFloat(nestedClip.start.ticks);
+              var nestedEnd = parseFloat(nestedClip.end.ticks);
+              if (contentStart === null || nestedStart < contentStart) contentStart = nestedStart;
+              if (contentEnd === null || nestedEnd > contentEnd) contentEnd = nestedEnd;
               planned.push({
                 projectItem: nestedClip.projectItem,
-                insertTime: (parseFloat(startTicks) + parseFloat(nestedClip.start.ticks)).toString(),
-                sourceTrackIndex: t,
-                name: nestedClip.name
+                name: nestedClip.name,
+                targetTrackIndex: targetTrackIndex,
+                expectedStart: refStart + (nestedStart - refIn),
+                expectedEnd: refStart + (nestedEnd - refIn),
+                inTicks: parseFloat(nestedClip.inPoint.ticks),
+                outTicks: parseFloat(nestedClip.outPoint.ticks)
               });
               expectedByTrack[t]++;
             }
           }
           if (planned.length === 0) return __error("Nested sequence has no " + reference.mediaType + " clips to unnest. No clips were changed.");
 
-          var beforeCounts = [];
-          for (var b = 0; b < tracks.numTracks; b++) {
-            beforeCounts[b] = targetTracks[reference.trackIndex + b].clips.numItems;
+          // A trimmed nest plays only part of the nested content; unnesting would
+          // bring back the hidden head or tail and change what plays.
+          var trimTol = frameTicks / 2;
+          if (refIn > contentStart + trimTol || refOut < contentEnd - trimTol) {
+            return __error(
+              "Unnest refused; nothing was changed. The nested clip is trimmed: it plays " + secondsLabel(refIn) + "-" + secondsLabel(refOut) +
+              " of " + nestedSeq.name + ", whose " + reference.mediaType + " content spans " + secondsLabel(contentStart) + "-" + secondsLabel(contentEnd) +
+              ". Unnesting would change what plays. Extend the nested clip to its full content first, or unnest it manually in Premiere."
+            );
           }
 
-          // The existing implementation only changed one lane of a linked clip.
-          // This route runs only when preflight has proven there is exactly one
-          // unlinked reference, so it cannot report a partial A/V unnest as success.
-          reference.clip.remove(false, false);
+          for (var q = 0; q < planned.length; q++) {
+            var pre = planned[q];
+            var destTrack = targetTracks[pre.targetTrackIndex];
+            if (__isTrackLocked(destTrack)) {
+              return __error("Unnest refused; nothing was changed. Destination " + reference.mediaType + " track " + pre.targetTrackIndex + " is locked.");
+            }
+            for (var d = 0; d < destTrack.clips.numItems; d++) {
+              var occupant = destTrack.clips[d];
+              if (String(occupant.nodeId) === refNodeId) continue;
+              var occupantStart = parseFloat(occupant.start.ticks);
+              var occupantEnd = parseFloat(occupant.end.ticks);
+              if (occupantStart < pre.expectedEnd - __TICK_MATCH_TOL && occupantEnd > pre.expectedStart + __TICK_MATCH_TOL) {
+                return __error(
+                  "Unnest refused; nothing was changed. The destination range " + secondsLabel(pre.expectedStart) + "-" + secondsLabel(pre.expectedEnd) +
+                  " on " + reference.mediaType + " track " + pre.targetTrackIndex + " is already occupied by " + occupant.name +
+                  ". Clear that range or move the nested clip, then retry."
+                );
+              }
+            }
+          }
+
+          function trackCounts(list) {
+            var counts = [];
+            for (var ti = 0; ti < list.numTracks; ti++) counts[ti] = list[ti].clips.numItems;
+            return counts;
+          }
+          var beforeVideoCounts = trackCounts(seq.videoTracks);
+          var beforeAudioCounts = trackCounts(seq.audioTracks);
+          var beforeIds = {};
+          for (var bt = 0; bt < targetTracks.numTracks; bt++) {
+            for (var bc = 0; bc < targetTracks[bt].clips.numItems; bc++) beforeIds[String(targetTracks[bt].clips[bc].nodeId)] = true;
+          }
+
+          var markWarnings = [];
+          function markNote() {
+            return markWarnings.length ? " Project item In/Out marks could not be restored on: " + markWarnings.join(", ") + "." : "";
+          }
+
+          // Check every source range is accepted before removing the nested clip.
+          // Live 26.5.2: Track.overwriteClip with an item that also has the other
+          // media type places that media too, on the matching track (or a new
+          // one if it is locked), overwriting whatever is there.
+          for (var pf = 0; pf < planned.length; pf++) {
+            var otherType = mediaType === 1 ? 2 : 1;
+            var otherSpan = NaN;
+            try { otherSpan = parseFloat(planned[pf].projectItem.getOutPoint(otherType).ticks) - parseFloat(planned[pf].projectItem.getInPoint(otherType).ticks); } catch (eOther) {}
+            if (!isFinite(otherSpan) || otherSpan < 0) return __error("Unnest refused; other-media timing is unreadable, so Track.overwriteClip cannot be safely preflighted. Nothing was changed; use Premiere's Unnest command.");
+            if (otherSpan > __TICK_MATCH_TOL) {
+              var otherLabel = otherType === 2 ? "audio" : "video";
+              return __error("Unnest refused; nothing was changed. " + planned[pf].name + " also has " + otherLabel + ", and Premiere's Track.overwriteClip would place that " + otherLabel + " on the matching " + otherLabel + " track too, overwriting the clips there. Unnest a nest of " + reference.mediaType + "-only items, or use Premiere's Unnest command.");
+            }
+            var check = __itemAcceptsRange(planned[pf].projectItem, planned[pf].inTicks, planned[pf].outTicks, mediaType);
+            if (!check.marksRestored) markWarnings.push(planned[pf].projectItem.name);
+            if (!check.ok) return __error("Unnest refused; nothing was changed. " + check.error + "." + markNote());
+          }
+
+          // Mutation. Track.overwriteClip places each nested clip's exact source
+          // range on one track without rippling neighbours (the range is empty).
+          try {
+            reference.clip.remove(false, false);
+          } catch (removeErr) {
+            return __error("Premiere rejected removing the nested clip (" + removeErr.toString() + "). The timeline may have changed; inspect it and use Undo if it did.");
+          }
           var addedClips = [];
           for (var p = 0; p < planned.length; p++) {
             var placement = planned[p];
-            var targetTrack = targetTracks[reference.trackIndex + placement.sourceTrackIndex];
-            targetTrack.insertClip(placement.projectItem, placement.insertTime);
+            var placed = __overwriteRangeOnTrack(
+              targetTracks[placement.targetTrackIndex], placement.projectItem,
+              placement.expectedStart, placement.inTicks, placement.outTicks, mediaType
+            );
+            if (!placed.marksRestored) markWarnings.push(placement.projectItem.name);
+            if (!placed.ok) {
+              return __error(
+                "The timeline changed: the nested clip was removed and " + addedClips.length + " of " + planned.length +
+                " clip(s) were placed before Premiere failed on " + placement.name + " (" + placed.error + "). " +
+                "Use Undo to restore the nested clip; this unnest did not succeed." + markNote()
+              );
+            }
             addedClips.push(placement.name);
           }
-          for (var a = 0; a < tracks.numTracks; a++) {
-            var actualCount = targetTracks[reference.trackIndex + a].clips.numItems;
-            if (actualCount !== beforeCounts[a] - (a === 0 ? 1 : 0) + expectedByTrack[a]) {
-              return __error("Premiere did not place every nested " + reference.mediaType + " clip. Inspect the timeline before retrying.");
+
+          // Readback: every placed clip must sit at its planned start with the
+          // nested clip's exact source in/out, and no other track may change.
+          var problems = [];
+          var claimed = {};
+          for (var r = 0; r < planned.length; r++) {
+            var want = planned[r];
+            var readTrack = targetTracks[want.targetTrackIndex];
+            var match = null;
+            for (var k = 0; k < readTrack.clips.numItems && !match; k++) {
+              var cand = readTrack.clips[k];
+              var candId = String(cand.nodeId);
+              if (beforeIds[candId] || claimed[candId]) continue;
+              var candSource = "";
+              try { candSource = cand.projectItem ? String(cand.projectItem.nodeId) : ""; } catch (eSource) {}
+              if (candSource !== String(want.projectItem.nodeId)) continue;
+              if (Math.abs(parseFloat(cand.start.ticks) - want.expectedStart) > __TICK_MATCH_TOL) continue;
+              match = cand;
+            }
+            if (!match) {
+              problems.push(want.name + " is not at " + secondsLabel(want.expectedStart) + " on " + reference.mediaType + " track " + want.targetTrackIndex);
+              continue;
+            }
+            claimed[String(match.nodeId)] = true;
+            var gotEnd = parseFloat(match.end.ticks);
+            if (Math.abs(gotEnd - want.expectedEnd) > __TICK_MATCH_TOL) {
+              problems.push(want.name + " ends at " + secondsLabel(gotEnd) + " instead of " + secondsLabel(want.expectedEnd));
+            }
+            var gotIn = parseFloat(match.inPoint.ticks);
+            var gotOut = parseFloat(match.outPoint.ticks);
+            if (Math.abs(gotIn - want.inTicks) > __TICK_MATCH_TOL || Math.abs(gotOut - want.outTicks) > __TICK_MATCH_TOL) {
+              problems.push(want.name + " uses source " + secondsLabel(gotIn) + "-" + secondsLabel(gotOut) + " instead of " + secondsLabel(want.inTicks) + "-" + secondsLabel(want.outTicks));
             }
           }
-          
-          return __result({
+          if (__findClip(refNodeId)) problems.push("the nested clip is still on the timeline");
+          function checkCounts(list, before, isTargetType, label) {
+            for (var ci = 0; ci < list.numTracks; ci++) {
+              var expected = before[ci];
+              if (isTargetType) {
+                if (ci === reference.trackIndex) expected -= 1;
+                var offset = ci - reference.trackIndex;
+                if (offset >= 0 && offset < expectedByTrack.length) expected += expectedByTrack[offset];
+              }
+              var actual = list[ci].clips.numItems;
+              if (actual !== expected) problems.push(label + " track " + ci + " has " + actual + " clip(s), expected " + expected);
+            }
+          }
+          checkCounts(seq.videoTracks, beforeVideoCounts, reference.mediaType === "video", "video");
+          checkCounts(seq.audioTracks, beforeAudioCounts, reference.mediaType === "audio", "audio");
+          if (problems.length) {
+            return __error(
+              "The timeline changed but the unnest did not verify: " + problems.join("; ") +
+              ". Use Undo to restore the nested clip before retrying; this is not reported as success." + markNote()
+            );
+          }
+
+          var unnestResult = {
             unnested: true,
             verified: true,
+            outcome: "verified",
             nestedSequence: clipName,
             mediaType: reference.mediaType,
             clipsAdded: addedClips.length,
             clips: addedClips
-          });
+          };
+          if (markWarnings.length) unnestResult.warning = "Project item In/Out marks could not be restored on: " + markWarnings.join(", ") + ".";
+          return __result(unnestResult);
         `);
         return sendCommand(script, bridgeOptions);
       },
     },
 
     create_sequence_from_preset: {
-      description: "Create a new sequence from a specific preset file (.sqpreset)",
+      description:
+        "EXPERIMENTAL (undocumented QE DOM): create a new sequence from a specific preset file (.sqpreset) using qe.project.newSequence. Reports success only after a new sequence ID appears in the project collection; a same-name sequence that was already active is not treated as created.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -502,14 +745,35 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
       },
       handler: async (args: { name: string; preset_path: string }) => {
         // createNewSequenceFromPreset is not a real API (missing in 26.x) — use QE.
+        // QE's newSequence silently ignores forward-slash preset paths on Windows
+        // (#691): the call does not throw but the previous sequence stays active,
+        // so the name check below would report a bare "Failed to create" error.
+        // resolve() normalizes to native separators; a missing file gets its own
+        // precise error instead of leaking into the generic one.
+        const presetPath = resolve(args.preset_path);
+        if (!existsSync(presetPath)) {
+          return { success: false as const, error: `Preset file not found: ${presetPath}` };
+        }
         const script = buildToolScript(`
+          var beforeSequenceIds = {};
+          for (var i = 0; i < app.project.sequences.numSequences; i++) {
+            beforeSequenceIds[String(app.project.sequences[i].sequenceID)] = true;
+          }
           app.enableQE();
-          qe.project.newSequence("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(args.preset_path)}");
+          qe.project.newSequence("${escapeForExtendScript(args.name)}", "${escapeForExtendScript(presetPath)}");
           var seq = app.project.activeSequence;
           if (!seq || seq.name !== "${escapeForExtendScript(args.name)}") {
-            return __error("Failed to create sequence from preset: ${escapeForExtendScript(args.preset_path)}");
+            return __error("Failed to create sequence from preset: ${escapeForExtendScript(presetPath)}");
           }
-          return __result({ created: true, name: seq.name, id: seq.sequenceID });
+          var sequenceId = String(seq.sequenceID);
+          if (beforeSequenceIds[sequenceId]) {
+            return __error("Premiere did not create a new sequence; the active sequence already existed before the preset request.");
+          }
+          var created = __findSequence(sequenceId);
+          if (!created || String(created.sequenceID) !== sequenceId) {
+            return __error("Premiere did not add the new sequence to the project collection; no creation success is reported.");
+          }
+          return __result({ created: true, verified: true, name: created.name, id: sequenceId, presetUsed: "${escapeForExtendScript(presetPath)}" });
         `);
         return sendCommand(script, bridgeOptions);
       },
@@ -543,7 +807,7 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
         const propertyValue = escapeForExtendScript(args.property_value);
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           if (typeof seq.attachCustomProperty !== "function") {
             return __error("This Premiere build does not expose sequence.attachCustomProperty; no custom property was attached.");
           }
@@ -598,8 +862,9 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
       handler: async () => {
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
-          var enabled = seq.isWorkAreaEnabled();
+          if (!seq) return __error("No active sequence; nothing was changed.");
+          var enabled = __workAreaEnabled(seq);
+          if (enabled === null) return __error("Work-area enabled state could not be read from this host.", { outcome: "failed" });
           return __result({ sequenceName: seq.name, workAreaEnabled: enabled });
         `);
         return sendCommand(script, bridgeOptions);
@@ -607,25 +872,68 @@ export function getSequenceTools(bridgeOptions: BridgeOptions) {
     },
 
     get_export_file_extension: {
-      description: "Get the file extension that would be used when exporting the active sequence with a given preset",
+      description: "Get the export file extension from Premiere. If Premiere returns none, infer it only for an existing .epr whose real filesystem parent is a recognized Adobe Media Encoder format folder; report that resolved preset path. This fallback is unconfirmed and should be checked before delivery.",
+      operationalCapability: {
+        backend: "local + CEP/ExtendScript" as const,
+        backends: ["local" as const, "cep" as const, "extendscript" as const],
+        authority: "filesystem" as const,
+        verificationBoundary: "local_and_host_response" as const,
+        hostVerificationRequired: true,
+        notes: ["Requires inspect and filesystem authority. The preset-folder fallback reads the local .epr file's existence and size; it does not verify an export."],
+      },
       parameters: {
         type: "object" as const,
         properties: {
           preset_path: {
             type: "string",
-            description: "Full path to the export preset file (.epr)",
+            minLength: 1,
+            maxLength: 4096,
+            description: "Absolute path on this server to the export preset file (.epr). Relative paths, NUL bytes and trailing directory separators are refused before host dispatch.",
           },
         },
         required: ["preset_path"],
       },
       handler: async (args: { preset_path: string }) => {
+        if (typeof args.preset_path !== "string" || !isAbsolute(args.preset_path) || args.preset_path.length > 4096 || args.preset_path.includes("\0") || args.preset_path.endsWith("/") || (process.platform === "win32" && args.preset_path.endsWith("\\"))) {
+          return { success: false, error: "preset_path must be an absolute path to a named preset on this server, at most 4096 characters, without NUL bytes or trailing directory separators." };
+        }
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
-          var ext = seq.getExportFileExtension("${escapeForExtendScript(args.preset_path)}");
-          return __result({ sequenceName: seq.name, presetPath: "${escapeForExtendScript(args.preset_path)}", extension: ext });
+          if (!seq) return __error("No active sequence; nothing was changed.");
+          var ext = null;
+          try { ext = seq.getExportFileExtension("${escapeForExtendScript(args.preset_path)}"); }
+          catch (extensionError) { return __error("Premiere could not determine the export extension for this preset: " + extensionError.toString()); }
+          return __result({ sequenceName: seq.name, presetPath: "${escapeForExtendScript(args.preset_path)}", extension: ext === null || ext === undefined ? null : String(ext) });
         `);
-        return sendCommand(script, bridgeOptions);
+        const result = await sendCommand(script, bridgeOptions);
+        if (!result.success) return result;
+        const data = result.data as { sequenceName?: string; presetPath?: string; extension?: string | null };
+        const hostExtension = typeof data?.extension === "string" ? data.extension.trim() : "";
+        if (hostExtension) {
+          return { success: true, data: { ...data, extensionSource: "premiere", hostConfirmed: true } };
+        }
+
+        const presetPath = args.preset_path;
+        let usablePreset = false;
+        let resolvedPresetPath: string | null = null;
+        try {
+          resolvedPresetPath = realpathSync(presetPath);
+          const presetStats = statSync(resolvedPresetPath);
+          usablePreset = extname(resolvedPresetPath).toLowerCase() === ".epr" && presetStats.isFile() && presetStats.size > 0;
+        } catch { /* unavailable */ }
+        const format = usablePreset && resolvedPresetPath ? describePresetFolder(basename(dirname(resolvedPresetPath))) : null;
+        if (!format?.extension) {
+          return { success: false, error: "Premiere did not provide an export extension for this preset on this host, and its .epr format folder cannot establish one. Inspect the preset or choose an output path explicitly before exporting." };
+        }
+        return { success: true, data: {
+          ...data,
+          presetPath: resolvedPresetPath,
+          extension: `.${format.extension}`,
+          extensionSource: "preset_folder",
+          hostConfirmed: false,
+          formatCode: format.formatCode,
+          warning: "Premiere did not report an extension. This is inferred from the Adobe Media Encoder preset folder, not confirmed by an export. Check the output path before delivery.",
+        } };
       },
     },
   };

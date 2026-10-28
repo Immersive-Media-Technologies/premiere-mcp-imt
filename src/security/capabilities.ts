@@ -64,9 +64,31 @@ export const UNSAFE_TOOL_NAMES = new Set(["execute_extendscript", "send_raw_scri
 
 const INSPECT_TOOL_NAMES = new Set([
   "ping",
+  "can_execute",
+  "get_operation_performance",
+  "inspect_workflow_job",
+  "wait_workflow_job",
+  "inspect_operation_recovery",
+  "convert_timeline_time",
+  "predict_timeline_edit",
+  "verify_timeline_postconditions",
+  "map_keyframe_time_domain",
+  "plan_media_synchronization",
+  "map_word_timeline_occurrences",
+  "plan_music_remix",
+  "plan_scene_segments",
+  "verify_caption_render_evidence",
+  "bind_media_provenance",
+  "preview_extended_edit_plan",
+  "preview_stacked_camera_edit",
+  "preview_otio_snapshot_export",
+  "plan_audio_post_turnover",
   "get_capabilities",
-  // IMT: the read-only first-run check (pr_verify) must stay available in read-only mode.
+  // Read-only queries whose names miss the read prefixes.
+  "has_proxy",
+  "is_work_area_enabled",
   "verify_premiere_connection",
+  "match_frame",
   "preview_edit_plan",
   "preview_transcript_edit_uxp",
   "plan_transcript_rough_cut_uxp",
@@ -86,6 +108,11 @@ const INSPECT_TOOL_NAMES = new Set([
   "read_sequence_captions",
   "plan_silence_review_markers",
   "analyze_dialogue_edit_candidates",
+  "review_dialogue_candidates",
+  "review_quote_paper_edit",
+  "review_text_changes",
+  "review_sync_evidence",
+  "review_broll_placements",
   "preview_derived_dialogue_sequence_uxp",
   "plan_platform_delivery_matrix",
   "validate_platform_publish_package",
@@ -94,6 +121,7 @@ const INSPECT_TOOL_NAMES = new Set([
   "plan_word_mute_ranges",
   "detect_repeated_takes",
   "check_caption_safe_zone",
+  "retime_caption_file",
   "rank_short_form_candidates",
   "plan_chapter_markers",
   "plan_emphasis_zoom_keyframes",
@@ -108,6 +136,8 @@ const INSPECT_TOOL_NAMES = new Set([
   "audit_timeline_health",
   "plan_client_notes_checklist",
   "plan_multicam_angle_switches",
+  "compute_mask_fit_motion",
+  "map_source_ranges_to_timeline",
 ]);
 // detect_silence reads a media file from disk and shells out to ffmpeg. It
 // changes nothing in Premiere, so classifying it as "edit" would overstate what
@@ -116,7 +146,6 @@ const FILESYSTEM_TOOL_NAMES = new Set([
   "preview_mogrt_recipe",
   "verify_mogrt_artifact",
   "apply_lut",
-  "set_scratch_disk_path",
   "verify_delivery_file",
   "verify_delivery_conformance",
   "detect_silence",
@@ -150,6 +179,41 @@ const FILESYSTEM_TOOL_NAMES = new Set([
 // inferred safely from their names. Keep them explicit: a preview reads an
 // approved folder, authoring mutates a saved AE project and exports a file.
 const TOOL_CAPABILITY_REQUIREMENTS: Readonly<Record<string, readonly Capability[]>> = {
+  start_local_analysis_job: ["filesystem"],
+  cancel_workflow_job: ["filesystem"],
+  export_and_verify: ["inspect", "export", "filesystem"],
+  inspect_rendered_video_scopes: ["inspect", "filesystem"],
+  build_edit_review_evidence: ["inspect", "filesystem"],
+  inspect_otio_interchange: ["inspect", "filesystem"],
+  inspect_interchange_artifact: ["inspect", "filesystem"],
+  inspect_interchange_loss_report: ["inspect", "filesystem"],
+  preview_facility_metadata_intake: ["inspect", "filesystem"],
+  export_review_markers: ["export", "filesystem"],
+  export_facility_metadata_table: ["export", "filesystem"],
+  verify_temporal_render_artifact: ["inspect", "filesystem"],
+  build_project_handoff_manifest: ["inspect", "filesystem"],
+  save_workflow_checkpoint: ["filesystem"],
+  inspect_workflow_checkpoint: ["inspect", "filesystem"],
+  acknowledge_operation_recovery: ["inspect", "edit"],
+  apply_extended_edit_plan: ["inspect", "edit", "filesystem"],
+  prepare_transcript_workflow: ["inspect"],
+  // Audit is read-only; apply: true adds edit (see capabilitiesForToolInvocation).
+  audit_project_structure: ["inspect"],
+  preview_scene_review_workflow: ["inspect", "filesystem"],
+  apply_scene_review_workflow: ["inspect", "edit", "filesystem"],
+  // Decodes the source file with ffmpeg, writes a new still, then imports/places it.
+  create_source_freeze_frame: ["inspect", "edit", "filesystem"],
+  // Source bounds read the underlying media file through ffprobe.
+  trim_clip: ["edit", "filesystem"],
+  slip_edit: ["edit", "filesystem"],
+  // Preset preflight reads local files; AME queue handoff can start exports.
+  create_sequence: ["edit", "filesystem"],
+  create_sequence_from_preset: ["edit", "filesystem"],
+  add_to_render_queue: ["export", "filesystem"],
+  export_sequence_job_start: ["export", "filesystem"],
+  get_export_file_extension: ["inspect", "filesystem"],
+  roll_edit: ["inspect", "edit", "filesystem"],
+  slide_edit: ["inspect", "edit", "filesystem"],
   preview_after_effects_render_handoff: ["inspect", "filesystem"],
   apply_after_effects_render_handoff: ["inspect", "edit", "filesystem"],
   verify_after_effects_connection: ["inspect"],
@@ -168,6 +232,15 @@ const TOOL_CAPABILITY_REQUIREMENTS: Readonly<Record<string, readonly Capability[
   enqueue_after_effects_render: ["edit", "export", "filesystem"],
   preview_mogrt_premiere_handoff: ["inspect", "filesystem"],
   apply_mogrt_premiere_handoff: ["edit", "filesystem"],
+  // Premiere writes XMP changes into the source media file on disk (verified:
+  // set_xmp_metadata rewrote a user's MP4 metadata block), so this is a file write.
+  set_xmp_metadata: ["edit", "filesystem"],
+  // Changes the project and writes files: add_title bakes a .mogrt copy under
+  // the user's app-data folder; the scratch-disk setters point Premiere at
+  // folders it will write to and can save the project to verify them.
+  add_title: ["edit", "filesystem"],
+  set_project_scratch_disk: ["edit", "filesystem"],
+  set_scratch_disk_path: ["edit", "filesystem"],
 };
 
 const ACTION_CAPABILITIES: Readonly<Record<string, Readonly<Record<string, readonly Capability[]>>>> = {
@@ -269,6 +342,10 @@ const ACTION_CAPABILITIES: Readonly<Record<string, Readonly<Record<string, reado
     inspect: ["inspect"],
     update: ["edit"],
   },
+  manage_work_area_uxp: {
+    inspect: ["inspect"],
+    set: ["edit"],
+  },
   manage_sequence_playhead_uxp: {
     inspect: ["inspect"],
     set: ["edit"],
@@ -336,7 +413,7 @@ const ACTION_CAPABILITIES: Readonly<Record<string, Readonly<Record<string, reado
 /** A conservative classification for centralized server registration. */
 export function capabilityForTool(toolName: string): Capability {
   if (UNSAFE_TOOL_NAMES.has(toolName)) return "unsafe-script";
-  if (/^(export_|validate_export_|start_batch_encode|queue_|encode_|capture_frame)/.test(toolName)) return "export";
+  if (/^(export_|validate_export_|start_batch_encode|add_to_render_queue|queue_|encode_|capture_frame)/.test(toolName)) return "export";
   if (/^(import_|relink_|create_project|open_project|save_|consolidate_)/.test(toolName)) return "filesystem";
   if (FILESYSTEM_TOOL_NAMES.has(toolName)) return "filesystem";
   if (INSPECT_TOOL_NAMES.has(toolName) || /^(get_|list_|inspect_|find_|check_|search_)/.test(toolName)) return "inspect";
@@ -347,7 +424,17 @@ export function capabilityForTool(toolName: string): Capability {
 
 /** Resolve authority at the action level for consolidated multi-action tools. */
 export function capabilitiesForToolInvocation(toolName: string, args: unknown): readonly Capability[] {
+  if (toolName === "export_interchange_uxp" && args && typeof args === "object" && (args as Record<string, unknown>).verify_artifact === true) return ["export", "filesystem"];
+  if (toolName === "audit_project_structure" && args && typeof args === "object" && (args as Record<string, unknown>).apply === true) return ["inspect", "edit"];
+  if (toolName === "prepare_transcript_workflow" && args && typeof args === "object" && (args as Record<string, unknown>).start_if_missing === true) return ["inspect", "edit"];
+  // Inline caption retiming is pure computation; reading input_path or writing
+  // output_path touches the local filesystem and needs that authority too.
+  if (toolName === "retime_caption_file" && args && typeof args === "object" && ((args as Record<string, unknown>).input_path !== undefined || (args as Record<string, unknown>).output_path !== undefined)) return ["inspect", "filesystem"];
   const actionMap = ACTION_CAPABILITIES[toolName];
+  if (toolName === "set_metadata" && args && typeof args === "object" && (args as Record<string, unknown>).packet === "xmp") {
+    // XMP field writes land in the source media file, not just the project.
+    return ["edit", "filesystem"];
+  }
   if (!actionMap) return TOOL_CAPABILITY_REQUIREMENTS[toolName] ?? [capabilityForTool(toolName)];
   const input = args && typeof args === "object" && !Array.isArray(args)
     ? args as Record<string, unknown>
@@ -360,6 +447,22 @@ export function capabilitiesForToolInvocation(toolName: string, args: unknown): 
   return required
     ? required
     : [capabilityForTool(toolName)];
+}
+
+/**
+ * Whether any invocation of a tool can need more than inspect authority. Used
+ * to decide which tool schemas advertise the server-wide idempotency_key; the
+ * per-call decision still comes from capabilitiesForToolInvocation.
+ */
+export function toolMayChangeState(toolName: string): boolean {
+  // Argument-dependent escalations handled specially above.
+  if (toolName === "export_interchange_uxp" || toolName === "prepare_transcript_workflow" || toolName === "set_metadata" || toolName === "audit_project_structure" || toolName === "retime_caption_file") return true;
+  const actionMap = ACTION_CAPABILITIES[toolName];
+  const candidates: (readonly Capability[])[] = actionMap
+    ? [...Object.values(actionMap), [capabilityForTool(toolName)]]
+    : [TOOL_CAPABILITY_REQUIREMENTS[toolName] ?? [capabilityForTool(toolName)]];
+  if (toolName === "encode_media_uxp") candidates.push(["inspect", "filesystem"]);
+  return candidates.some((required) => required.some((capability) => capability !== "inspect"));
 }
 
 /**

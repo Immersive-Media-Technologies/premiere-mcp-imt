@@ -156,7 +156,7 @@ function captureScript(): string {
     var project = app.project;
     if (!project) return __error("No project is open");
     var sequence = project.activeSequence;
-    if (!sequence) return __error("No active sequence");
+    if (!sequence) return __error("No active sequence; nothing was changed.");
     var clips = [];
     var truncated = false;
     var maxItems = ${MAX_CAPTURED_TIMELINE_ITEMS};

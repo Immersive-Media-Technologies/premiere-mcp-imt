@@ -7,8 +7,17 @@
 
   function createCommandRegistry(deps) {
     const ppro = deps.ppro, Protocol = deps.Protocol, workspace = deps.workspace;
+    const FrameTime = deps.FrameTime || (typeof require === "function" ? require("./frame-time.cjs") : globalThis.PremiereMcpFrameTime);
+    const Ledger = deps.OperationLedger || (typeof require === "function" ? require("./operation-ledger.cjs") : globalThis.PremiereMcpOperationLedger);
+    const Transcript = deps.TranscriptSupport || (typeof require === "function" ? require("./transcript.cjs") : globalThis.PremiereMcpTranscript);
+    const operationLedger = Ledger.createOperationLedger({ storage: deps.storage, sessionId: deps.sessionId, digest: Transcript.transcriptRevision, requireDurability: deps.requireOperationDurability === true });
+    let mutationTail = Promise.resolve();
+    let anonymousOperation = 0;
+    let invocationSession = null;
+    try { invocationSession = Ledger.createSecureSessionId("invocation"); } catch (_) {}
     const completedOperations = new Map();
     const inFlightOperations = new Map();
+    const inFlightBindings = new Map();
     const sequenceRangeUpdateTails = new Map();
     const transitionUpdateTails = new Map();
     const sequencePlayheadSetTails = new Map();
@@ -34,6 +43,8 @@
     const definitions = {
       "capabilities.get": { readOnly: true, handler: capabilities },
       "state.get": { readOnly: true, handler: stateSnapshot },
+      "operations.recovery.inspect": { readOnly: true, handler: inspectOperationRecovery },
+      "operations.recovery.acknowledge": { readOnly: true, handler: acknowledgeOperationRecovery },
       "project.snapshot": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectProject, handler: projectSnapshot },
       "project.insertionBin.inspect": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectProjectInsertionBin, handler: inspectProjectInsertionBin },
       "graphics.mogrtPath.inspect": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectInstalledMogrtDirectory, handler: inspectInstalledMogrtDirectory },
@@ -41,6 +52,8 @@
       "sequence.createPreset": { destructive: true, undoable: false, idempotent: true, requiresWorkspace: true, minHostVersion: "26.3.0", probe: canCreatePresetSequence, handler: createPresetSequence },
       "sequence.range.inspect": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectSequenceRange, handler: inspectSequenceRange },
       "sequence.range.update": { destructive: true, undoable: true, idempotent: true, minHostVersion: "25.6.0", probe: canUpdateSequenceRange, handler: updateSequenceRange },
+      "workArea.inspect": { readOnly: true, minHostVersion: "26.5.0", probe: canInspectWorkArea, handler: inspectWorkArea },
+      "workArea.set": { idempotent: true, minHostVersion: "26.5.0", probe: canSetWorkArea, handler: setWorkArea },
       "sequence.playhead.inspect": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectSequencePlayhead, handler: inspectSequencePlayhead },
       "sequence.playhead.set": { idempotent: true, minHostVersion: "25.6.0", probe: canSetSequencePlayhead, handler: setSequencePlayhead },
       "time.frameAlignment.inspect": { readOnly: true, minHostVersion: "25.6.0", probe: canInspectFrameAlignment, handler: inspectFrameAlignment },
@@ -181,41 +194,111 @@
       };
     }
 
+    async function operationIdentity(includeState) {
+      const project = ppro.Project && await ppro.Project.getActiveProject();
+      const sequence = project && typeof project.getActiveSequence === "function" ? await project.getActiveSequence() : null;
+      const identity = { projectGuid: project ? String(project.guid || "") : null, sequenceGuid: sequence ? String(sequence.guid || "") : null };
+      if (includeState) {
+        const clips = [];
+        for (const media of ["Video", "Audio"]) {
+          if (!sequence) continue;
+          const countMethod = sequence["get" + media + "TrackCount"], trackMethod = sequence["get" + media + "Track"];
+          if (typeof countMethod !== "function" || typeof trackMethod !== "function") continue;
+          const count = await countMethod.call(sequence);
+          if (!Number.isInteger(count) || count < 0 || count > 256) throw commandError("UXP_RECOVERY_SNAPSHOT_UNAVAILABLE", "Recovery track count cannot be bounded");
+          for (let trackIndex = 0; trackIndex < count; trackIndex += 1) {
+            const track = await trackMethod.call(sequence, trackIndex);
+            const items = Array.from(await track.getTrackItems(ppro.Constants && ppro.Constants.TrackItemType && ppro.Constants.TrackItemType.CLIP, false) || []);
+            if (clips.length + items.length > 5000) throw commandError("UXP_RECOVERY_SNAPSHOT_UNAVAILABLE", "Recovery snapshot exceeds 5000 clips; use bounded manual repair");
+            for (const item of items) {
+              const clip = { media, trackIndex, guid: String(item.guid || "") };
+              for (const field of ["StartTime", "EndTime", "InPoint", "OutPoint"]) {
+                if (typeof item["get" + field] !== "function") continue;
+                const time = await item["get" + field]();
+                clip[field] = time && time.ticks != null ? String(time.ticks) : time && Number.isFinite(time.seconds) ? String(time.seconds) + " seconds" : null;
+              }
+              clips.push(clip);
+            }
+          }
+        }
+        identity.hostStateRevision = Transcript.transcriptRevision(Ledger.canonical(clips));
+        identity.snapshotBoundary = "bounded_active_sequence_clip_identity_and_ranges";
+      }
+      return identity;
+    }
+    async function inspectOperationRecovery(args) {
+      assertOnlyKeys(args, []);
+      return operationLedger.inspect(await operationIdentity(true));
+    }
+    async function acknowledgeOperationRecovery(args) {
+      assertOnlyKeys(args, ["expectedRecoveryRevision", "expectedIdentityRevision", "operationIds", "reviewed"]);
+      if (!Array.isArray(args.operationIds) || args.operationIds.length > 4096 || args.operationIds.some((id) => typeof id !== "string")) throw commandError("UXP_INVALID_ARGUMENT", "operationIds must be the bounded inspected ID list");
+      // Reconciliation shares the mutation queue, so it cannot clear a reservation
+      // while its host mutation is still running.
+      const pending = mutationTail.then(async () => operationLedger.acknowledge(await operationIdentity(true), args));
+      mutationTail = pending.catch(() => {});
+      return pending;
+    }
+    function provenPreflightRefusal(error) {
+      // A typed code alone cannot prove that a handler did not already write.
+      return !!(error && error.noHostDispatch === true && error.dispatchEvidence === "panel_pre_dispatch");
+    }
     async function dispatch(command, args) {
+      const invocation = { handlerEntered: false };
+      try { return await dispatchInvocation(command, args, invocation); }
+      catch (error) {
+        if (!invocation.handlerEntered && error && typeof error === "object") {
+          error.noHostDispatch = true;
+          error.dispatchEvidence = "panel_pre_dispatch";
+        }
+        throw error;
+      }
+    }
+    async function dispatchInvocation(command, args, invocation) {
       const definition = definitions[command];
       if (!definition) throw commandError("UXP_UNSUPPORTED_COMMAND", "Unsupported UXP command: " + command);
       if (definition.probe && !await definition.probe()) throw commandError("UXP_COMMAND_UNAVAILABLE", command + " is not supported by this Premiere build");
       const input = args || {};
       const operationId = validateOperationId(input.operationId);
-      const operationKey = operationId ? command + ":" + operationId : null;
-      if (!definition.readOnly && operationKey && completedOperations.has(operationKey)) {
-        return { ...completedOperations.get(operationKey), replayed: true };
-      }
-      if (!definition.readOnly && operationKey && inFlightOperations.has(operationKey)) {
+      if (definition.readOnly) return definition.handler(input);
+      if (!invocationSession || !operationLedger.secureIdentityAvailable) throw commandError("UXP_SECURE_IDENTITY_UNAVAILABLE", "Documented UXP cryptographic entropy is unavailable; no host mutation was dispatched. Run the matching panel in a supported Premiere host");
+      const identity = await operationIdentity(false);
+      const operationKey = operationId || "anonymous:" + operationLedger.sessionId + ":" + invocationSession + ":" + (++anonymousOperation);
+      const binding = operationLedger.bind(command, input, identity);
+      const record = operationLedger.get(operationKey, binding);
+      if (record && completedOperations.has(operationKey)) return { ...completedOperations.get(operationKey), replayed: true };
+      if (inFlightOperations.has(operationKey)) {
+        if (inFlightBindings.get(operationKey) !== binding) throw commandError("UXP_OPERATION_CONFLICT", "In-flight operation ID is bound to a different invocation");
         return { ...await inFlightOperations.get(operationKey), replayed: true };
       }
+      if (record) throw commandError("UXP_OPERATION_CONSUMED", "Operation ID was consumed; its result is unavailable or unknown. Inspect current state; replay is not authorized");
       const execute = async () => {
-        const result = await definition.handler(input);
-        return definition.readOnly ? result : {
-          operationId: operationId || null,
-          outcome: result && result.outcome ? result.outcome : "verified",
-          ...result
-        };
+        const current = await operationIdentity(false);
+        if (Ledger.canonical(current) !== Ledger.canonical(identity)) throw commandError("UXP_STALE_PROJECT", "Active project or sequence changed while waiting; no host mutation was dispatched");
+        operationLedger.assertReady(current);
+        operationLedger.reserve(operationKey, binding, current);
+        try {
+          invocation.handlerEntered = true;
+          const result = await definition.handler(input);
+          const envelope = { operationId: operationId || null, outcome: result && result.outcome ? result.outcome : "verified", ...result };
+          operationLedger.finish(operationKey, envelope.outcome);
+          completedOperations.set(operationKey, envelope);
+          if (completedOperations.size > 256) completedOperations.delete(completedOperations.keys().next().value);
+          return envelope;
+        } catch (error) {
+          if (provenPreflightRefusal(error)) operationLedger.releasePreflight(operationKey);
+          else operationLedger.unknown(operationKey);
+          throw error;
+        }
       };
-      if (definition.readOnly || !operationKey) return execute();
-
-      // Reserve the idempotency key before the handler starts so concurrent
-      // WebSocket dispatches share one host mutation instead of racing it.
-      const pending = Promise.resolve().then(execute);
+      // One queue protects cooperating UXP requests across all workflow modules.
+      // It does not prevent edits from Premiere UI or unrelated extensions.
+      const pending = mutationTail.then(execute);
+      mutationTail = pending.catch(() => {});
       inFlightOperations.set(operationKey, pending);
-      try {
-        const envelope = await pending;
-        completedOperations.set(operationKey, envelope);
-        if (completedOperations.size > 256) completedOperations.delete(completedOperations.keys().next().value);
-        return envelope;
-      } finally {
-        if (inFlightOperations.get(operationKey) === pending) inFlightOperations.delete(operationKey);
-      }
+      inFlightBindings.set(operationKey, binding);
+      try { return await pending; }
+      finally { if (inFlightOperations.get(operationKey) === pending) { inFlightOperations.delete(operationKey); inFlightBindings.delete(operationKey); } }
     }
     async function capabilities() {
       let project = null, sequence = null;
@@ -228,21 +311,26 @@
       for (const name of Object.keys(definitions)) {
         const definition = definitions[name], apiSupported = !definition.probe || await definition.probe();
         const pathValidationSupported = !definition.requiresWorkspace || workspaceState.canonicalPathValidation === "available";
-        const supported = apiSupported && pathValidationSupported;
+        const replaySupported = definition.readOnly || deps.requireOperationDurability !== true || operationLedger.durable;
+        const secureIdentitySupported = definition.readOnly || !!(invocationSession && operationLedger.secureIdentityAvailable);
+        const supported = apiSupported && pathValidationSupported && replaySupported && secureIdentitySupported;
         commands[name] = {
           supported, backend: "uxp", documented: true,
           readOnly: !!definition.readOnly, destructive: !!definition.destructive,
           undoable: !!definition.undoable, idempotent: !!definition.idempotent
         };
+        if (name === "interchange.export") commands[name].formats = { otio: !!(ppro.ProjectConverter && typeof ppro.ProjectConverter.exportAsOpenTimelineIO === "function"), fcpxml: !!(ppro.ProjectConverter && typeof ppro.ProjectConverter.exportAsFinalCutProXML === "function") };
         if (definition.minHostVersion) commands[name].minHostVersion = definition.minHostVersion;
         if (definition.requiresWorkspace) commands[name].workspaceRequired = true;
         if (definition.conditionalWorkspace) commands[name].workspaceRequired = "path_variant_only";
         if (definition.targetCapabilityProbe) commands[name].targetCapabilityProbe = "invocation";
         if (!apiSupported) commands[name].reason = "Required Premiere UXP API is unavailable in this host";
+        else if (!secureIdentitySupported) commands[name].reason = "Documented UXP cryptographic entropy is unavailable; mutations are disabled";
+        else if (!replaySupported) commands[name].reason = "Persistent operation storage is unavailable; mutations are disabled";
         else if (!pathValidationSupported) commands[name].reason = "canonical path validation is not implemented in this build; use the CEP fallback for path-based workflows";
       }
       return {
-        backend: "uxp", protocolVersion: Protocol.PROTOCOL_VERSION, hostMinVersion: "25.6.0",
+        backend: "uxp", protocolVersion: Protocol.PROTOCOL_VERSION, commandSchemaVersion: Protocol.COMMAND_SCHEMA_VERSION, receiptVersion: Protocol.RECEIPT_VERSION, operationSessionId: operationLedger.sessionId, replayPersistence: operationLedger.durable ? "durable_hashed_tombstones" : "memory_only", hostMinVersion: "25.6.0",
         activeProject: !!project, activeSequence: !!sequence, workspace: workspaceState, commands,
         fallback: { backend: "cep", reason: "Use CEP/QE only when a command is absent or reports unsupported; never silently retry a failed UXP mutation." }
       };
@@ -368,40 +456,47 @@
     }
     async function updateSequenceRange(args) {
       const input = validateSequenceRangeUpdateArgs(args);
-      // TickTime construction can cross the host boundary. Do it before the
-      // per-sequence exclusion scope so the guarded snapshot is the final
-      // asynchronous preflight step before action creation.
-      const ticks = {
-        inPoint: input.updates.inSeconds == null ? null : await tickTime(input.updates.inSeconds, "updates.inSeconds"),
-        outPoint: input.updates.outSeconds == null ? null : await tickTime(input.updates.outSeconds, "updates.outSeconds"),
-        zeroPoint: input.updates.zeroPointSeconds == null ? null : await tickTime(input.updates.zeroPointSeconds, "updates.zeroPointSeconds")
-      };
       return withSequenceRangeUpdateLock(input.expectedSequenceGuid, async () => {
         const context = await activeContext(true);
+        const ticks = {
+          inPoint: input.updates.inSeconds == null ? null : await sequenceTickTime(context.sequence, input.updates.inSeconds, "updates.inSeconds"),
+          outPoint: input.updates.outSeconds == null ? null : await sequenceTickTime(context.sequence, input.updates.outSeconds, "updates.outSeconds"),
+          zeroPoint: input.updates.zeroPointSeconds == null ? null : await sequenceTickTime(context.sequence, input.updates.zeroPointSeconds, "updates.zeroPointSeconds")
+        };
         const before = await sequenceRangeSnapshot(context.sequence);
         if (before.sequenceGuid !== input.expectedSequenceGuid) {
           throw commandError("UXP_STALE_SEQUENCE", "The active sequence changed before the range update; inspect the current range and retry");
         }
         assertExpectedSequenceRange(before.range, input.expectedRange);
-        const desired = { ...before.range, ...input.updates };
+        const appliedUpdates = {
+          ...(ticks.inPoint ? { inSeconds: ticks.inPoint.appliedSeconds } : {}),
+          ...(ticks.outPoint ? { outSeconds: ticks.outPoint.appliedSeconds } : {}),
+          ...(ticks.zeroPoint ? { zeroPointSeconds: ticks.zeroPoint.appliedSeconds } : {}),
+        };
+        const desired = {
+          ...before.range,
+          ...appliedUpdates,
+          ...(ticks.inPoint ? { inSet: true } : {}),
+          ...(ticks.outPoint ? { outSet: true } : {}),
+        };
         assertValidSequenceRange(desired, "requested sequence range");
         let committed = false;
         context.project.lockedAccess(() => {
           committed = context.project.executeTransaction((compoundAction) => {
             if (ticks.inPoint) {
-              const action = context.sequence.createSetInPointAction(ticks.inPoint);
+              const action = context.sequence.createSetInPointAction(ticks.inPoint.tickTime);
               if (!action || compoundAction.addAction(action) === false) {
                 throw commandError("UXP_ACTION_REJECTED", "Premiere rejected the sequence in point action");
               }
             }
             if (ticks.outPoint) {
-              const action = context.sequence.createSetOutPointAction(ticks.outPoint);
+              const action = context.sequence.createSetOutPointAction(ticks.outPoint.tickTime);
               if (!action || compoundAction.addAction(action) === false) {
                 throw commandError("UXP_ACTION_REJECTED", "Premiere rejected the sequence out point action");
               }
             }
             if (ticks.zeroPoint) {
-              const action = context.sequence.createSetZeroPointAction(ticks.zeroPoint);
+              const action = context.sequence.createSetZeroPointAction(ticks.zeroPoint.tickTime);
               if (!action || compoundAction.addAction(action) === false) {
                 throw commandError("UXP_ACTION_REJECTED", "Premiere rejected the sequence zero point action");
               }
@@ -418,6 +513,8 @@
           outcome: "verified",
           sequenceGuid: after.sequenceGuid,
           range: after.range,
+          requestedUpdates: input.updates,
+          appliedUpdates,
           verified: "sequence_range_readback",
           operation: operationSemantics({
             mutatesProject: true,
@@ -441,6 +538,87 @@
       return previous.catch(() => undefined).then(operation).finally(() => {
         release();
         if (sequenceRangeUpdateTails.get(sequenceGuid) === tail) sequenceRangeUpdateTails.delete(sequenceGuid);
+      });
+    }
+    async function workAreaSnapshot(sequence) {
+      const sequenceGuid = sequenceGuidRequired(sequence);
+      const utils = ppro.WorkAreaUtils;
+      const [inPoint, outPoint] = await Promise.all([utils.getWorkAreaInPoint(sequence), utils.getWorkAreaOutPoint(sequence)]);
+      const workArea = {
+        inSeconds: tickSecondsRequired(inPoint, "work area in point"),
+        outSeconds: tickSecondsRequired(outPoint, "work area out point")
+      };
+      if (workArea.outSeconds < workArea.inSeconds) {
+        throw commandError("UXP_VERIFICATION_FAILED", "Premiere returned a work area whose out point precedes its in point");
+      }
+      return { sequenceGuid, workArea };
+    }
+    async function inspectWorkArea(args) {
+      assertOnlyKeys(args, []);
+      const context = await activeContext(false);
+      return { ...await workAreaSnapshot(context.sequence), verificationBoundary: "work_area_readback" };
+    }
+    function validateWorkAreaSetArgs(args) {
+      assertObject(args);
+      assertOnlyKeys(args, ["expectedSequenceGuid", "expectedWorkArea", "inSeconds", "outSeconds", "operationId"]);
+      if (typeof args.expectedSequenceGuid !== "string" || !args.expectedSequenceGuid || args.expectedSequenceGuid.length > 512) {
+        throw commandError("UXP_INVALID_ARGUMENT", "expectedSequenceGuid is required and must be at most 512 characters");
+      }
+      assertObject(args.expectedWorkArea);
+      assertOnlyKeys(args.expectedWorkArea, ["inSeconds", "outSeconds"]);
+      const expectedWorkArea = {
+        inSeconds: boundedSeconds(args.expectedWorkArea.inSeconds, "expectedWorkArea.inSeconds"),
+        outSeconds: boundedSeconds(args.expectedWorkArea.outSeconds, "expectedWorkArea.outSeconds")
+      };
+      const inSeconds = boundedSeconds(args.inSeconds, "inSeconds");
+      const outSeconds = boundedSeconds(args.outSeconds, "outSeconds");
+      if (outSeconds <= inSeconds) throw commandError("UXP_INVALID_ARGUMENT", "outSeconds must be greater than inSeconds");
+      return { expectedSequenceGuid: args.expectedSequenceGuid, expectedWorkArea, desired: { inSeconds, outSeconds } };
+    }
+    async function setWorkArea(args) {
+      const input = validateWorkAreaSetArgs(args);
+      return withSequenceRangeUpdateLock("workArea:" + input.expectedSequenceGuid, async () => {
+        const context = await activeContext(false);
+        const inTick = await sequenceTickTime(context.sequence, input.desired.inSeconds, "inSeconds");
+        const outTick = await sequenceTickTime(context.sequence, input.desired.outSeconds, "outSeconds");
+        const applied = { inSeconds: inTick.appliedSeconds, outSeconds: outTick.appliedSeconds };
+        const before = await workAreaSnapshot(context.sequence);
+        if (before.sequenceGuid !== input.expectedSequenceGuid) {
+          throw commandError("UXP_STALE_SEQUENCE", "The active sequence changed before the work-area update; inspect and retry");
+        }
+        if (!sameSeconds(before.workArea.inSeconds, input.expectedWorkArea.inSeconds) ||
+          !sameSeconds(before.workArea.outSeconds, input.expectedWorkArea.outSeconds)) {
+          throw commandError("UXP_STALE_RANGE", "The work area changed before the update; inspect the current work area and retry");
+        }
+        const endSeconds = tickSecondsRequired(await context.sequence.getEndTime(), "sequence end point");
+        if (applied.outSeconds > endSeconds + 0.000001) {
+          throw commandError("UXP_INVALID_ARGUMENT", "outSeconds must not exceed the sequence end");
+        }
+        const accepted = await ppro.WorkAreaUtils.setWorkAreaInOutPoints(context.sequence, inTick.tickTime, outTick.tickTime);
+        if (accepted !== true) throw commandError("UXP_ACTION_REJECTED", "Premiere rejected the work-area update");
+        const after = await workAreaSnapshot(context.sequence);
+        if (after.sequenceGuid !== before.sequenceGuid ||
+          !FrameTime.withinHalfFrame(after.workArea.inSeconds, applied.inSeconds, inTick.ticksPerFrame) ||
+          !FrameTime.withinHalfFrame(after.workArea.outSeconds, applied.outSeconds, outTick.ticksPerFrame)) {
+          throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not retain the requested work area");
+        }
+        return {
+          updated: true,
+          outcome: "verified",
+          sequenceGuid: after.sequenceGuid,
+          workArea: after.workArea,
+          requestedWorkArea: input.desired,
+          appliedWorkArea: applied,
+          verified: "work_area_readback",
+          operation: operationSemantics({
+            mutatesProject: true,
+            verificationStatus: "verified",
+            verificationBoundary: "work_area_readback",
+            verificationEvidence: [{ type: "work_area", sequenceGuid: after.sequenceGuid, workArea: after.workArea }],
+            undoSupported: false,
+            cancellationSupported: false
+          })
+        };
       });
     }
     async function inspectSequencePlayhead(args) {
@@ -570,12 +748,9 @@
     }
     async function setSequencePlayhead(args) {
       const input = validateSequencePlayheadSetArgs(args);
-      // TickTime construction can cross the host boundary. Construct it before
-      // the per-sequence exclusion scope so the guarded snapshot is the final
-      // asynchronous preflight step before the host setter is invoked.
-      const position = await tickTime(input.positionSeconds, "positionSeconds");
       return withSequencePlayheadSetLock(input.expectedSequenceGuid, async () => {
         const context = await activeContext(false);
+        const position = await sequenceTickTime(context.sequence, input.positionSeconds, "positionSeconds");
         const before = await sequencePlayheadSnapshot(context.sequence);
         if (before.sequenceGuid !== input.expectedSequenceGuid) {
           throw commandError("UXP_STALE_SEQUENCE", "The active sequence changed before the player position was set; inspect the current playhead and retry");
@@ -583,12 +758,12 @@
         if (!sameSeconds(before.positionSeconds, input.expectedPositionSeconds)) {
           throw commandError("UXP_STALE_PLAYHEAD", "The sequence player position changed before it was set; inspect the current playhead and retry");
         }
-        const accepted = await context.sequence.setPlayerPosition(position);
+        const accepted = await context.sequence.setPlayerPosition(position.tickTime);
         if (accepted !== true) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not confirm the sequence player position");
         // Re-resolve the active sequence for postcondition readback: a user can
         // switch sequences while Premiere awaits the host setter.
         const after = await sequencePlayheadSnapshot((await activeContext(false)).sequence);
-        if (after.sequenceGuid !== before.sequenceGuid || !sameSeconds(after.positionSeconds, input.positionSeconds)) {
+        if (after.sequenceGuid !== before.sequenceGuid || !FrameTime.withinHalfFrame(after.positionSeconds, position.appliedSeconds, position.ticksPerFrame)) {
           throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not retain the requested sequence player position");
         }
         return {
@@ -596,6 +771,8 @@
           outcome: "verified",
           sequenceGuid: after.sequenceGuid,
           positionSeconds: after.positionSeconds,
+          requestedPositionSeconds: input.positionSeconds,
+          appliedPositionSeconds: position.appliedSeconds,
           verified: "sequence_playhead_readback",
           operation: operationSemantics({
             mutatesProject: false,
@@ -686,13 +863,16 @@
     }
     async function exportInterchange(args) {
       assertOnlyKeys(args, ["format", "outputFilePath", "suppressUI", "operationId"]);
-      const format = requiredString(args.format, "format"), outputFilePath = await allowedPath(args.outputFilePath, "outputFilePath", "file");
+      const format = requiredString(args.format, "format");
       if (format !== "otio" && format !== "fcpxml") throw commandError("UXP_INVALID_ARGUMENT", "format must be otio or fcpxml");
-      const context = await activeContext(false);
       const method = format === "otio" ? "exportAsOpenTimelineIO" : "exportAsFinalCutProXML";
-      const exported = await ppro.ProjectConverter[method](context.sequence, outputFilePath, args.suppressUI !== false);
+      if (!ppro.ProjectConverter || typeof ppro.ProjectConverter[method] !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "Requested interchange format " + format + " is unavailable in this Premiere build");
+      const suppressUI = optionalBoolean(args.suppressUI, true, "suppressUI");
+      const outputFilePath = await allowedPath(args.outputFilePath, "outputFilePath", "file");
+      const context = await activeContext(false);
+      const exported = await ppro.ProjectConverter[method](context.sequence, outputFilePath, suppressUI);
       if (!exported) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not confirm the interchange export");
-      return { exported: true, outcome: "verified", format, outputFilePath };
+      return { exported: true, outcome: "committed_unverified", outputVerified: false, verificationBoundary: "projectConverter_host_return_only", format, outputFilePath };
     }
     async function exportAaf(args) {
       const input = validateAafArgs(args);
@@ -833,7 +1013,9 @@
       const project = await ppro.Project.getActiveProject();
       if (!project) throw commandError("UXP_NO_ACTIVE_PROJECT", "No active project");
       const clip = await resolveClipProjectItem(project, { projectItemId: wantedId, projectItemName: wantedName });
-      const itemId = await clip.getId();
+      // ClipProjectItem casts on some 26.5 builds lack getId. Receipt identity
+      // is optional; resolution and replay guards still apply before dispatch.
+      const itemId = await projectItemIdentifier(clip) || null;
       const accepted = await ppro.Transcript.transcribeClipProjectItem(clip, language ? { language } : undefined);
       if (accepted !== true) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not confirm the transcription start request");
       return {
@@ -877,15 +1059,33 @@
       if (ppro.TickTime && typeof ppro.TickTime.createWithSeconds === "function") return ppro.TickTime.createWithSeconds(value);
       throw commandError("UXP_COMMAND_UNAVAILABLE", "This Premiere build cannot create TickTime");
     }
+    async function sequenceTickTime(sequence, seconds, name) {
+      const requested = Number(seconds);
+      if (!Number.isFinite(requested)) throw commandError("UXP_INVALID_ARGUMENT", name + " must be a finite number");
+      let timebase;
+      try { timebase = String(await sequence.getTimebase()); } catch (_) { timebase = ""; }
+      if (!/^\d{1,18}$/.test(timebase) || BigInt(timebase) <= 0n) {
+        throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not return a valid sequence ticksPerFrame timebase");
+      }
+      let snapped;
+      try { snapped = FrameTime.snapSeconds(requested, timebase); } catch (_) {
+        throw commandError("UXP_INVALID_ARGUMENT", name + " could not be snapped to the sequence frame grid");
+      }
+      return { ...snapped, ticksPerFrame: timebase, tickTime: await tickTime(snapped.appliedSeconds, name) };
+    }
     async function sequenceRangeSnapshot(sequence) {
       const sequenceGuid = String(sequence && sequence.guid || "");
       if (!sequenceGuid) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not provide a stable active-sequence GUID");
       const [inPoint, outPoint, zeroPoint, endPoint] = await Promise.all([
         sequence.getInPoint(), sequence.getOutPoint(), sequence.getZeroPoint(), sequence.getEndTime()
       ]);
+      const inSeconds = tickSecondsOptional(inPoint, "sequence in point");
+      const outSeconds = tickSecondsOptional(outPoint, "sequence out point");
       const range = {
-        inSeconds: tickSecondsRequired(inPoint, "sequence in point"),
-        outSeconds: tickSecondsRequired(outPoint, "sequence out point"),
+        inSeconds,
+        outSeconds,
+        inSet: inSeconds !== null,
+        outSet: outSeconds !== null,
         zeroPointSeconds: tickSecondsRequired(zeroPoint, "sequence zero point"),
         endSeconds: tickSecondsRequired(endPoint, "sequence end point")
       };
@@ -1052,14 +1252,26 @@
     }
     function validateExpectedSequenceRange(value, name) {
       assertObject(value);
-      assertOnlyKeys(value, ["inSeconds", "outSeconds", "zeroPointSeconds", "endSeconds"]);
+      assertOnlyKeys(value, ["inSeconds", "outSeconds", "inSet", "outSet", "zeroPointSeconds", "endSeconds"]);
       const result = {};
       for (const key of ["inSeconds", "outSeconds", "zeroPointSeconds", "endSeconds"]) {
         if (value[key] == null) {
+          if (value[key] === null && ((key === "inSeconds" && value.inSet === false) || (key === "outSeconds" && value.outSet === false))) {
+            result[key] = null;
+            continue;
+          }
           throw commandError("UXP_INVALID_ARGUMENT", name + "." + key + " is required");
         }
         result[key] = boundedSeconds(value[key], name + "." + key);
       }
+      if (typeof value.inSet !== "boolean" || value.inSet !== (result.inSeconds !== null)) {
+        throw commandError("UXP_INVALID_ARGUMENT", name + ".inSet must match inSeconds" );
+      }
+      if (typeof value.outSet !== "boolean" || value.outSet !== (result.outSeconds !== null)) {
+        throw commandError("UXP_INVALID_ARGUMENT", name + ".outSet must match outSeconds" );
+      }
+      result.inSet = value.inSet;
+      result.outSet = value.outSet;
       return result;
     }
     function validateSequenceRangeUpdates(value) {
@@ -1072,23 +1284,30 @@
       return result;
     }
     function assertExpectedSequenceRange(actual, expected) {
-      if (!sameSeconds(actual.inSeconds, expected.inSeconds) || !sameSeconds(actual.outSeconds, expected.outSeconds) ||
+      if (!sameOptionalSeconds(actual.inSeconds, expected.inSeconds) || actual.inSet !== expected.inSet ||
+        !sameOptionalSeconds(actual.outSeconds, expected.outSeconds) || actual.outSet !== expected.outSet ||
         !sameSeconds(actual.zeroPointSeconds, expected.zeroPointSeconds) || !sameSeconds(actual.endSeconds, expected.endSeconds)) {
         throw commandError("UXP_STALE_RANGE", "The sequence range changed before the update; inspect the current range and retry");
       }
     }
     function assertValidSequenceRange(range, name) {
-      const inSeconds = boundedSeconds(range.inSeconds, name + ".inSeconds");
-      const outSeconds = boundedSeconds(range.outSeconds, name + ".outSeconds");
+      const inSeconds = range.inSet ? boundedSeconds(range.inSeconds, name + ".inSeconds") : null;
+      const outSeconds = range.outSet ? boundedSeconds(range.outSeconds, name + ".outSeconds") : null;
       const endSeconds = boundedSeconds(range.endSeconds, name + ".endSeconds");
       boundedSeconds(range.zeroPointSeconds, name + ".zeroPointSeconds");
-      if (inSeconds > outSeconds || outSeconds > endSeconds) {
+      const effectiveInSeconds = inSeconds == null ? 0 : inSeconds;
+      const effectiveOutSeconds = outSeconds == null ? endSeconds : outSeconds;
+      if (effectiveInSeconds > effectiveOutSeconds || effectiveOutSeconds > endSeconds) {
         throw commandError("UXP_INVALID_ARGUMENT", name + " must satisfy inSeconds <= outSeconds <= endSeconds");
       }
     }
     function sameSequenceRange(actual, expected) {
-      return sameSeconds(actual.inSeconds, expected.inSeconds) && sameSeconds(actual.outSeconds, expected.outSeconds) &&
+      return sameOptionalSeconds(actual.inSeconds, expected.inSeconds) && actual.inSet === expected.inSet &&
+        sameOptionalSeconds(actual.outSeconds, expected.outSeconds) && actual.outSet === expected.outSet &&
         sameSeconds(actual.zeroPointSeconds, expected.zeroPointSeconds) && sameSeconds(actual.endSeconds, expected.endSeconds);
+    }
+    function sameOptionalSeconds(left, right) {
+      return left === null || right === null ? left === right : sameSeconds(left, right);
     }
     function sameSeconds(left, right) {
       return typeof left === "number" && typeof right === "number" && Math.abs(left - right) <= 0.000001;
@@ -1098,6 +1317,12 @@
         throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not return a valid " + name);
       }
       return value.seconds;
+    }
+    function tickSecondsOptional(value, name) {
+      if (!value || typeof value.seconds !== "number" || !Number.isFinite(value.seconds)) {
+        throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not return a valid " + name);
+      }
+      return value.seconds < 0 ? null : boundedSeconds(value.seconds, name);
     }
     function boundedSeconds(value, name) {
       if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 86400) {
@@ -1121,13 +1346,102 @@
       const outputDirectory = await allowedPath(args.outputDirectory, "outputDirectory", "directory");
       const filename = Protocol.safeFilename(args.filename);
       const exporterFilename = Protocol.exporterFrameName(filename);
-      const position = args.seconds == null ? await context.sequence.getPlayerPosition() : await tickTime(args.seconds, "seconds");
+      const snapped = args.seconds == null ? null : await sequenceTickTime(context.sequence, args.seconds, "seconds");
+      const position = snapped ? snapped.tickTime : await context.sequence.getPlayerPosition();
       const size = await context.sequence.getFrameSize();
       const width = positiveInt(args.width, size.width, "width"), height = positiveInt(args.height, size.height, "height");
-      const returned = await ppro.Exporter.exportSequenceFrame(context.sequence, position, exporterFilename, outputDirectory, width, height);
+      const before = await frameOutputsBefore(outputDirectory, filename, exporterFilename);
+      let returned;
+      try {
+        returned = await ppro.Exporter.exportSequenceFrame(context.sequence, position, exporterFilename, outputDirectory, width, height);
+      } catch (error) {
+        // Premiere 26.5.2 rejects an extension-less name with "File Format is not supported";
+        // its documented contract takes the image extension in the filename. Retry with it.
+        if (exporterFilename === filename || !/format is not supported/i.test(String(error && error.message || error))) throw error;
+        returned = await ppro.Exporter.exportSequenceFrame(context.sequence, position, filename, outputDirectory, width, height);
+      }
       if (returned !== true) throw commandError("UXP_VERIFICATION_FAILED", "Premiere did not confirm frame export; no output path is reported");
-      const path = Protocol.joinPath(outputDirectory, filename);
-      return { path, width, height, seconds: position.seconds, exporterResult: returned };
+      const expectedPath = Protocol.joinPath(outputDirectory, filename);
+      // Premiere 26.5.2 returns true before the PNG is on disk (it appeared about two seconds
+      // later), so poll briefly before deciding nothing was written.
+      let output = await locateFrameOutput(outputDirectory, filename, exporterFilename);
+      for (let waited = 0; output.found === false && waited < FRAME_OUTPUT_WAIT_MS; waited += FRAME_OUTPUT_POLL_MS) {
+        await frameWait(FRAME_OUTPUT_POLL_MS);
+        output = await locateFrameOutput(outputDirectory, filename, exporterFilename);
+      }
+      if (output.found === false) {
+        throw commandError("UXP_VERIFICATION_FAILED", "Premiere reported the frame export as done, but no file was written at " + expectedPath);
+      }
+      // A file that was already there before the export proves nothing.
+      const preexisting = output.found === true && before.indexOf(output.path) !== -1;
+      const verified = output.found === true && !preexisting;
+      const result = {
+        path: output.found === true ? output.path : expectedPath, width, height, seconds: position.seconds,
+        ...(snapped ? { requestedSeconds: snapped.requestedSeconds, appliedSeconds: snapped.appliedSeconds } : {}), exporterResult: returned,
+        outcome: verified ? "verified" : "committed_unverified",
+        verificationBoundary: verified ? "output_file_exists" : "exporter_return_value",
+        operation: operationSemantics({
+          mutatesProject: false,
+          verificationStatus: verified ? "verified" : "not_verified",
+          verificationBoundary: verified ? "output_file_exists" : "exporter_return_value",
+          verificationEvidence: verified ? [{ type: "file_exists", path: output.path }] : [{ type: "host_return", value: returned }],
+          cancellationSupported: true
+        })
+      };
+      if (output.found === true && output.path !== expectedPath) {
+        result.warning = "Premiere wrote the frame as " + output.path + " instead of " + expectedPath + "; use the reported path.";
+      }
+      if (preexisting) {
+        result.note = "A file already existed at " + output.path + " before the export, so this run could not confirm Premiere overwrote it.";
+      } else if (!verified) {
+        result.note = "UXP storage could not check the output folder on this host, so the file was not confirmed.";
+      }
+      return result;
+    }
+    async function frameOutputsBefore(outputDirectory, filename, exporterFilename) {
+      const existing = [];
+      for (const name of [filename, exporterFilename, exporterFilename + ".png.png"]) {
+        const candidatePath = Protocol.joinPath(outputDirectory, name);
+        if (await outputFileExists(candidatePath)) existing.push(candidatePath);
+      }
+      return existing;
+    }
+    // The exporter appends ".png" to the bare stem on most builds, but #642
+    // reported 26.5.1 needing the full name. Look for every name the host could
+    // have produced instead of trusting the return value.
+    const FRAME_OUTPUT_WAIT_MS = 15000, FRAME_OUTPUT_POLL_MS = 250;
+    function frameWait(ms) {
+      if (typeof deps.frameWait === "function") return deps.frameWait(ms);
+      return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+    async function locateFrameOutput(outputDirectory, filename, exporterFilename) {
+      for (const name of [filename, exporterFilename, exporterFilename + ".png.png"]) {
+        const candidatePath = Protocol.joinPath(outputDirectory, name);
+        const exists = await outputFileExists(candidatePath);
+        if (exists === null) return { found: null };
+        if (exists) return { found: true, path: candidatePath };
+      }
+      return { found: false };
+    }
+    async function outputFileExists(path) {
+      if (typeof deps.fileExists === "function") {
+        const known = await deps.fileExists(path);
+        if (known !== null && known !== undefined) return !!known;
+      }
+      let fs = null;
+      try {
+        const uxp = require("uxp");
+        fs = uxp && uxp.storage && uxp.storage.localFileSystem;
+      } catch (_) { return null; }
+      if (!fs || typeof fs.getEntryWithUrl !== "function") return null;
+      const normalized = String(path).replace(/\\/g, "/");
+      const url = /^[A-Za-z]:\//.test(normalized) ? "file:/" + normalized : "file:" + normalized;
+      try {
+        const entry = await fs.getEntryWithUrl(url);
+        return !!(entry && !entry.isFolder);
+      } catch (_) {
+        return false;
+      }
     }
     async function liftSelection(args) {
       const input = validateLiftArgs(args), context = await activeContext(true);
@@ -1323,7 +1637,7 @@
       const wantedId = input.projectItemId || "", wantedName = input.projectItemName || "";
       if (!wantedId && !wantedName) return selectedClipProjectItem(project);
       if (typeof project.getRootItem !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "This Premiere build cannot enumerate project items");
-      const root = await project.getRootItem();
+      const root = folderView(await project.getRootItem());
       const queue = root ? [root] : [], nameMatches = [];
       while (queue.length) {
         const folder = queue.shift();
@@ -1335,7 +1649,9 @@
           if (!wantedId && wantedName && String(item.name || "") === wantedName) {
             try { nameMatches.push(castClipProjectItem(item)); } catch (_) {}
           }
-          if (isFolderItem(item)) queue.push(item);
+          // Items from getItems() are ProjectItems; nested bins only expose getItems() after FolderItem.cast.
+          const folderItem = folderView(item);
+          if (folderItem) queue.push(folderItem);
         }
       }
       if (wantedId) throw commandError("UXP_TARGET_NOT_FOUND", "projectItemId was not found or is not a media clip");
@@ -1364,22 +1680,30 @@
       } catch (_) {}
       throw commandError("UXP_TARGET_NOT_FOUND", "Resolved project item is not a media clip");
     }
-    function isFolderItem(item) {
-      if (!ppro.FolderItem || typeof ppro.FolderItem.cast !== "function") return false;
-      try { return !!ppro.FolderItem.cast(item); } catch (_) { return false; }
+    function folderView(item) {
+      if (!item) return null;
+      if (ppro.FolderItem && typeof ppro.FolderItem.cast === "function") {
+        try {
+          const folder = ppro.FolderItem.cast(item);
+          if (folder && typeof folder.getItems === "function") return folder;
+        } catch (_) {}
+      }
+      return typeof item.getItems === "function" ? item : null;
     }
     async function projectItemIdentifier(item) {
-      let projectItem = item;
-      if (ppro.ProjectItem && typeof ppro.ProjectItem.cast === "function") {
-        try { projectItem = ppro.ProjectItem.cast(item) || item; } catch (_) {}
+      // Match the sibling source/proxy lookups: prefer a direct getId, then ProjectItem.cast.
+      let projectItem = item && typeof item.getId === "function" ? item : null;
+      if (!projectItem && item && ppro.ProjectItem && typeof ppro.ProjectItem.cast === "function") {
+        try { projectItem = ppro.ProjectItem.cast(item) || null; } catch (_) {}
       }
       if (!projectItem || typeof projectItem.getId !== "function") return "";
-      const id = await projectItem.getId();
+      let id;
+      try { id = await projectItem.getId(); } catch (_) { return ""; }
       return id == null ? "" : String(id);
     }
     async function projectItemInventory(project) {
       if (typeof project.getRootItem !== "function") throw commandError("UXP_COMMAND_UNAVAILABLE", "This Premiere build cannot enumerate project items for subclip verification");
-      const root = await project.getRootItem(), queue = root ? [root] : [], items = [];
+      const root = folderView(await project.getRootItem()), queue = root ? [root] : [], items = [];
       while (queue.length) {
         const folder = queue.shift();
         if (!folder || typeof folder.getItems !== "function") continue;
@@ -1387,7 +1711,8 @@
         for (let i = 0; i < children.length; i += 1) {
           const item = children[i];
           items.push({ id: await projectItemIdentifier(item), name: String(item.name || ""), item });
-          if (isFolderItem(item)) queue.push(item);
+          const folderItem = folderView(item);
+          if (folderItem) queue.push(folderItem);
         }
       }
       return items;
@@ -1513,6 +1838,14 @@
     function canInspectSequenceRange() {
       return activeSequenceHas(["getInPoint", "getOutPoint", "getZeroPoint", "getEndTime"]);
     }
+    function canInspectWorkArea() {
+      return !!(ppro.WorkAreaUtils && typeof ppro.WorkAreaUtils.getWorkAreaInPoint === "function" &&
+        typeof ppro.WorkAreaUtils.getWorkAreaOutPoint === "function");
+    }
+    async function canSetWorkArea() {
+      return !!(canInspectWorkArea() && typeof ppro.WorkAreaUtils.setWorkAreaInOutPoints === "function" &&
+        ppro.TickTime && typeof ppro.TickTime.createWithSeconds === "function" && await activeSequenceHas(["getEndTime"]));
+    }
     function canInspectSequencePlayhead() {
       return activeSequenceHas(["getPlayerPosition"]);
     }
@@ -1554,8 +1887,8 @@
         .every((method) => typeof sequence[method] === "function");
     }
     function canExportInterchange() {
-      return !!(ppro.ProjectConverter && typeof ppro.ProjectConverter.exportAsOpenTimelineIO === "function" &&
-        typeof ppro.ProjectConverter.exportAsFinalCutProXML === "function");
+      return !!(ppro.ProjectConverter && (typeof ppro.ProjectConverter.exportAsOpenTimelineIO === "function" ||
+        typeof ppro.ProjectConverter.exportAsFinalCutProXML === "function"));
     }
     function canExportAaf() {
       return !!(ppro.ProjectConverter && typeof ppro.ProjectConverter.exportAAF === "function" &&

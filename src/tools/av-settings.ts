@@ -80,7 +80,7 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
       handler: async () => {
         const script = buildToolScript(`
           var seq = app.project.activeSequence;
-          if (!seq) return __error("No active sequence");
+          if (!seq) return __error("No active sequence; nothing was changed.");
           var settings = seq.getSettings();
           if (!settings) return __error("Could not get sequence settings");
 
@@ -102,6 +102,7 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
               channelType: optional("audioChannelType"),
               channelTypeLabels: { "0": "mono", "1": "stereo", "2": "5.1", "3": "multichannel", "4": "4-channel", "5": "8-channel" },
               sampleRate: valueOfTime(optional("audioSampleRate")),
+              sampleRateHz: __sampleRateHz(optional("audioSampleRate")),
               displayFormat: optional("audioDisplayFormat")
             },
             colorAndRender: {
@@ -134,7 +135,7 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
       handler: async (args: { item_id: string }) => {
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}; nothing was changed.");
           function optionalCall(name) {
             try { return typeof item[name] === "function" ? item[name]() : null; } catch (_) { return null; }
           }
@@ -167,7 +168,7 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
 
     set_project_item_audio_channel_mapping: {
       description:
-        "Map one output audio channel of a project item to a source channel using Premiere's documented AudioChannelMapping API.",
+        "Request one output-to-source audio channel mapping using the documented API. Per-channel mapping has no documented getter, so accepted writes remain committed_unverified.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -199,7 +200,7 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
         }
         const script = buildToolScript(`
           var item = __findProjectItem("${escapeForExtendScript(args.item_id)}");
-          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}");
+          if (!item) return __error("Item not found: ${escapeForExtendScript(args.item_id)}; nothing was changed.");
           var mapping = null;
           try { mapping = item.getAudioChannelMapping; } catch (_) {}
           if (typeof mapping === "function" || !mapping) {
@@ -209,12 +210,15 @@ export function getAvSettingsTools(bridgeOptions: BridgeOptions) {
             return __error("This item or Premiere build does not expose AudioChannelMapping.setMappingForChannel");
           }
           var accepted = mapping.setMappingForChannel(${args.channel_index}, ${args.source_channel_index});
-          if (accepted !== true) return __error("Premiere rejected this channel mapping");
+          if (accepted !== true) return __error("Premiere rejected this channel mapping", { accepted: false, verified: false, outcome: "failed" });
           return __result({
             item: item.name,
             channelIndex: ${args.channel_index},
             sourceChannelIndex: ${args.source_channel_index},
             accepted: true,
+            verified: false,
+            outcome: "committed_unverified",
+            appliedSourceChannelIndex: null,
             verification: "api-return",
             limitation: "The documented API does not expose a per-channel mapping getter for post-write comparison."
           });

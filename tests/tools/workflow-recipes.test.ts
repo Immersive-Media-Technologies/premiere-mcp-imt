@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
+import { cleanupTempDirs, makeTempDir } from "../helpers/temp-dir.js";
 import { getWorkflowRecipeTools, validateWorkflowRecipe } from "../../src/tools/workflow-recipes.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
+
+afterAll(cleanupTempDirs);
 
 describe("workflow recipes", () => {
   it("expands only audited declarative routes", async () => {
@@ -14,7 +16,7 @@ describe("workflow recipes", () => {
   });
   it("rejects arbitrary steps", () => expect(() => validateWorkflowRecipe({ schema_version: 1, id: "x", title: "X", description: "X", tags: [], required_inputs: [], steps: ["execute_extendscript"] })).toThrow(/unsupported/));
   it("loads a contained custom recipe and rejects conflicts", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "recipes-")), file = path.join(root, "recipes.json");
+    const root = makeTempDir("recipes-"), file = path.join(root, "recipes.json");
     const recipe = { schema_version: 1, id: "custom", title: "Custom", description: "Custom", tags: ["one"], required_inputs: [], steps: ["verify_connection"] };
     writeFileSync(file, JSON.stringify([recipe]));
     const tools = getWorkflowRecipeTools();
@@ -24,7 +26,7 @@ describe("workflow recipes", () => {
   });
   it.each([null, [], { schema_version: 2 }, { schema_version: 1, id: "x", title: "X", description: "X", steps: [] }, { schema_version: 1, id: "x", title: "X", description: "X", tags: ["a", "a"], required_inputs: [], steps: ["verify_connection"] }])("rejects invalid recipe %#", (recipe) => expect(() => validateWorkflowRecipe(recipe)).toThrow());
   it("fails closed for malformed and escaped custom files", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "recipes-")), outside = mkdtempSync(path.join(tmpdir(), "recipes-out-"));
+    const root = makeTempDir("recipes-"), outside = makeTempDir("recipes-out-");
     const tools = getWorkflowRecipeTools();
     writeFileSync(path.join(outside, "r.json"), "[]");
     expect((await tools.search_workflow_recipes.handler({ approved_workspace_path: root, recipe_file: path.join(outside, "r.json") })).success).toBe(false);
@@ -36,12 +38,28 @@ describe("workflow recipes", () => {
     expect((await tools.preview_workflow_recipe.handler({ recipe_id: "talking-head-cleanup", provided_inputs: [1] })).success).toBe(false);
   });
   it("reports ready built-ins and custom recipe sources", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "recipes-")), file = path.join(root, "r.json");
+    const root = makeTempDir("recipes-"), file = path.join(root, "r.json");
     writeFileSync(file, JSON.stringify([{ schema_version: 1, id: "custom-ready", title: "Custom", description: "Custom", tags: [], required_inputs: [], steps: ["verify_connection"] }]));
     const tools = getWorkflowRecipeTools();
     const custom = await tools.search_workflow_recipes.handler({ approved_workspace_path: root, recipe_file: file }) as any;
     expect(custom.data.recipes.find((item: any) => item.id === "custom-ready").source).toBe("workspace_file");
     const provided_inputs = ["source_project_item_id", "transcript_revision", "approved_segments", "sequence_name"];
     expect(((await tools.preview_workflow_recipe.handler({ recipe_id: "talking-head-cleanup", provided_inputs })) as any).data.ready).toBe(true);
+  });
+});
+
+ describe("editorial review recipes", () => {
+  it("includes explicit dialogue review before host preview and exposes review-only recipes", async () => {
+    const tools = getWorkflowRecipeTools();
+    const dialogue = await tools.preview_workflow_recipe.handler({ recipe_id: "talking-head-cleanup" }) as any;
+    const steps = dialogue.data.execution_manifest.map((s: any) => s.step);
+    expect(steps.indexOf("review_dialogue")).toBeLessThan(steps.indexOf("preview_dialogue_derivative"));
+    for (const recipe_id of ["quote-paper-edit", "batch-copy-review", "sync-match-review", "broll-pick-review"]) {
+      const preview = await tools.preview_workflow_recipe.handler({ recipe_id }) as any;
+      expect(preview.success).toBe(true);
+      expect(preview.data.applied).toBe(false);
+      expect(preview.data.execution_manifest).toHaveLength(1);
+      expect(preview.data.execution_manifest[0].routes[0]).toMatch(/^review_/);
+    }
   });
 });
