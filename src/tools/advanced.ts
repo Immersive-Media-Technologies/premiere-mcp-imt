@@ -449,7 +449,7 @@ export function getAdvancedTools(
             if ((speed !== 1 && speed !== 100) || (reversed !== false && reversed !== 0)) return __editFail("Source-side slip snapping requires a forward 1x clip; this clip's speed could not be mapped to timeline frames. No change was attempted.");
             var newInTicks = parseFloat(beforeIn) + deltaTicks;
             var newOutTicks = parseFloat(beforeOut) + deltaTicks;
-            if (newInTicks < 0 || newOutTicks <= newInTicks) return __editFail("The requested slip offset would create an invalid source range.");
+            if (newInTicks < 0 || newOutTicks <= newInTicks) return __editFail("The requested slip offset would create an invalid source range: the source window would start before the media. Use a smaller offset_seconds, or trim_clip the clip first so the window fits.");
             // SEC FORK (#712): upper bound from REAL media duration (ffprobe,
             // probed Node-side and embedded exactly), never the editable mark.${slipMediaBound}
             if (checkOnly) return __editOk({ checked: true });

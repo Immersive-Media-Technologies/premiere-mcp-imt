@@ -2689,7 +2689,10 @@ function __runLinkedEdit(target, nodeId, includeLinked, edit, label, validatedPa
   checkedAt[nodeId] = position(nodeId);
   var check;
   try { check = edit(target, nodeId, true); } catch (eCheck) { check = __editFail(eCheck.toString()); }
-  if (!check.ok) return __error(check.error);
+  // IMT 1.1.2: the check pass changes nothing by contract (checkOnly), so its refusal is
+  // not_applied — not an unknown outcome that pauses every later edit until recovery is
+  // acknowledged (seen live 02.11.2026: slip_edit "invalid source range" locked the host).
+  if (!check.ok) return __error(check.error + " Nothing was changed: the " + label + " was refused before any write.", { mutationAttempted: false, timelineChanged: false });
   rememberAffected(check, nodeId);
   var p;
   for (p = 0; p < partners.length; p++) {

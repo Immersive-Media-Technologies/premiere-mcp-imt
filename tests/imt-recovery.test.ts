@@ -47,6 +47,28 @@ describe("pre-write refusals", () => {
   });
 });
 
+describe("linked edits refused in the check pass (slip / slide / roll / trim)", () => {
+  // Live 02.11.2026: slip_edit past the media start was refused in checkOnly mode, yet the
+  // result had no mutationOutcome, so the dispatched command counted as an unknown outcome
+  // and every later edit was paused until recovery was acknowledged.
+  const clip = (id: string) => ({ clip: { nodeId: id, name: id, start: { ticks: "0" }, end: { ticks: "100" }, inPoint: { ticks: "0" }, outPoint: { ticks: "100" }, getLinkedItems: () => null }, trackType: "video", trackIndex: 0 });
+  const script = (editBody: string, includeLinked = false) =>
+    `__undoStart = 5; var target = ${JSON.stringify(clip("v1")).replace(/"getLinkedItems":null,?/, "")};
+     target.clip.getLinkedItems = function () { return null; };
+     __runLinkedEdit(target, "v1", ${includeLinked}, function (result, nodeId, checkOnly) { ${editBody} }, "slip")`;
+  it("reports a checkOnly refusal as not_applied with the reason", () => {
+    const r = fail(script(`return __editFail("The requested slip offset would create an invalid source range.");`));
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/invalid source range\. Nothing was changed: the slip was refused before any write\.$/);
+    expect(r.data).toMatchObject({ mutationOutcome: "not_applied", refusedBeforeWrite: true, mutationAttempted: false, timelineChanged: false });
+    expect(mutationReceipt(false, r.data, { dispatched: true }).outcome).toBe("not_applied");
+  });
+  it("keeps the outcome unknown when Premiere recorded undo entries during the check", () => {
+    const r = fail(script(`return __editFail("The requested slip offset would create an invalid source range.");`), 6);
+    expect(mutationReceipt(false, r.data, { dispatched: true }).outcome).toBe("unknown");
+  });
+});
+
 describe("no project open (Premiere home screen)", () => {
   it("tells a placeholder project from a real one", () => {
     const open = (project?: Record<string, unknown>) =>
