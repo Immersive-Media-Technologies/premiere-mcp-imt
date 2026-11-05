@@ -131,21 +131,51 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
 
 ## 6. Stage S — mask and seam (upper clip)
 
+Why the mask looks the way it does (user, 05.11): a standard matte cuts edge detail away (soft
+transparency, stray hair, texture that sticks out). So the **silhouette edge stays the generation's** —
+the people and props are already rendered in the generated layer — and the plate is fitted *inside*
+that silhouette with a coarser mask: real faces and details from the plate, the rim from the
+generation, and a short clean transition between them. The same idea holds in After Effects and
+Photoshop (there whole objects are selected and only the mask edge is kept off the generated
+silhouette). Subjects too small or too blurred to show facial features or detail are **not** cut out —
+they stay as the generation rendered them.
+
 1. Opacity of the upper clip to 100 % first if the alignment stage left it lower (say the old value).
+   The generation's frozen tail is already cut (Stage T) and the plate sits on the generation (Stage G)
+   before any mask is drawn.
 2. People: `object_mask_ui` on the upper clip's Opacity — one point per person **and** per visible
    fragment of a partly hidden person (legs, a shoulder, a hand at the edge); a doubtful fragment is
    checked on frames 120–240 away before deciding; a part of a figure (a face, hands) only with a lasso.
    Ground and shadows are not «objects» (clicks on asphalt add 0 px): the user draws a Pen mask, or a
    matte goes through Track Matte Key. Then track; check the overlay on 4–6 frames including the ends;
-   a lost part is fixed **on that frame** and tracked again from there (≤ 2 re-seed rounds, ~10 min per
-   piece; faces and heads first on every frame, then torso, then limbs).
-3. Seam: `object_mask_params_ui {mask_index, expansion, feather}` — Premiere's scale is its own (≈ −13 /
-   3–4 at 4608 px with large figures, 0–1 for small ones, 0 with glow; never Photoshop's 3/1). Measure
+   **Order of work (user, 05.11):** mask the whole subjects and objects first, then the ground; track;
+   check the overlay on 4–6 frames. Premiere's tracked masks slip now and then — fix a lost part once,
+   **on that frame**, and track again from there. If the mask still drifts after that one repair,
+   stop iterating: from then on watch only two things — the mask stays on every face and head, and no
+   foreign background (the plate's, removed in the generation) gets inside the mask. Whatever else the
+   tracker rendered on that piece stays as it is; the user said so to keep the model out of an endless
+   loop of fixing one frame.
+3. Seam: `object_mask_params_ui {mask_index, expansion, feather}` — the user's standard is **feather 4,
+   expansion −8 or −12** (4608 px frames, large figures); when the feather spills past the silhouette on
+   small objects, take it down, even to 0. Premiere's scale is its own (never Photoshop's 3/1). The
+   remaining border between plate and generated background is removed by the colour/exposure match of
+   the generation to the plate (Stage E), not by a softer mask. Measure
    on 3 frames: export the alpha at expansion 0 / feather 0 once, then at the final values →
    `conform.py mask-measure --mask0 M0.png --mask M.png [--mask-prev Mprev.png] --report mask.json`
    → `inset_px` (median/p10/p90 of the 50 % contour), `transition_px` (10–90 % width per perimeter),
    `opaque_from_px`, `jitter_vs_prev_px` (target std < 0.5 px), `lost_subject` (area drop > 30 %
    between neighbouring frames without a cut). Quote the measured width, not the parameter.
+   **Live lessons (shot 850, 05.11):** a click on a person standing in front of a flat panel (the crew's
+   green screen) takes the panel with him — outline such people with a lasso instead. Small patches of
+   the plate's background enclosed between heads stay inside the mask; the Object Mask ⊖ (click or
+   lasso) removed nothing on them in this run — they are not "objects" for the model — so report them
+   with their frame positions for the user to cut by hand rather than looping on them. Every ⊕/⊖ needs
+   the mask row selected in Effect Controls at that moment: with no mask selected the gesture creates a
+   second mask, and Premiere tracks only one mask at a time — delete a stray mask at once (its name
+   row → Delete). `set_clip_selection` through the bridge may switch the panel group to the Source
+   monitor and pin Effect Controls to another clip; a click on a clip's edge in the timeline enters
+   trim mode, where a stray key ripple-trims every track — leave it with Escape or a click on empty
+   track space and re-read the sequence before going on.
 4. Composite check: a short `export_sequence` of the composite → contact sheet; seam band
    |composite − upper| at 4–6 silhouette spots; transparent pixels where the warped lower clip left
    empty edges; stray clips/effects above the stack.

@@ -7,6 +7,12 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Fixed
+
+- `time_remap_ui`: the selected clip's trim boxes at both ends of the Time Remapping strip were counted
+  as speed keyframes («the clip already has 2 speed keyframes»); handle detection now ignores the strip
+  ends (live 05.11, shot 850), the timeline simulation draws the boxes.
+
 ### Added
 
 - **Layer conform reference and engine** (`pr_skill {doc:"layer-conform"}`, `skills/pr/scripts/conform.py`).

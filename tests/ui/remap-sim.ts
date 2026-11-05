@@ -155,6 +155,11 @@ export class SimTimeline implements RemapDesktop, RemapBridge {
       if (this.tx(this.clipEnd) <= TL.x1 * s) pasteGray(img, template("tlfx", s), cx1 - 22 * s, (TL.top + 3) * s);
       if (this.speedShown && (this.tracksTall || !this.needsTallTracks)) {
         fill(img, cx0 + 2 * s, TL.stripY * s, cx1 - 2 * s, (TL.stripY + TL.stripH) * s, [235, 235, 235]);
+        if (this.selected) {
+          // the selected clip's trim boxes at both ends of the strip (live 05.11: 11 px wide at s = 1)
+          fill(img, cx0 + 6 * s, (TL.stripY + 1) * s, cx0 + 17 * s, (TL.stripY + TL.stripH - 1) * s, [150, 150, 150]);
+          fill(img, cx1 - 17 * s, (TL.stripY + 1) * s, cx1 - 6 * s, (TL.stripY + TL.stripH - 1) * s, [150, 150, 150]);
+        }
         for (const k of this.keys) {
           const x = this.tx(k.seq);
           if (x < cx0 + 6 * s || x > cx1 - 6 * s) continue;

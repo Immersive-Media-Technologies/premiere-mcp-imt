@@ -157,8 +157,10 @@ export function keyHandles(shot: Shot, st: KeyStrip, x0 = st.x0, x1 = st.x1): nu
       a = -1;
     }
   }
+  // a selected clip draws a small box at each end of the strip (its trim handles) — not keyframes
+  const lo = x0 + 6 * s, hi = x1 - 6 * s;
   return runs
-    .filter(([p, q]) => q - p + 1 >= 6 * s && q - p + 1 <= 14 * s)
+    .filter(([p, q]) => q - p + 1 >= 6 * s && q - p + 1 <= 14 * s && p > lo && q < hi)
     .map(([p, q]) => (p + q) / 2)
     .filter((c) => dottedBelow(img, c, st, s));
 }
