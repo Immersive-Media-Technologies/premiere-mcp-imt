@@ -107,6 +107,16 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
    time, so 33 of 78 frames came one frame late (simulated in `tests/test_conform.py::test_time_plan_ramp_is_not_frame_exact`).
    The previous verify sampled only the key frames and passed. Denser keys are not the cure — keys at
    *every* lag change are (`--route step`), or no keys at all (route A).
+   Measured on the render (V1 exported after the keys, each frame matched against the native frames):
+   **34 of 84 frames were not real frames but a mix of two neighbours** (equal similarity to both,
+   0.91/0.90) — every frame where the averaged speed lands between two media frames. Static parts look
+   right in such a frame, moving parts (head, hands, back) double: «artefacts when the picture moves».
+   Cuts + slip (the 30.10 project `TESTS.prproj`: plate cut at 7/19/30/43/53/62, slips +1…+7) never make
+   an in-between frame — every frame is a native one, the only cost is one skipped/repeated frame at a
+   joint, invisible on playback. Check a retimed layer the same way: match every exported frame against
+   the native frames; a frame equally close to two neighbours is a blend → the plan is wrong.
+   Which layer is cut does not change the accuracy; for masks cut the generation (lower) and keep the
+   plate with its Object Mask as one clip (one mask tracks one clip).
 9. **One object drifts, the rest coincides** (the priest on 850): that is not a layer time error — the
    generation moved him at another phase. Layer-level time (route A/B) stays as measured; the object gets
    its own copy of the generation clip on a track above, masked to him (`object_mask_ui`), and that copy
