@@ -92,6 +92,33 @@ describe("MacDesktop", () => {
     await expect(d.key("cmd+q")).rejects.toThrow(/unknown key/);
   });
 
+  it("holds a drag across captures with modifier keys, right-clicks, and knows the timeline keys by code", async () => {
+    const f = fake();
+    const d = new MacDesktop(f.exec, work);
+    await expect(d.mouseDragBy(2, 0)).rejects.toThrow(/without a pressed button/);
+    await d.capture();
+    await d.rightClick(4, 2);
+    await d.mouseDown(2, 2, ["shift"]);
+    await d.mouseDragBy(4, -2, ["shift"]); // 4 px at scale 2 = 2 pt
+    await d.mouseDragBy(1, 0, ["shift"], 0.5);
+    await d.mouseUp(["shift"]);
+    await d.mouseUp(); // nothing held: releases where the window is
+    for (const k of ["equal", "minus", "backslash", "v", "down", "right", "escape"]) await d.key(k);
+    await d.key("shift+equal");
+    const js = f.calls.filter((c) => c.file.endsWith("osascript")).map((c) => c.args.slice(4));
+    expect(js).toContainEqual(["rclick", "102", "51"]);
+    expect(js).toContainEqual(["press", "101", "51", "shift"]);
+    expect(js).toContainEqual(["held", "101", "51", "103", "50", "0.5", "12", "shift"]);
+    expect(js).toContainEqual(["held", "103", "50", "103.5", "50", "0.5", "12", "shift"]);
+    expect(js).toContainEqual(["release", "103.5", "50", "shift"]);
+    expect(js).toContainEqual(["release", "100", "50", ""]);
+    expect(js).toContainEqual(["key", "shift+equal", "24"]);
+    expect(js).toContainEqual(["key", "v", "9"]);
+    expect(js).toContainEqual(["key", "down", "125"]);
+    expect(JXA).toContain("releaseMods");
+    expect(JXA).toContain("CGEventSetIntegerValueField");
+  });
+
   it("explains missing permissions and other failures", async () => {
     await expect(new MacDesktop(fake({ trusted: '{"trusted":false}' }).exec, work).checkAccess()).rejects.toThrow(/Accessibility permission is missing/);
     await expect(new MacDesktop(fake({ screencapture: err("could not create image from rect") }).exec, work).capture()).rejects.toThrow(/Screen Recording permission/);

@@ -26,7 +26,7 @@ Feature-specific limits are in each feature's reference; this file holds what ap
 - A command that does not return: `get_bridge_telemetry` tells a busy panel from one blocked by a modal dialog (Missing Media, a stuck export) without sending a command; the user closes the dialog.
 
 ## Scripting limits that look like bugs
-- No clip-speed API: speed operations report Unavailable.
+- No clip-speed API: speed operations report Unavailable; on macOS `time_remap_ui` sets speed keyframes through the UI (`timeline-automation.md`).
 - Gaussian Blur in Premiere 26 is the new blur (`AE.Impact_Blur_FX`): its strength is `Amount`, not `Blurriness`; `get_effect_properties` lists the parameters in the UI language — use the English name.
 - QE `rippleDelete` and the DOM ripple flag do not work on 26.x; `ripple_delete` ripples explicitly and verifies.
 

@@ -59,7 +59,7 @@ describe("Adobe Premiere 26.3 UXP public MCP catalog", () => {
       expect(listed.tools.map((tool) => tool.name)).toEqual(
         expect.arrayContaining(ADOBE_26_3_TOOLS),
       );
-      expect(listed.tools).toHaveLength(544); // 538 + the six masks operations
+      expect(listed.tools).toHaveLength(546); // 538 + the six masks operations + the two Time Remapping UI operations
     } finally {
       await client.close();
       await server.close();

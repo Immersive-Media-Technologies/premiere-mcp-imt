@@ -132,13 +132,15 @@ describe("modern MCP surface", () => {
       // unsafe-script, so the two scripting tools are not advertised.
       expect(tools.tools.map((tool) => tool.name)).not.toContain("execute_extendscript");
       expect(tools.tools.map((tool) => tool.name)).not.toContain("evaluate_expression");
-      expect(tools.tools).toHaveLength(448); // 442 + the six masks operations (Object Mask UI, macOS)
+      expect(tools.tools).toHaveLength(450); // 442 + the six masks operations (Object Mask UI, macOS) + the two Time Remapping UI operations
       const masks = tools.tools.filter((tool) => /object_mask_.*_?ui$/.test(tool.name));
       expect(masks.map((tool) => tool.name).sort()).toEqual([
         "inspect_object_mask_overlay_ui", "object_mask_edit_ui", "object_mask_params_ui", "object_mask_select_ui", "object_mask_track_ui", "object_mask_ui",
       ]);
       expect(masks.find((tool) => tool.name === "inspect_object_mask_overlay_ui")?.annotations?.readOnlyHint).toBe(true);
       expect(masks.find((tool) => tool.name === "object_mask_ui")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.tools.find((tool) => tool.name === "time_remap_ui")?.annotations?.readOnlyHint).toBe(false);
+      expect(tools.tools.find((tool) => tool.name === "inspect_time_remap_ui")?.annotations?.readOnlyHint).toBe(true);
       expect(tools.tools.find((tool) => tool.name === "preview_after_effects_render_handoff")?.annotations?.readOnlyHint).toBe(true);
       expect(tools.tools.find((tool) => tool.name === "apply_after_effects_render_handoff")?.annotations?.readOnlyHint).toBe(false);
       const capabilityTool = tools.tools.find((tool) => tool.name === "get_capabilities");

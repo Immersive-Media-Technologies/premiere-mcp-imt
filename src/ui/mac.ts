@@ -40,6 +40,15 @@ function flagsOf(mods) { var f = 0;
   if (mods.indexOf('shift') >= 0) f |= $.kCGEventFlagMaskShift;
   if (mods.indexOf('ctrl') >= 0) f |= $.kCGEventFlagMaskControl;
   return f; }
+function modCodes(mods) { var c = [];
+  if (mods.indexOf('shift') >= 0) c.push(56); if (mods.indexOf('cmd') >= 0) c.push(55);
+  if (mods.indexOf('alt') >= 0 || mods.indexOf('opt') >= 0) c.push(58); if (mods.indexOf('ctrl') >= 0) c.push(59);
+  return c; }
+function releaseMods(codes) {
+  for (var i = 0; i < codes.length; i++) { delay(0.03); var k = $.CGEventCreateKeyboardEvent(null, codes[i], false); $.CGEventSetFlags(k, 0); $.CGEventPost($.kCGHIDEventTap, k); }
+  // make sure nothing stays down (shift / cmd / alt / ctrl, left and right)
+  delay(0.05); var left = Number($.CGEventSourceFlagsState(1)) & (0x20000 | 0x100000 | 0x80000 | 0x40000);
+  if (left) { var all = [56, 60, 55, 54, 58, 61, 59, 62]; for (var j = 0; j < all.length; j++) { var u = $.CGEventCreateKeyboardEvent(null, all[j], false); $.CGEventSetFlags(u, 0); $.CGEventPost($.kCGHIDEventTap, u); } } }
 function premiereApps() { var all = $.NSWorkspace.sharedWorkspace.runningApplications, out = [];
   for (var i = 0; i < all.count; i++) { var a = all.objectAtIndex(i), id = ObjC.unwrap(a.bundleIdentifier) || '';
     if (id.indexOf('com.adobe.PremierePro') === 0) out.push(a); }
@@ -58,9 +67,14 @@ function run(argv) {
     return JSON.stringify(best || { error: 'no Premiere window on screen' });
   }
   if (cmd === 'key') { var parts = String(argv[1]).toLowerCase().split('+'), code = parseInt(argv[2], 10), flags = flagsOf(parts);
+    // modifier keys go down and up as key events too: a flag set only on the key event leaves the
+    // system's modifier state stuck (a «held» Shift turned later "=" presses into Shift+=)
+    var mods0 = modCodes(parts);
+    for (var a = 0; a < mods0.length; a++) { var md = $.CGEventCreateKeyboardEvent(null, mods0[a], true); $.CGEventSetFlags(md, flags); $.CGEventPost($.kCGHIDEventTap, md); delay(0.03); }
     var kd = $.CGEventCreateKeyboardEvent(null, code, true), ku = $.CGEventCreateKeyboardEvent(null, code, false);
     if (flags) { $.CGEventSetFlags(kd, flags); $.CGEventSetFlags(ku, flags); }
-    $.CGEventPost($.kCGHIDEventTap, kd); delay(0.05); $.CGEventPost($.kCGHIDEventTap, ku); return 'key'; }
+    $.CGEventPost($.kCGHIDEventTap, kd); delay(0.05); $.CGEventPost($.kCGHIDEventTap, ku);
+    releaseMods(mods0); return 'key'; }
   if (cmd === 'type') { var text = String(argv[1]), codes = {'0':29,'1':18,'2':19,'3':20,'4':21,'5':23,'6':22,'7':26,'8':28,'9':25,'-':27,' ':49};
     for (var t = 0; t < text.length; t++) { var ch = text.charAt(t), kc = codes.hasOwnProperty(ch) ? codes[ch] : 0;
       var d1 = $.CGEventCreateKeyboardEvent(null, kc, true), u1 = $.CGEventCreateKeyboardEvent(null, kc, false);
@@ -72,18 +86,45 @@ function run(argv) {
     for (var s = 1; s < pts.length; s++) { var x0 = pts[s-1][0], y0 = pts[s-1][1], x1 = pts[s][0], y1 = pts[s][1], n = Math.max(4, Math.round(Math.hypot(x1-x0, y1-y0) / 12));
       for (var k = 1; k <= n; k++) { ev($.kCGEventLeftMouseDragged, x0 + (x1-x0)*k/n, y0 + (y1-y0)*k/n); delay(0.015); } }
     delay(0.15); var last = pts[pts.length-1]; ev($.kCGEventLeftMouseUp, last[0], last[1]); return 'path'; }
+  if (cmd === 'press' || cmd === 'release' || cmd === 'held') {
+    // a drag in several calls (a capture between them): modifier keys go down with the button and up with
+    // it; LeftMouseDragged events carry their deltas, which Premiere reads instead of the position
+    var mods = String(argv[argv.length - 1] || '').split('+'), F = flagsOf(mods), mk = modCodes(mods);
+    function post(e) { if (F) $.CGEventSetFlags(e, F); $.CGEventPost($.kCGHIDEventTap, e); }
+    var px = parseFloat(argv[1]), py = parseFloat(argv[2]);
+    if (cmd === 'press') { for (var m = 0; m < mk.length; m++) { var kdn = $.CGEventCreateKeyboardEvent(null, mk[m], true); $.CGEventSetFlags(kdn, F); $.CGEventPost($.kCGHIDEventTap, kdn); delay(0.05); }
+      post($.CGEventCreateMouseEvent(null, $.kCGEventMouseMoved, $.CGPointMake(px, py), $.kCGMouseButtonLeft)); delay(0.3);
+      post($.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, $.CGPointMake(px, py), $.kCGMouseButtonLeft)); delay(0.35); return 'pressed'; }
+    if (cmd === 'release') { post($.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, $.CGPointMake(px, py), $.kCGMouseButtonLeft)); delay(0.1); releaseMods(mk); return 'released'; }
+    var tx = parseFloat(argv[3]), ty = parseFloat(argv[4]), step = Math.max(0.5, parseFloat(argv[5]) || 1), dl = (parseFloat(argv[6]) || 12) / 1000;
+    var n = Math.max(1, Math.round(Math.max(Math.abs(tx - px), Math.abs(ty - py)) / step)), lx = px, ly = py;
+    for (var i = 1; i <= n; i++) { var cx = px + (tx - px) * i / n, cy = py + (ty - py) * i / n;
+      var e = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDragged, $.CGPointMake(cx, cy), $.kCGMouseButtonLeft);
+      $.CGEventSetIntegerValueField(e, 4, Math.round(cx) - Math.round(lx)); $.CGEventSetIntegerValueField(e, 5, Math.round(cy) - Math.round(ly));
+      post(e); lx = cx; ly = cy; delay(dl); }
+    delay(0.25); return 'held'; }
   var x = parseFloat(argv[1]), y = parseFloat(argv[2]);
   if (cmd === 'move') { ev($.kCGEventMouseMoved, x, y); return 'moved'; }
-  if (cmd === 'click') { var fl = flagsOf(argv.slice(3).map(String));
+  if (cmd === 'rclick') { ev($.kCGEventMouseMoved, x, y); delay(0.3);
+    var rd = $.CGEventCreateMouseEvent(null, $.kCGEventRightMouseDown, $.CGPointMake(x, y), $.kCGMouseButtonRight);
+    var ru = $.CGEventCreateMouseEvent(null, $.kCGEventRightMouseUp, $.CGPointMake(x, y), $.kCGMouseButtonRight);
+    $.CGEventPost($.kCGHIDEventTap, rd); delay(0.08); $.CGEventPost($.kCGHIDEventTap, ru); return 'rclicked'; }
+  if (cmd === 'click') { var cm = argv.slice(3).map(String), fl = flagsOf(cm), cmk = modCodes(cm);
     ev($.kCGEventMouseMoved, x, y); delay(0.3);
+    for (var c = 0; c < cmk.length; c++) { var cd = $.CGEventCreateKeyboardEvent(null, cmk[c], true); $.CGEventSetFlags(cd, fl); $.CGEventPost($.kCGHIDEventTap, cd); delay(0.03); }
     var d = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, $.CGPointMake(x, y), $.kCGMouseButtonLeft);
     var u = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, $.CGPointMake(x, y), $.kCGMouseButtonLeft);
     if (fl) { $.CGEventSetFlags(d, fl); $.CGEventSetFlags(u, fl); }
-    $.CGEventPost($.kCGHIDEventTap, d); delay(0.08); $.CGEventPost($.kCGHIDEventTap, u); return 'clicked'; }
+    $.CGEventPost($.kCGHIDEventTap, d); delay(0.08); $.CGEventPost($.kCGHIDEventTap, u);
+    if (cmk.length) releaseMods(cmk); return 'clicked'; }
   return 'unknown command';
 }`;
 
-export const KEYCODES: Readonly<Record<string, number>> = { a: 0, o: 31, l: 37, return: 36, enter: 36, escape: 53, tab: 48 };
+export const KEYCODES: Readonly<Record<string, number>> = {
+  a: 0, o: 31, l: 37, return: 36, enter: 36, escape: 53, tab: 48,
+  // key codes, not characters: Premiere's shortcuts stay on these keys in any keyboard layout
+  equal: 24, minus: 27, backslash: 42, v: 9, left: 123, right: 124, down: 125, up: 126,
+};
 
 export interface Capture {
   img: RgbImage;
@@ -105,10 +146,23 @@ export interface Desktop {
   savePng(img: RgbImage, path: string, maxWidth?: number): Promise<string>;
 }
 
+/** A drag held across captures (closed-loop dragging) and a right click — the Time Remapping actions. */
+export interface PointerDesktop extends Desktop {
+  rightClick(x: number, y: number): Promise<void>;
+  /** press the left button (with modifier keys held) at capture pixels */
+  mouseDown(x: number, y: number, mods?: string[]): Promise<void>;
+  /** move the held button by capture pixels, in steps of `stepPx`, events carrying their deltas */
+  mouseDragBy(dx: number, dy: number, mods?: string[], stepPx?: number): Promise<void>;
+  /** release the button (and the modifier keys) where it is */
+  mouseUp(mods?: string[]): Promise<void>;
+}
+
 export class DesktopError extends Error {}
 
-export class MacDesktop implements Desktop {
+export class MacDesktop implements PointerDesktop {
   private last: Capture | null = null;
+  /** where the held button is, in screen points */
+  private held: [number, number] | null = null;
   private readonly work: string;
 
   constructor(private readonly exec: Exec = defaultExec, workDir?: string) {
@@ -224,6 +278,30 @@ export class MacDesktop implements Desktop {
 
   async move(x: number, y: number): Promise<void> {
     await this.jxa("move", ...this.toPoint(x, y));
+  }
+
+  async rightClick(x: number, y: number): Promise<void> {
+    await this.jxa("rclick", ...this.toPoint(x, y));
+  }
+
+  async mouseDown(x: number, y: number, mods: string[] = []): Promise<void> {
+    const p = this.toPoint(x, y);
+    await this.jxa("press", ...p, mods.join("+"));
+    this.held = p;
+  }
+
+  async mouseDragBy(dx: number, dy: number, mods: string[] = [], stepPx = 1): Promise<void> {
+    if (!this.held || !this.last) throw new DesktopError("mouseDragBy without a pressed button");
+    const s = this.last.scale, [x, y] = this.held;
+    const to: [number, number] = [Math.round((x + dx / s) * 10) / 10, Math.round((y + dy / s) * 10) / 10];
+    await this.jxa("held", x, y, ...to, Math.max(0.5, stepPx / s), 12, mods.join("+"));
+    this.held = to;
+  }
+
+  async mouseUp(mods: string[] = []): Promise<void> {
+    const p = this.held ?? (this.last ? [this.last.origin.x, this.last.origin.y] : [0, 0]);
+    this.held = null;
+    await this.jxa("release", p[0], p[1], mods.join("+"));
   }
 
   async drag(points: { x: number; y: number }[]): Promise<void> {

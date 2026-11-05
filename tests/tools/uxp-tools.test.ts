@@ -686,7 +686,7 @@ describe("UXP MCP tools", () => {
       // and caption style guidance (get_caption_style_guidance) add three more tools; paste_clip_attributes, set_clip_duration, and compute_mask_fit_motion each add one core tool.
       // Premiere 26.5 WorkAreaUtils adds manage_work_area_uxp.
       // The masks category (Object Mask through Premiere's UI, macOS) adds six core tools.
-        expect(tools.tools).toHaveLength(544);
+        expect(tools.tools).toHaveLength(546);
     } finally {
       await client.close();
       await server.close();

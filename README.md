@@ -7,7 +7,7 @@ inside your running **Adobe Premiere Pro**: read the project and its sequences, 
 ripple clips, apply effects, transitions and keyframes, add markers and captions, reframe, check
 frames and export — from plain language.
 
-**Every Adobe UI language · vision: masks and keyframes by sight · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, and the agent sees the frame: it looks at exported frames, draws Object Masks on the people or parts it sees — a click for a whole person, a lasso for a face; add, subtract, track (macOS) — and checks keyframed motion frame by frame. Premiere's scripting has no API for masks, and none of the other Premiere MCP servers we compared creates them. It comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
+**Every Adobe UI language · vision: masks and keyframes by sight · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, and the agent sees the frame: it looks at exported frames, draws Object Masks on the people or parts it sees — a click for a whole person, a lasso for a face; add, subtract, track (macOS) — sets speed keyframes (Time Remapping) by dragging them into place on the timeline, and checks keyframed motion frame by frame. Premiere's scripting has no API for masks or speed keyframes, and none of the other Premiere MCP servers we compared creates them. It comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
 
 Two parts, made to work together:
 
@@ -118,7 +118,7 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 | **Read-only mode** | `PR_MCP_READONLY=true` — inspection and exports only; the project cannot change. |
 | **No raw scripting by default** | `pr_execute_script` exists only with `PR_MCP_ENABLE_SCRIPT=true`. |
 | **No telemetry** | the server sends nothing anywhere. |
-| **Real clicks only where there is no API** | the `masks` operations (macOS) bring Premiere to the front and click its mask tool; they need Accessibility and Screen Recording for the app that runs the server, refuse on other systems, are off in read-only mode (only the overlay inspection stays), and report `committed_unverified` with an overlay image to check. |
+| **Real clicks only where there is no API** | the `masks` operations and `time_remap_ui` (macOS) bring Premiere to the front and click its mask tool or drag its speed keyframes; they need Accessibility and Screen Recording for the app that runs the server, refuse on other systems, are off in read-only mode (only the overlay inspection stays), and report `committed_unverified` with an overlay image to check. |
 
 ## Tools
 
@@ -175,7 +175,7 @@ sends home. As of 2026-11-04:
 | Tools the model sees by default | 9, over ~440 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
 | Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
 | Non-English Premiere | every UI language (all ten), verified live | English and es-ES measured | not stated | not stated | not stated |
-| Vision: acting on what the agent sees | frames returned as images; Object Masks drawn on what it sees (click = whole person, lasso = a part), ⊕/⊖, tracking, overlay check (macOS); keyframes checked frame by frame | frames returned as images; Object Mask audits (read-only) | thumbnails; no masks | still export; no masks | no (scripting only) |
+| Vision: acting on what the agent sees | frames returned as images; Object Masks drawn on what it sees (click = whole person, lasso = a part), ⊕/⊖, tracking, overlay check; speed keyframes placed on the timeline by sight (macOS); keyframes checked frame by frame | frames returned as images; Object Mask audits (read-only) | thumbnails; no masks | still export; no masks | no (scripting only) |
 | Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
 | Connector install | by the agent, with consent; installers with a live self-test | CLI flag | build from source (Go, Rust, Python) | CLI flag | `pip` + setup |
 | Clients | Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client | npm, .mcpb, Codex / Claude Code plugins | build from source | npm, plugins, .mcpb | CLI + skill |

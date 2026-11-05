@@ -61,6 +61,7 @@ UXP bridge (`PREMIERE_UXP_TOKEN` + the UXP plugin in Premiere).
 | Enhance Speech, Enhance Audio (stems), Auto Ducking, Remix | UI; `setup_ducking` writes level keyframes | `references/audio.md` |
 | loudness, silence, beats, transients | `analyze_loudness`, `detect_silence`, `detect_beats` (FFmpeg on source files) | `references/audio.md` |
 | Auto Reframe | `auto_reframe_sequence` | `references/timeline-automation.md` |
+| Time Remapping (speed keyframes), clip speed | macOS: `time_remap_ui` (points «media frame → sequence time»; the UI route — no speed API exists); otherwise cuts + slip or a retimed render | `references/timeline-automation.md` |
 | Scene Edit Detection | `scene_edit_detection` | `references/timeline-automation.md` |
 | Morph Cut, Color Match, Warp Stabilizer | transition/effect by script; analysis and match in Premiere/UI | `references/timeline-automation.md` |
 | Search panel (Media Intelligence), AI Assistant (beta) | UI | `references/search-assistant.md` |

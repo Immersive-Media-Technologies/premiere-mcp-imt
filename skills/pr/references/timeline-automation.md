@@ -1,4 +1,4 @@
-# Auto Reframe, Scene Edit Detection, Morph Cut, Color Match, Warp Stabilizer
+# Auto Reframe, Scene Edit Detection, Morph Cut, Color Match, Warp Stabilizer, Time Remapping
 
 ## Auto Reframe
 `auto_reframe_sequence {sequence_id?, target_width, target_height, motion_preset: slower|default|faster, new_name, use_nested_sequences}`
@@ -35,3 +35,32 @@ background; `inspect_stabilizer_status` reads presence and analysis state.
 Sources: helpx «detect edit points using scene edit detection», adobe.com/learn «auto reframe for
 socials», «automatically match color», «interview footage»; Adobe Community «Morph Cut analyzing in
 background never completes».
+
+## Time Remapping — speed keyframes by the agent (macOS, `keyframes` category)
+No script can set a clip's speed or its speed keyframes (ExtendScript / QE read only; `speed_change`
+and `set_clip_speed_qe` always refuse). `time_remap_ui` does it through Premiere's UI, like the masks
+operations: the app that runs the server needs Accessibility and Screen Recording, Premiere comes to
+the front, hands off mouse and keyboard while it runs.
+- **Say what you want as points:** `time_remap_ui {node_id, points: [{source_seconds, sequence_seconds}…]}`
+  — "this media frame plays at this sequence time". The clip must run at 100 % with no speed keyframes
+  yet (otherwise it refuses before any click). Each point becomes a speed keyframe on that media frame;
+  the segment to its left gets Δsource / Δsequence (from the clip start for the first point); after the
+  last point the clip runs at 100 % and gets longer or shorter — it must not run into the next clip on
+  its track (make room first). Speeds 10–1000 %; times snap to sequence frames. A ramp (gradual change)
+  is not produced — the keyframes are hard steps; split a ramp into several points.
+  Example: a clip at 0 s, in-point 0, media 1–2 s at 50 %, then 100 % again:
+  `points: [{source_seconds:1, sequence_seconds:1}, {source_seconds:2, sequence_seconds:3}]`.
+- **How it works:** the keyframes are added with Effect Controls › Time Remapping › Speed › ◇ at a
+  script-set playhead (each on its media frame while the clip is still at 100 %), then each handle is
+  Shift-dragged on the timeline onto the playhead parked at its target, zooming in with «=» until one
+  pixel is finer than `tolerance_frames` (default 0.1). The clip must show Time Remapping › Speed on the
+  timeline — the operation switches it through the clip's fx badge menu, and makes the tracks taller if
+  the track draws no keyframes.
+- **Check:** the result reports each keyframe's speed and measured offset (frames), the clip end read back
+  against the expected one (`endMatches`), the handles counted on the timeline, undo indexes (one Undo
+  step per click and drag) and a timeline image. Rendered timing: `pr_export_frame` at a sequence time
+  and compare with the media frame it should show (`ffmpeg -ss`). `inspect_time_remap_ui {node_id}`
+  (read-only) measures where the keyframes sit now.
+- `dry_run: true` returns the plan (speeds, where each keyframe is added and placed) without clicks.
+- Alternatives without the UI: cuts + `slip_edit` per piece (no speed change, jumps at the cuts), or
+  a retimed render (FFmpeg, per-segment speed) → `replace_clip_media`.

@@ -430,8 +430,8 @@ export function capabilitiesForToolInvocation(toolName: string, args: unknown): 
   // Inline caption retiming is pure computation; reading input_path or writing
   // output_path touches the local filesystem and needs that authority too.
   if (toolName === "retime_caption_file" && args && typeof args === "object" && ((args as Record<string, unknown>).input_path !== undefined || (args as Record<string, unknown>).output_path !== undefined)) return ["inspect", "filesystem"];
-  // Object Mask UI overlay images go to a temporary folder unless output_dir names one.
-  if (/^(object_mask_|inspect_object_mask_)/.test(toolName) && args && typeof args === "object" && (args as Record<string, unknown>).output_dir !== undefined) {
+  // Object Mask / Time Remapping UI images go to a temporary folder unless output_dir names one.
+  if (/^(object_mask_|inspect_object_mask_|time_remap_|inspect_time_remap_)/.test(toolName) && args && typeof args === "object" && (args as Record<string, unknown>).output_dir !== undefined) {
     return [capabilityForTool(toolName), "filesystem"];
   }
   const actionMap = ACTION_CAPABILITIES[toolName];

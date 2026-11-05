@@ -7,6 +7,33 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Added
+
+- **Speed keyframes by sight (macOS), in the `keyframes` category.** No scripting API can set a clip's
+  speed or Time Remapping keyframes (ExtendScript and QE read only; `speed_change` / `set_clip_speed_qe`
+  refuse), so `time_remap_ui` drives Premiere's UI the way the masks operations do. The agent gives
+  points «this media frame plays at this sequence time» (`{source_seconds, sequence_seconds}`): each
+  becomes a speed keyframe on that media frame, the segment to its left gets the speed that lands it
+  there, the rest of the clip stays at 100 %.
+  - How: the keyframes are added with Effect Controls › Time Remapping › Speed › ◇ at a script-set
+    playhead (while the clip is still at 100 %, so every keyframe sits on its media frame), then each
+    handle is Shift-dragged on the timeline onto the playhead parked at its target — a closed loop
+    against the screen, zooming in with «=» until a pixel is finer than `tolerance_frames` (0.1 by
+    default). The clip is made to show Speed on the timeline through its fx badge menu; the tracks are
+    made taller if they draw no keyframes; the Selection tool is restored first.
+  - Verification: each keyframe's measured offset in frames, the clip end read back through scripting
+    against the expected one, the handles recounted on the timeline, undo indexes (one Undo step per
+    click and drag) and a timeline image. Live on Premiere 26.5.2 (ru): three keyframes, segments
+    100 → 55.6 → 166.7 %, every rendered frame matched the media frame it should show.
+  - `inspect_time_remap_ui` (read-only) measures where a clip's speed keyframes sit.
+  - Desktop layer: drags held across captures with the modifier keys pressed as key events (Premiere
+    reads a drag's deltas, not its positions), right clicks, timeline shortcuts by key code (any
+    keyboard layout), modifier keys released explicitly — a flag-only Shift stayed «held» in the system
+    and turned later «=» presses into Shift+=.
+- A simulated Premiere timeline for these operations (`tests/ui/remap-sim.ts`): ruler, playhead,
+  selected clip, keyframe strip and handles, the fx badge menu, the ◇ button, the 3 px drag threshold,
+  the view scrolling to the playhead — 14 tests.
+
 ## [1.2.0] - 2026-11-05
 
 ### Added
