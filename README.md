@@ -159,6 +159,7 @@ points to the one reference the task needs (`pr_skill {doc}`):
 | `references/audio.md` | Enhance Speech, stem separation (beta), ducking by UI and by keyframes, Remix, FFmpeg analysis. |
 | `references/timeline-automation.md` | Auto Reframe, Scene Edit Detection, Morph Cut (and why it exports as a dissolve), Color Match, Warp Stabilizer. |
 | `references/search-assistant.md` | the Search panel (Media Intelligence, similar frames, sound search) and the AI Assistant beta next to an agent. |
+| `references/layer-conform.md` | syncing an AI-generated layer with the plate before compositing: time drift (speed keyframes from measured coincidence points), geometry (Motion per piece), colour (Levels), the people mask and seam — measured on exported frames by `scripts/conform.py`. |
 | `references/combos.md` | eleven recipes that combine tools: a generated shot between two clips, interview cleanup, a tracked face blur, storyboard to sequence, removing location music, social versions, silence and beat cutting. |
 | `references/gotchas.md` | availability by region and licence, credits, beta vs release, handoff to colour and sound, export, scripting limits that look like bugs. |
 

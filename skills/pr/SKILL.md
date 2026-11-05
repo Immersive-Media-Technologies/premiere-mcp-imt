@@ -1,8 +1,8 @@
 ---
 name: pr
 description: Drive Adobe Premiere Pro through Premiere-MCP-IMT (pr_verify, pr_catalog, pr_do, pr_batch, pr_get_sequence, pr_export_frame) and use Premiere's AI tools — Generative Extend, Generative Media Tool, Object Mask, transcripts and Paper Edit, captions, Enhance Speech/Audio, Search, AI Assistant, Auto Reframe, Scene Edit Detection, Morph Cut — on localized Premiere in any UI language too. Read at the start of any Premiere task. This file is the router; open only the reference it points to.
-revision: 3
-updated_at: 2026-10-28
+revision: 4
+updated_at: 2026-11-05
 ---
 
 # Premiere Pro — agent skill
@@ -65,6 +65,7 @@ UXP bridge (`PREMIERE_UXP_TOKEN` + the UXP plugin in Premiere).
 | Scene Edit Detection | `scene_edit_detection` | `references/timeline-automation.md` |
 | Morph Cut, Color Match, Warp Stabilizer | transition/effect by script; analysis and match in Premiere/UI | `references/timeline-automation.md` |
 | Search panel (Media Intelligence), AI Assistant (beta) | UI | `references/search-assistant.md` |
+| sync a generated layer with the plate — time drift, scale/shift, colour, people mask (layer conform, background replacement) | `time_remap_ui` + Motion + Levels + `masks`, numerics by `scripts/conform.py` | `references/layer-conform.md` |
 | jobs that combine several tools | — | `references/combos.md` |
 | availability, credits, Premiere (Beta), handoff/interchange, export | — | `references/gotchas.md` |
 

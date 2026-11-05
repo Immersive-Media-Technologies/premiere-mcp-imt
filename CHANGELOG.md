@@ -9,6 +9,18 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ### Added
 
+- **Layer conform reference and engine** (`pr_skill {doc:"layer-conform"}`, `skills/pr/scripts/conform.py`).
+  How to make an AI-generated layer coincide with the plate before compositing, in the order the live
+  work found necessary: time first (the generation plays the action ~8–9 % faster and freezes at the
+  end), then geometry (one uniform scale + shift per piece, Motion values), then colour (per-channel
+  Levels on the lower clip), then the people mask and seam. `conform.py` measures exported PNG frames
+  and writes the plans the operations apply: `coarse-fit`, `time-match` (motion-weighted NCC + dynamic
+  programming → coincidence points, segment speeds, frozen tail), `time-plan` (`time_remap_ui` points,
+  cut-and-slip fallback, After Effects Time Remap keys), `global-fit` (robust 5-parameter affine per
+  frame → constants or keys per piece, composed Motion values, per-person check), `exposure` (Levels
+  per channel with before/after error), `verify` (time / geometry / colour residuals), `render`
+  (retimed + warped + colour-baked ProRes 4444 for the render route), `mask-measure` (inset, transition
+  width, jitter). Python 3 + numpy + opencv-python-headless; it never talks to Premiere.
 - **Speed keyframes by sight (macOS), in the `keyframes` category.** No scripting API can set a clip's
   speed or Time Remapping keyframes (ExtendScript and QE read only; `speed_change` / `set_clip_speed_qe`
   refuse), so `time_remap_ui` drives Premiere's UI the way the masks operations do. The agent gives
