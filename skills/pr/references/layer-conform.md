@@ -176,6 +176,25 @@ they stay as the generation rendered them.
    monitor and pin Effect Controls to another clip; a click on a clip's edge in the timeline enters
    trim mode, where a stray key ripple-trims every track — leave it with Escape or a click on empty
    track space and re-read the sequence before going on.
+   **Mask rules that hold for any picture (user, 05.11):**
+   - *The edge never crosses a face.* Eyes, nose and mouth must lie fully inside the mask on every
+     frame; only cheeks may be clipped by the edge. When the edge touches a feature, make the mask
+     larger (expansion less negative, e.g. −10 → −4) — and because that leaves a margin to the
+     silhouette edge, raise the feather (e.g. 4 → 8) so the transition stays soft.
+   - *Fragments, not only whole figures.* Mask every visible fragment of a subject or object (an arm,
+     a shoulder, half a face behind someone, a leg between two people). A fragment left out now is
+     not picked up later when the camera or the people move and reveal more of it.
+   - *⊖ hugs the excess.* To remove a piece of foreign background, outline only that piece with the
+     ⊖ lasso, tight around it, and never the head or object next to it together with it: the mask
+     then knows which edge to stick to. Outlining the head together with the background removes the
+     head.
+   - *Check after masking, frame by frame.* With the mask on, errors show that were invisible before:
+     the mask grabbed background, the edge cut a face, or the motion phase under the mask differs
+     from the generation (a time-sync gap that only the composite reveals). Fix each one at its own
+     stage — a time gap by the speed keys, not by the mask — and then recompute the mask (re-track).
+   - *Short pieces where the mask refuses.* When the tracked mask will not hold someone's head, face
+     or an object on some stretch, cut that stretch out as its own clip with ~2 s of overlap at each
+     end and mask it separately: on short pieces the tracker is more accurate.
 4. Composite check: a short `export_sequence` of the composite → contact sheet; seam band
    |composite − upper| at 4–6 silhouette spots; transparent pixels where the warped lower clip left
    empty edges; stray clips/effects above the stack.

@@ -37,7 +37,18 @@ Rules:
 - Mask only what the user named. "All people" means every person — partly hidden ones and fragments
   at the frame edge too; a doubtful fragment is checked on frames 120–240 away.
 - Faces first: where tracking loses parts of bodies that cannot be restored, heads and faces must still
-  hold on every frame.
+  hold on every frame. The mask edge never crosses eyes, nose or mouth — only cheeks may be clipped;
+  when it does, enlarge the mask (expansion −10 → −4) and raise the feather (4 → 8) to keep the
+  transition soft.
+- Fragments count: every visible fragment of a subject (an arm, half a face, a leg between others)
+  gets its own ⊕ — a fragment left out is not picked up when the camera or the people move.
+- ⊖ hugs only the excess: outline the piece of background to remove tight around it, never together
+  with the head or object next to it, so the mask knows which edge to keep. A click ⊖ on flat
+  background (a wall, a panel, the ground) removes nothing — it is not an object for the model; in
+  that case the tracked composite is checked frame by frame and the user is told where the leftover
+  is. Every ⊕/⊖ needs the mask row selected at that moment, otherwise a second mask is created.
+- A stretch where the mask refuses a head or an object: cut it as its own clip with ~2 s overlap
+  on each side and mask it separately — short pieces track better.
 - Know when to stop: once every requested subject and every face holds, finish. At most two re-seed
   rounds per shot and about ten minutes per piece — then report what remains instead of iterating.
 - Results are `committed_unverified`: the overlay sees one frame; motion is checked by exported frames.
