@@ -38,8 +38,10 @@ Rules:
   at the frame edge too; a doubtful fragment is checked on frames 120–240 away.
 - Faces first: where tracking loses parts of bodies that cannot be restored, heads and faces must still
   hold on every frame. The mask edge never crosses eyes, nose or mouth — only cheeks may be clipped;
-  when it does, enlarge the mask (expansion −10 → −4) and raise the feather (4 → 8) to keep the
-  transition soft.
+  when it does, enlarge the mask (expansion −10 → −4). Feather is a separate decision, set by the
+  margin between the mask edge and the silhouette: the smallest value that hides the seam, down to 0
+  when the feather would run past the silhouette or when the seam is hidden by the colour match of
+  the layer underneath — a wide feather softens the facial features under it.
 - Fragments count: every visible fragment of a subject (an arm, half a face, a leg between others)
   gets its own ⊕ — a fragment left out is not picked up when the camera or the people move.
 - ⊖ hugs only the excess: outline the piece of background to remove tight around it, never together

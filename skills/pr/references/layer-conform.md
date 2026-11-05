@@ -156,10 +156,11 @@ they stay as the generation rendered them.
    tracker rendered on that piece stays as it is; the user said so to keep the model out of an endless
    loop of fixing one frame.
 3. Seam: `object_mask_params_ui {mask_index, expansion, feather}` — the user's standard is **feather 4,
-   expansion −8 or −12** (4608 px frames, large figures); when the feather spills past the silhouette on
-   small objects, take it down, even to 0. Premiere's scale is its own (never Photoshop's 3/1). The
-   remaining border between plate and generated background is removed by the colour/exposure match of
-   the generation to the plate (Stage E), not by a softer mask. Measure
+   expansion −8 or −12** (4608 px frames, large figures) as a starting point; the feather follows the
+   margin to the silhouette and goes down, even to 0, whenever it would spill past it or soften a face
+   (rule above). Premiere's scale is its own (never Photoshop's 3/1). The remaining border between
+   plate and generated background is removed by the colour/exposure match of the generation to the
+   plate (Stage E), not by a softer mask. Measure
    on 3 frames: export the alpha at expansion 0 / feather 0 once, then at the final values →
    `conform.py mask-measure --mask0 M0.png --mask M.png [--mask-prev Mprev.png] --report mask.json`
    → `inset_px` (median/p10/p90 of the 50 % contour), `transition_px` (10–90 % width per perimeter),
@@ -179,8 +180,14 @@ they stay as the generation rendered them.
    **Mask rules that hold for any picture (user, 05.11):**
    - *The edge never crosses a face.* Eyes, nose and mouth must lie fully inside the mask on every
      frame; only cheeks may be clipped by the edge. When the edge touches a feature, make the mask
-     larger (expansion less negative, e.g. −10 → −4) — and because that leaves a margin to the
-     silhouette edge, raise the feather (e.g. 4 → 8) so the transition stays soft.
+     larger (expansion less negative, e.g. −10 → −4).
+   - *Feather is set by the margin to the silhouette, and the less the better.* Feather is not tied
+     to enlarging the mask: look at how far the mask edge sits from the silhouette edge of the
+     generation and whether the feather can spread that far — when it would run past the silhouette
+     (small figures, an edge close to the silhouette) take it down, even to 0. A wide feather softens
+     the facial features that fall under it, so the smallest feather that hides the seam wins; when the
+     seam between the plate and the generated layer can be hidden by the colour/exposure match alone
+     (Stage E — the generation regraded towards what is inside the mask), feather 0 is right.
    - *Fragments, not only whole figures.* Mask every visible fragment of a subject or object (an arm,
      a shoulder, half a face behind someone, a leg between two people). A fragment left out now is
      not picked up later when the camera or the people move and reveal more of it.
