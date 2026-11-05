@@ -754,11 +754,12 @@ function __resolveProperty(component, wanted, propertyIndex) {
     if (typeof propertyIndex !== "number" || !isFinite(propertyIndex) || Math.floor(propertyIndex) !== propertyIndex || propertyIndex < 0 || propertyIndex >= component.properties.numItems) {
       return { property: null, index: null, candidates: [], error: "property_index is out of range. Available properties: " + __availablePropertyNames(component) + "." };
     }
-    if (!__propertyNameMatches(component.properties[propertyIndex].displayName, wanted, component)) {
+    if (wanted !== "" && !__propertyNameMatches(component.properties[propertyIndex].displayName, wanted, component)) {
       return { property: null, index: null, candidates: [], error: "property_index " + propertyIndex + " does not match property name '" + wanted + "'. Available properties: " + __availablePropertyNames(component) + "." };
     }
     return { property: component.properties[propertyIndex], index: propertyIndex, candidates: [propertyIndex], error: null };
   }
+  if (wanted === "") return { property: null, index: null, candidates: [], error: "Pass property_name or property_index. Available properties: " + __availablePropertyNames(component) + "." };
   for (var i = 0; i < component.properties.numItems; i++) {
     if (__propertyNameMatches(component.properties[i].displayName, wanted, component)) matches.push(i);
   }

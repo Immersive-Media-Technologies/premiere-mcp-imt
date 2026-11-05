@@ -26,6 +26,9 @@ function sample(schema: any, depth = 0): any {
   if (t === "object" || schema.properties) {
     const out: any = {};
     for (const k of schema.required ?? []) out[k] = sample(schema.properties?.[k] ?? {}, depth + 1);
+    // property_name is optional (property_index alone also addresses a property) but one of them is
+    // needed to reach the script; fill it so the effect-property tools still generate their scripts
+    if (schema.properties?.property_name && out.property_name === undefined) out.property_name = "sample-value";
     return out;
   }
   if (schema.pattern && String(schema.pattern).includes("sha256")) return `sha256:${"a".repeat(64)}`;

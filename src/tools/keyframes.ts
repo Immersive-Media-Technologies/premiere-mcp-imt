@@ -44,6 +44,16 @@ function propertyLookupScript(args: { node_id: string; effect_name: string; prop
           if (!prop) return __error("Property not found: ${escapeForExtendScript(args.property_name)}; nothing was changed.");`;
 }
 
+/** property_index alone identifies a property (get_effect_properties lists every index); property_name alone
+ *  works when it is unique. Live 05.11: an agent passed property_index without the name and the schema refused. */
+function normalizePropertyArgs<T extends { property_name?: string; property_index?: number }>(args: T): { args: T & { property_name: string }; error: string | null } {
+  const name = typeof args.property_name === "string" ? args.property_name : "";
+  if (name === "" && args.property_index === undefined) {
+    return { args: { ...args, property_name: name }, error: "Pass property_name (display name from get_effect_properties) or property_index; nothing was changed." };
+  }
+  return { args: { ...args, property_name: name }, error: null };
+}
+
 function propertyIndexParameter() {
   return { type: "integer" as const, minimum: 0, description: "Optional property index from get_effect_properties; required when property_name is duplicated." };
 }
@@ -151,7 +161,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property; duplicate names require property_index.",
+            description: "Display name of the property (or give property_index alone); duplicate names require property_index.",
           },
           property_index: propertyIndexParameter(),
           value: {
@@ -165,9 +175,12 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
               "Value to set. Use a number for scalar properties, an array of numbers for vector properties such as Motion > Position or Anchor Point ([x, y]), a boolean for checkbox properties, the exact JSON string reported for a MOGRT text or graphic parameter, or that same JSON object if the client parsed it.",
           },
         },
-        required: ["node_id", "effect_name", "property_name", "value"],
+        required: ["node_id", "effect_name", "value"],
       },
       handler: async (args: { node_id: string; effect_name: string; property_name: string; property_index?: number; value: number | string | boolean | number[] | Record<string, unknown> }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         if (Array.isArray(args.value)) {
@@ -219,10 +232,10 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             try { prop.setColorValue(requestedValue[0], requestedValue[1], requestedValue[2], requestedValue[3], true); }
             catch (colorWriteError) { return __error("Premiere could not set the requested colour property: " + colorWriteError.toString()); }
             var colorReadback = __readColorValue(prop);
-            if (!colorReadback) return __result({ set: null, valueType: "color_argb", effect: "${escapeForExtendScript(args.effect_name)}", property: "${escapeForExtendScript(args.property_name)}", propertyIndex: resolvedProperty.index, value: null, requestedValue: requestedValue, appliedValue: null, readbackVerified: false, verified: false, outcome: "committed_unverified", verification: "Colour write returned but lossless readback is unavailable; verify rendered output before delivery." });
+            if (!colorReadback) return __result({ set: null, valueType: "color_argb", effect: "${escapeForExtendScript(args.effect_name)}", property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}", propertyIndex: resolvedProperty.index, value: null, requestedValue: requestedValue, appliedValue: null, readbackVerified: false, verified: false, outcome: "committed_unverified", verification: "Colour write returned but lossless readback is unavailable; verify rendered output before delivery." });
             var colorVerified = true;
             for (var colorReadIndex = 0; colorReadIndex < 4; colorReadIndex++) if (Math.abs(colorReadback[colorReadIndex] - requestedValue[colorReadIndex]) > 1) colorVerified = false;
-            var colorData = { set: colorVerified, effect: "${escapeForExtendScript(args.effect_name)}", property: "${escapeForExtendScript(args.property_name)}", propertyIndex: resolvedProperty.index, value: colorReadback, requestedValue: requestedValue, appliedValue: colorReadback, valueType: "color_argb", readbackVerified: colorVerified, verified: colorVerified, outcome: colorVerified ? "verified" : "failed", verification: "Premiere parameter readback only; verify rendered output before delivery." };
+            var colorData = { set: colorVerified, effect: "${escapeForExtendScript(args.effect_name)}", property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}", propertyIndex: resolvedProperty.index, value: colorReadback, requestedValue: requestedValue, appliedValue: colorReadback, valueType: "color_argb", readbackVerified: colorVerified, verified: colorVerified, outcome: colorVerified ? "verified" : "failed", verification: "Premiere parameter readback only; verify rendered output before delivery." };
             if (!colorVerified) return __error("Premiere colour readback does not match the requested value.", colorData);
             return __result(colorData);
           }
@@ -271,7 +284,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             outcome: !readbackAvailable ? "committed_unverified" : (parameterVerified ? "verified" : "failed"),
             appliedValue: readbackAvailable ? readbackValue : null,
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             propertyIndex: resolvedProperty.index,
             value: readbackAvailable ? readbackValue : null,
             requestedValue: requestedValue,
@@ -302,13 +315,16 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
         },
-        required: ["node_id", "effect_name", "property_name"],
+        required: ["node_id", "effect_name"],
       },
       handler: async (args: { node_id: string; effect_name: string; property_name: string; property_index?: number }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const script = buildToolScript(`
@@ -358,7 +374,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
 
           return __result({
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             isTimeVarying: true,
             timeBase: keyBase.ok ? "time is seconds from the clip's start; mediaSeconds is Premiere's stored key time" : keyBase.error,
             keyframes: keyframes
@@ -384,7 +400,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
           time_seconds: {
@@ -397,7 +413,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             description: "Finite scalar or numeric vector matching the host property shape. Motion Position/Anchor Point require normalized 0–1 pairs. Colour arrays are recognized but refused without a lossless colour-key API.",
           },
         },
-        required: ["node_id", "effect_name", "property_name", "time_seconds", "value"],
+        required: ["node_id", "effect_name", "time_seconds", "value"],
       },
       handler: async (args: {
         node_id: string;
@@ -407,6 +423,9 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
         time_seconds: number;
         value: number | number[];
       }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const invalid = keyframeArgumentError(args, ["time_seconds"]);
@@ -482,7 +501,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             renderVerified: false,
             verificationScope: "Premiere parameter readback only; verify playback or exported frames before relying on visual output.",
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             time: ${args.time_seconds},
             mediaSeconds: __ticksToSeconds(time.ticks),
             value: wantedValue,
@@ -514,7 +533,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
           time_seconds: {
@@ -522,9 +541,12 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             description: `${CLIP_TIME} of the keyframe to remove`,
           },
         },
-        required: ["node_id", "effect_name", "property_name", "time_seconds"],
+        required: ["node_id", "effect_name", "time_seconds"],
       },
       handler: async (args: { node_id: string; effect_name: string; property_name: string; property_index?: number; time_seconds: number }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const invalid = keyframeArgumentError(args, ["time_seconds"]);
@@ -555,7 +577,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             removed: true,
             verified: true,
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             time: removedSeconds,
             remainingKeys: remaining
           });
@@ -579,7 +601,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
           start_seconds: {
@@ -591,7 +613,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             description: "End of the range, in seconds from the clip's start; must not be before start_seconds",
           },
         },
-        required: ["node_id", "effect_name", "property_name", "start_seconds", "end_seconds"],
+        required: ["node_id", "effect_name", "start_seconds", "end_seconds"],
       },
       handler: async (args: {
         node_id: string;
@@ -601,6 +623,9 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
         start_seconds: number;
         end_seconds: number;
       }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const invalid = keyframeArgumentError(args, ["start_seconds", "end_seconds"]);
@@ -646,7 +671,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             removedCount: inRange.length,
             removedKeys: inRange,
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             range: { start: ${args.start_seconds}, end: ${args.end_seconds} },
             remainingKeys: remaining
           });
@@ -670,7 +695,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
           time_seconds: {
@@ -683,7 +708,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             description: "Interpolation type",
           },
         },
-        required: ["node_id", "effect_name", "property_name", "time_seconds", "interpolation"],
+        required: ["node_id", "effect_name", "time_seconds", "interpolation"],
       },
       handler: async (args: {
         node_id: string;
@@ -693,6 +718,9 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
         time_seconds: number;
         interpolation: string;
       }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const invalid = keyframeArgumentError(args, ["time_seconds"]);
@@ -743,7 +771,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
           },
           property_name: {
             type: "string",
-            description: "Display name of the property",
+            description: "Display name of the property (or give property_index alone)",
           },
           property_index: propertyIndexParameter(),
           time_seconds: {
@@ -751,9 +779,12 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
             description: `${CLIP_TIME} to read the value at`,
           },
         },
-        required: ["node_id", "effect_name", "property_name", "time_seconds"],
+        required: ["node_id", "effect_name", "time_seconds"],
       },
       handler: async (args: { node_id: string; effect_name: string; property_name: string; property_index?: number; time_seconds: number }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         const indexError = propertyIndexError(args.property_index);
         if (indexError) return { success: false, error: indexError };
         const invalid = keyframeArgumentError(args, ["time_seconds"]);
@@ -777,7 +808,7 @@ export function getKeyframeTools(bridgeOptions: BridgeOptions) {
 
           return __result({
             effect: "${escapeForExtendScript(args.effect_name)}",
-            property: "${escapeForExtendScript(args.property_name)}",
+            property: (prop && prop.displayName) ? prop.displayName : "${escapeForExtendScript(args.property_name)}",
             time: ${args.time_seconds},
             mediaSeconds: __ticksToSeconds(time.ticks),
             value: value,

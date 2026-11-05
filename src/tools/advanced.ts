@@ -35,6 +35,16 @@ const SELECTION_LINK_PREAMBLE = `
           }
 `;
 
+/** property_index alone identifies a property (get_effect_properties lists every index); property_name alone
+ *  works when it is unique. Live 05.11: an agent passed property_index without the name and the schema refused. */
+function normalizePropertyArgs<T extends { property_name?: string; property_index?: number }>(args: T): { args: T & { property_name: string }; error: string | null } {
+  const name = typeof args.property_name === "string" ? args.property_name : "";
+  if (name === "" && args.property_index === undefined) {
+    return { args: { ...args, property_name: name }, error: "Pass property_name (display name from get_effect_properties) or property_index; nothing was changed." };
+  }
+  return { args: { ...args, property_name: name }, error: null };
+}
+
 export function getAdvancedTools(
   bridgeOptions: BridgeOptions,
   dependencies: { probeMediaDurationSeconds?: (path: string) => Promise<number | null>; probeMediaDurationTicks?: (path: string) => Promise<number | null> } = {},
@@ -1860,7 +1870,6 @@ export function getAdvancedTools(
         required: [
           "node_id",
           "component_name",
-          "property_name",
           "alpha",
           "red",
           "green",
@@ -1877,6 +1886,9 @@ export function getAdvancedTools(
         green: number;
         blue: number;
       }) => {
+        const normalizedProperty = normalizePropertyArgs(args);
+        if (normalizedProperty.error) return { success: false, error: normalizedProperty.error };
+        args = normalizedProperty.args;
         if (![args.alpha, args.red, args.green, args.blue].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) {
           return { success: false, error: "alpha, red, green and blue must be integers from 0 to 255" };
         }

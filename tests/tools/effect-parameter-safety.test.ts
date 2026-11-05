@@ -78,6 +78,39 @@ const advanced = getAdvancedTools(bridge);
 
 beforeEach(() => vi.resetAllMocks());
 
+describe("property addressed by property_index alone (live 05.11)", () => {
+  it("sets Opacity › Blend Mode by index without a name and reports the host's display name", async () => {
+    const opacity = parameter("Непрозрачность", { value: 50 });
+    const blend = parameter("Режим смешивания", { value: 18 });
+    host([opacity, blend], { displayName: "Непрозрачность", matchName: "AE.ADBE Opacity" });
+    const byIndex = await keyframes.set_effect_property.handler({ node_id: "clip", effect_name: "Непрозрачность", property_index: 1, value: 0 } as any) as any;
+    expect(byIndex).toMatchObject({ success: true, data: { propertyIndex: 1, property: "Режим смешивания", appliedValue: 0, verified: true } });
+    expect(blend.setValue).toHaveBeenCalledWith(0, true);
+    expect(opacity.setValue).not.toHaveBeenCalled();
+  });
+
+  it("refuses when neither property_name nor property_index is given, changing nothing", async () => {
+    const opacity = parameter("Opacity", { value: 50 });
+    host([opacity], { displayName: "Opacity", matchName: "AE.ADBE Opacity" });
+    const refused = await keyframes.set_effect_property.handler({ node_id: "clip", effect_name: "Opacity", value: 100 } as any) as any;
+    expect(refused).toMatchObject({ success: false, error: expect.stringContaining("property_name") });
+    expect(opacity.setValue).not.toHaveBeenCalled();
+    expect(mockedSendCommand).not.toHaveBeenCalled();
+  });
+
+  it("the schemas no longer require property_name", () => {
+    for (const t of ["set_effect_property", "get_keyframes", "add_keyframe", "get_value_at_time"] as const) {
+      expect((keyframes as any)[t].parameters.required).not.toContain("property_name");
+    }
+  });
+
+  it("still checks a given name against the index", async () => {
+    host([parameter("Opacity", { value: 50 }), parameter("Blend Mode", { value: 18 })], { displayName: "Opacity", matchName: "AE.ADBE Opacity" });
+    const mismatch = await keyframes.set_effect_property.handler({ node_id: "clip", effect_name: "Opacity", property_name: "Opacity", property_index: 1, value: 0 }) as any;
+    expect(mismatch).toMatchObject({ success: false, error: expect.stringContaining("does not match property name") });
+  });
+});
+
 describe("lossless colour and duplicate effect parameters", () => {
   it("lists exact colour values without calling the lossy generic getter", async () => {
     const colour = parameter("Fill Color", { value: 9007199254740992, color: [255, 20, 40, 160] });

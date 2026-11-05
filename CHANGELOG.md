@@ -7,6 +7,15 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Fixed
+
+- Effect-property tools (`set_effect_property`, `get_keyframes`, `add_keyframe`, `get_value_at_time`,
+  `remove_keyframe`, `remove_keyframe_range`, `set_keyframe_interpolation`, `set_color_value`) accept
+  `property_index` alone: `get_effect_properties` lists every index, and an agent that passed the
+  index without the name was refused by the schema («data must have required property
+  'property_name'», live 05.11). A name given with an index is still checked against it; neither →
+  a refusal that names both; results report the host's display name of the property.
+
 ### Changed
 
 - Layer conform is now a **cut-only technique** (user canon 05.11, verified on shot 850): the generated
