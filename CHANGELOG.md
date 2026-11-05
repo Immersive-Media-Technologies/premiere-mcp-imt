@@ -9,6 +9,13 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ### Changed
 
+- Layer conform is now a **cut-only technique** (user canon 05.11, verified on shot 850): the generated
+  clip on the lower track is cut at every lag step and each piece slipped by whole frames; the original
+  on the upper track stays one clip with the people mask; colour goes on the lower clip towards the
+  upper. Speed keyframes are out of the technique (`time_remap_ui` remains for speed ramps). The
+  reference carries the accepted layout of shot 850, the per-subject plan check, the read-back table,
+  the per-frame verify and its reading, the rule for patches locked to the generation, and the
+  session-folder rule for working files. Router row lists the trigger phrases (EN/RU).
 - Layer conform, Stage T: the time plan now applies the measured lag **staircase frame for frame**.
   Route A (`split_clip` + `slip_edit` per constant-lag piece, `cut_and_slip`) is the default in Premiere
   and is correct for both `--retime` directions (the repeated frame at a step comes out of the cut); route B

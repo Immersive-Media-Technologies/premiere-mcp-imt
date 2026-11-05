@@ -1,7 +1,17 @@
 ---
 name: pr
-description: Drive Adobe Premiere Pro through Premiere-MCP-IMT (pr_verify, pr_catalog, pr_do, pr_batch, pr_get_sequence, pr_export_frame) and use Premiere's AI tools — Generative Extend, Generative Media Tool, Object Mask, transcripts and Paper Edit, captions, Enhance Speech/Audio, Search, AI Assistant, Auto Reframe, Scene Edit Detection, Morph Cut — on localized Premiere in any UI language too. Read at the start of any Premiere task. This file is the router; open only the reference it points to.
-revision: 4
+description: |
+  Use at the start of any Adobe Premiere Pro task driven through Premiere-MCP-IMT (pr_verify, pr_catalog,
+  pr_do, pr_batch, pr_get_sequence, pr_export_frame) — editing, effects, exports, and Premiere's AI tools
+  (Generative Extend, Generative Media, Object Mask, transcripts, captions, Enhance Speech/Audio, Auto
+  Reframe, Scene Edit Detection) on a Premiere in any UI language. This file is the router: general rules
+  and a map of references — open the reference each task points to.
+description_ru: |
+  Открывать в начале любой задачи в Adobe Premiere Pro через Premiere-MCP-IMT: монтаж, эффекты, экспорт и
+  ИИ-инструменты Premiere на любом языке интерфейса. Это роутер: общие правила и карта справок — по задаче
+  открывать ту справку, на которую ведёт карта.
+version: 1.5.0
+changes: "1.5.0 (05.11): the map (§4) is in the skill-creator form — one entry per ability with «Read when …»; layer conform is a cut-only technique (the generated lower clip is cut and slipped by whole frames, the original upper clip stays one clip with the mask) with its trigger phrases; Time Remapping stays a separate ability for speed ramps."
 updated_at: 2026-11-05
 ---
 
@@ -44,30 +54,56 @@ Facts: Premiere 26.5 (Sep 2026) and Premiere (Beta) 27.0, checked 2026-10-26.
 - **Any UI language.** Use English names for effects, transitions, components and parameters ("Gaussian Blur", "Cross Dissolve", "Motion" › "Scale") on every Premiere UI language: the server translates them through Premiere's own UI dictionaries and matches components by matchName. Results report the host's name (`effect: "Размытие по Гауссу"`, `requested: "Gaussian Blur"`); the lists (`list_available_effects`, `list_available_transitions`) give both. A name in the UI language works too. "Effect not found" means the effect is not installed or has another name in this Premiere version — not a language problem.
 - **Modal dialogs** block the connector: on a timeout ask the user to close it, then re-read state before retrying — the outcome of a timed-out write is unknown.
 
-## 4. Scripting boundary → reference
+## 4. Map of references
 
 Most AI features have no scripting API (neither ExtendScript nor UXP); menu commands and keyboard
 shortcuts cannot be triggered by script in Premiere 26. Operations ending in `_uxp` exist only with the
 UXP bridge (`PREMIERE_UXP_TOKEN` + the UXP plugin in Premiere).
 
-| feature | route | read |
-|---|---|---|
-| Generative Extend | UI, paid credits | `references/generative.md` |
-| Generative Media Tool: video, sound effects, soundscape, music | UI, paid credits | `references/generative.md` |
-| Firefly Boards → sequence | UI | `references/generative.md` |
-| Object Mask, shape masks, mask tracking | macOS: `object_mask_ui` and the `masks` category (points / lassos on an exported frame, ⊕/⊖, tracking); otherwise UI. The effect the mask drives: `apply_effect`, `set_effect_property` | `references/masking.md` |
-| Speech to Text, text-based editing (pauses, fillers), Paper Edit | UI; `*_uxp` transcript ops; `plan_*` word-timeline ops + the cut route | `references/speech-text.md` |
-| Captions, single-word captions | UI create/style; `build_caption_artifact` → `create_caption_track` | `references/speech-text.md` |
-| Enhance Speech, Enhance Audio (stems), Auto Ducking, Remix | UI; `setup_ducking` writes level keyframes | `references/audio.md` |
-| loudness, silence, beats, transients | `analyze_loudness`, `detect_silence`, `detect_beats` (FFmpeg on source files) | `references/audio.md` |
-| Auto Reframe | `auto_reframe_sequence` | `references/timeline-automation.md` |
-| Time Remapping (speed keyframes), clip speed | macOS: `time_remap_ui` (points «media frame → sequence time»; the UI route — no speed API exists); otherwise cuts + slip or a retimed render | `references/timeline-automation.md` |
-| Scene Edit Detection | `scene_edit_detection` | `references/timeline-automation.md` |
-| Morph Cut, Color Match, Warp Stabilizer | transition/effect by script; analysis and match in Premiere/UI | `references/timeline-automation.md` |
-| Search panel (Media Intelligence), AI Assistant (beta) | UI | `references/search-assistant.md` |
-| sync a generated layer with the plate — time drift, scale/shift, colour, people mask (layer conform, background replacement) | `time_remap_ui` + Motion + Levels + `masks`, numerics by `scripts/conform.py` | `references/layer-conform.md` |
-| jobs that combine several tools | — | `references/combos.md` |
-| availability, credits, Premiere (Beta), handoff/interchange, export | — | `references/gotchas.md` |
+Find every map entry — every solution — this task touches: one task may need several (e.g. a cut
+route, its mask, its export). Before answering, follow the link of each such entry and read its file
+with `pr_skill {doc}`: a description only says where the answer is, it is not the answer. No entry
+for the task or a part of it — work by the general rules above and say so.
+
+- **Generative Extend, Generative Media Tool (video, sound effects, soundscape, music), Firefly Boards →
+  sequence** — `references/generative.md`: the UI click paths, credits and cost, what to prepare by
+  script first, what is cloud-sent. Read when the user wants to extend a clip, generate media or bring
+  a Firefly board in.
+- **Object Mask, shape masks, mask tracking** — `references/masking.md`: `object_mask_ui` and the
+  `masks` category (points / lassos on an exported frame, ⊕/⊖, params, tracking, inspect), the people-
+  mask rules (whole subjects then ground, faces first, no foreign background inside, feather and
+  expansion), the effect a mask drives. Read when a mask, roto, «вырезать людей», «маска на лицах»,
+  a tracked mask or a mask repair is asked.
+- **Speech to Text, text-based editing (pauses, fillers), Paper Edit, captions, single-word captions** —
+  `references/speech-text.md`: UI steps, `*_uxp` transcript operations, `plan_*` word-timeline
+  operations and the cut route, `build_caption_artifact` → `create_caption_track`. Read when
+  transcripts, subtitles, captions or editing by words are asked.
+- **Enhance Speech, Enhance Audio (stems), Auto Ducking, Remix, loudness, silence, beats, transients** —
+  `references/audio.md`: the UI steps, `setup_ducking`, `analyze_loudness`, `detect_silence`,
+  `detect_beats` (FFmpeg on source files). Read when sound is cleaned, mixed, ducked, remixed, measured
+  or cut by silence/beats.
+- **Auto Reframe, Scene Edit Detection, Morph Cut, Color Match, Warp Stabilizer, Time Remapping (speed
+  keyframes) and clip speed** — `references/timeline-automation.md`: `auto_reframe_sequence`,
+  `scene_edit_detection`, transitions/effects by script with the analysis in the UI, `time_remap_ui`
+  (points «media frame → sequence time», macOS; the only speed-keyframe route) and `set_clip_speed_qe`.
+  Read when the user asks for a reframe, scene cuts, a morph cut, colour match, stabilisation, a speed
+  ramp, slow motion or a constant speed change.
+- **Search panel (Media Intelligence), AI Assistant (beta)** — `references/search-assistant.md`: what is
+  UI-only and what the user is asked to do. Read when searching media by content or using the assistant.
+- **Layer conform — sync a generated / AI-edited track with the original** — `references/layer-conform.md`:
+  the generator model (time staircase, uniform scale, colour offset), the measuring engine
+  `scripts/conform.py`, Stage T time by cuts on the lower (generated) clip with whole-frame slips and
+  the per-frame verify, Stage G scale/shift per piece, Stage E colour on the lower clip towards the
+  upper, Stage S people mask on the upper (original) clip and the seam, reporting and acceptance, the
+  After Effects variant. Read when the user says «sync the tracks», «conform the layers», «align the
+  generation to the plate», «match the generated video to the original», «синхронизация видео
+  дорожек», «подгонка видео дорожек», «совместить генерацию с исходником», «подогнать нижнюю дорожку
+  под верхнюю», «замена фона генерацией», or two tracks of one shot double on the people.
+- **Jobs that combine several tools** — `references/combos.md`: the worked orders of multi-tool jobs.
+  Read when a request spans several of the abilities above.
+- **Availability, credits, Premiere (Beta), handoff / interchange, export** — `references/gotchas.md`:
+  what exists on which version and region, credit costs, export presets and interchange formats. Read
+  when something is Unavailable, costs credits, concerns the Beta, or an export / handoff is asked.
 
 ## 5. UI-only steps
 

@@ -22,7 +22,7 @@ Measured on three shots (30.10–04.11.2026, Premiere 26.5, 4608×3164):
 
 A value outside its range is a reason to re-check the measurement, not to apply it.
 
-Hard rules: **time is a staircase** (the lag path changes by whole frames; apply it frame for frame — cuts + slip, or a key at every change — never as an averaged speed between distant keys) · **time before pixels** (a temporal drift cannot be fixed with geometry; a per-frame fit
+Hard rules: **time is a staircase** (the lag path changes by whole frames; apply it frame for frame by cutting the generation and slipping the pieces by whole frames — never as a speed between points; the plate with the mask stays one clip) · **time before pixels** (a temporal drift cannot be fixed with geometry; a per-frame fit
 without time sync fits noise) · **phase vs width** (some people coincide and others double → the
 timing is right and the width/position is off: scale and shift until *everyone* coincides, never fit
 one person) · **one constant per piece** (per-frame keys only where the parameters move by more than
@@ -36,7 +36,7 @@ clip towards the upper · the user's edits between turns are kept: re-read the s
 |---|---|
 | numerics | `conform.py` (this skill's `scripts/conform.py`; needs Python 3 + `numpy` + `opencv-python-headless`, FFmpeg for `frames`/`render`). It measures PNG frames and writes JSON plans; it never talks to Premiere. |
 | frames of one track | `toggle_track_visibility` (solo) → `export_sequence {preset_path, range:"in_to_out"}` to a PNG sequence (preset on macOS: `/Applications/Adobe Media Encoder <year>/Adobe Media Encoder <year>.app/Contents/MediaIO/systempresets/3F3F3F3F_504E4720/PNG Sequence with Alpha (Match Source).epr` — take it from there, never search the disk for it) (8-bit for measuring; ProRes 4444 XQ → `conform.py frames --bits 16 --alpha` for the final resample) → restore visibility; single frames: `pr_export_frame` (straight alpha). Raw media frames of the lower clip: `conform.py frames --video` + the clip's Motion as `--mov-place "scale=161;pos=0.503,0.540"` with `--seq-size W,H`. |
-| time | route A (default, frame-exact): `split_clip` + `slip_edit` per constant-lag piece (`cut_and_slip` from `conform.py time-plan`); route B (one clip, macOS): `time_remap_ui {node_id, points}` with the plan's step keys (a key at every lag change) + `set_time_interpolation 0`; `freeze_frame` / a cut for the frozen tail. Never both methods on one clip |
+| time | cuts on the generation (lower clip): `split_clip` + `slip_edit` per constant-lag piece, `trim_clip` for the last piece (`cut_and_slip` from `conform.py time-plan --retime ref`); the plate stays one clip. No speed keyframes in this technique (`time_remap_ui` is for speed ramps the user asks for) |
 | geometry | Motion on the moving clip: `set_effect_property` (Scale Width / Scale Height with Uniform Scale off, Rotation, Position normalised 0–1) for a constant per piece; `add_keyframe` per sampled frame when the piece needs keys. Warp render (route C): `conform.py render` → `import_media` → `replace_clip_media` |
 | colour | Levels («Уровни») on the lower clip: `apply_effect` + `set_effect_property` per channel (Input/Output Black/White; names from `get_effect_properties`); Lumetri only when Levels cannot express the transfer |
 | mask | `object_mask_ui` / `object_mask_edit_ui` / `object_mask_track_ui` / `object_mask_params_ui` on the upper clip (see `masking.md`); measure with `conform.py mask-measure` on exported alpha |
@@ -52,85 +52,76 @@ was slipped onto the generation — both happen). `create_sequence_checkpoint {l
 Set in/out to the shot (`set_sequence_in_out_points`); record track visibility and restore it after
 every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (never a chat cache).
 
-## 3. Stage T — time (first, always)
+## 3. Stage T — time (first, always): cuts on the generation, whole frames only
 
-1. **Frames.** Export the reference track alone and the moving track alone as PNG sequences over the
-   same in/out range (same frame count; frame i of both = sequence frame in + i). Straight alpha is
-   handled (frames are composited over black inside the engine).
-   Keep every frame export, plan and report of this work in the session's own temporary working folder
-   (deleted with the session), one subfolder per purpose — never in the user's repositories, media or
-   project folders; renders meant for the user go next to the project.
-2. **Coarse geometry first.** `conform.py coarse-fit --ref REF/ --mov MOV/ --out S/ --frames 0,2,4,6`
-   (frames at the shot start, where the lag is still 0). A 1.4 % scale error cost 1–2 frames of timing on
-   shot 009 — never match time on unscaled frames. `in_range:false` → check the placement arguments.
-3. **Match.** `conform.py time-match --ref REF/ --mov MOV/ --out S/ --geom S/coarse.json --lag-min -3 --lag-max 10`
-   → `S/time.json`: `lag[t]` (moving frame = t + lag), `runs` of constant lag, `points` (coincidence
-   points: the middle of every stable run), `segments` with speeds, `frozen_tail_ref/mov`, `hold`,
-   `warnings`. Similarity = NCC of normalised high-pass luma weighted by the moving layer's motion
-   (static set carries no time information), path by dynamic programming (lag changes ≤ 1 frame per
-   frame). Read `summary`: `in_model_range`, `disagree_with_free_best` (should be small),
-   `low_margin_frames` (ambiguous frames), and every warning — «moving layer has N frames … forced»
-   means the moving export is too short: export at least `max lag` more frames and match again.
-   The lag path is a **staircase**: 100 % inside a run, one frame gained (or repeated) at each step.
-   That staircase is the mapping to apply — frame for frame, not a smoothed speed.
-4. **Plan.** `conform.py time-plan --time S/time.json --fps 24 --clip-start <clip start s> --clip-in <clip in-point s> [--retime ref] --out S/plan.json`
-   (`--retime ref` when the generation on the lower track is slowed onto the plate; `--range-start`
-   when reference frame 0 is not the clip's start). The plan carries `expected_mapping` (sequence frame →
-   media frame, the staircase), `cut_and_slip` (route A, `cut_table`), `time_remap_ui_points` (route B,
-   `--route step`: a key at every lag change, speeds 100/50/200 %; `table`) and `trim`/`hold`. Show the
-   user the `cut_table` (or `table`) before applying anything.
-5. **Apply — route A (default): cuts + slip, frame-exact.** `split_clip {node_id, time_seconds}` on the
-   retimed clip at `cut_and_slip[i].sequence_seconds[0]` for every piece but the first (ascending; the
-   split returns new node ids — after all splits `get_sequence_structure` once), then `slip_edit
-   {node_id, offset_seconds: slip_seconds, include_linked:false}` on every piece with `slip_frames ≠ 0`
-   (positive = later media). Nothing else: the repeated frame at a step comes out of the cut by itself
-   (`repeat_frames`). Effects already on the clip (Motion, Levels) are kept by every piece, so apply
-   them before cutting. Near the media end `slip_edit` refuses with «invalid source range» → set in/out
-   in ticks through `pr_execute_script`. **Sync a generation only by cuts** (user rule 05.11): its time is
-   a staircase of whole frames — the generator gains one frame every 9–15 frames — and no speed
-   between two steps reproduces it; stretching or squeezing makes in-between frames (34 of 84 blended on
-   850, 05.11). Cut where the lag steps, slip every piece by whole frames, drop one frame per step from
-   the layer that is cut (the plate in `PP_Sht_157_850.prproj`, 30.10–04.11: 9 pieces, +1…+7, 6 plate
-   frames out, the generation untouched but for its frozen tail) or repeat one (the generation when the
-   masked plate must stay one clip), cut the frozen tail. Speed keys only when the user asks for a speed
-   ramp. Route B, for reference (one clip wanted, macOS): the clip must run at 100 %
-   with no speed keys → `time_remap_ui {node_id, points: plan.time_remap_ui_points, tolerance_frames: 0.1}`,
-   then `set_time_interpolation {node_id, mode: 0}` (Frame Sampling — blended or optical-flow frames
-   hide the sync) and read back with `inspect_time_remap_ui`. Route B is exact inside every run and lands
-   the one frame per step on a half frame (either neighbour is right there). Route C:
-   `conform.py render --time` makes a retimed media file → `replace_clip_media`.
-   **Never** slip or cut a clip that carries speed keys, and never put speed keys on a slipped piece —
-   the two methods do not combine (05.11: that is how shot 850 «went apart further»). To start over:
-   remove the retimed clip, `overwrite_clip` the master clip from the bin at the same track and time,
-   re-apply Motion and Levels from `S/geom.json` / `S/levels.json`, then route A.
-6. **Tail.** `trim` set (`--retime ref`: the generation freezes while the plate still acts) → cut the
-   retimed clip at `trim.sequence_seconds`. `hold` set (`--retime mov`: the plate layer must wait) →
-   `freeze_frame` on the moving clip at `plan.hold.sequence_seconds_from`. Report the frames.
-7. **Verify every frame.** Export the retimed track again over the range →
-   `conform.py verify --ref REF/ --mov MOV2/ --check-time --every 1 --report S/t8.json` (lag 0 now):
-   every frame must win against its neighbours ±2 (`time_lost_frames` empty; ties at the repeated frames
-   are allowed and listed). Checking only the key frames proves nothing — they are exact by construction;
-   the errors live between them. Jumps are judged by the user on playback — stills do not show them.
-8. **Why ramp keys desynced shot 850 (05.11).** Eight speed keys at the coincidence points with the
-   averaged speed between them (91–93 %) draw a straight line through a staircase: between two keys the
-   mapped media time is off by up to half a frame, and Premiere shows the frame that *contains* the mapped
-   time, so 33 of 78 frames came one frame late (simulated in `tests/test_conform.py::test_time_plan_ramp_is_not_frame_exact`).
-   The previous verify sampled only the key frames and passed. Denser keys are not the cure — keys at
-   *every* lag change are (`--route step`), or no keys at all (route A).
-   Measured on the render (V1 exported after the keys, each frame matched against the native frames):
-   **34 of 84 frames were not real frames but a mix of two neighbours** (equal similarity to both,
-   0.91/0.90) — every frame where the averaged speed lands between two media frames. Static parts look
-   right in such a frame, moving parts (head, hands, back) double: «artefacts when the picture moves».
-   Cuts + slip (the 30.10 project `TESTS.prproj`: plate cut at 7/19/30/43/53/62, slips +1…+7) never make
-   an in-between frame — every frame is a native one, the only cost is one skipped/repeated frame at a
-   joint, invisible on playback. Check a retimed layer the same way: match every exported frame against
-   the native frames; a frame equally close to two neighbours is a blend → the plan is wrong.
-   Which layer is cut does not change the accuracy; for masks cut the generation (lower) and keep the
-   plate with its Object Mask as one clip (one mask tracks one clip).
-9. **One object drifts, the rest coincides** (the priest on 850): that is not a layer time error — the
-   generation moved him at another phase. Layer-level time (route A/B) stays as measured; the object gets
-   its own copy of the generation clip on a track above, masked to him (`object_mask_ui`), and that copy
-   is cut and slipped by its own lag (measure with `--boxes` on him alone). Geometry never fixes a phase.
+Who is who (user canon 05.11): the **generation is the lower track** and is the one that gets cut and
+slipped; the **plate (original) is the upper track**, stays one clip and carries the people mask;
+colour goes on the lower clip towards the upper. Speed keyframes are **not** part of this technique
+(`time_remap_ui` stays in the MCP for speed ramps the user asks for). Why: the generator plays the
+same action faster by whole frames — every 9–15 frames it is one frame ahead — and freezes at the
+end. A speed between two coincidence points asks the host for a frame that does not exist and gets a
+blend of two (34 of 84 frames on shot 850, 05.11: static parts look right, moving heads and hands
+double). Cuts at the steps with whole-frame slips show only native frames; the cost is one repeated
+generation frame per step, hidden under the plate's people.
+
+1. **Frames.** Export each track alone as a PNG sequence over the same range (preset path in §1;
+   frame i of both = sequence frame in + i; straight alpha is fine — frames are composited over black
+   inside the engine). Keep the exports in the session's temporary folder.
+2. **Coarse geometry first.** `conform.py coarse-fit --ref GEN/ --mov PLATE/ --out S/ --frames 0,2,4,6`
+   (shot start, lag still 0). A 1.4 % scale error cost 1–2 frames of timing on 009 — never match time
+   on unscaled frames.
+3. **Match.** `conform.py time-match --ref GEN/ --mov PLATE/ --out S/ --geom S/coarse.json --lag-min -3 --lag-max 10`
+   → `S/time.json`: `lag[t]` (plate frame = generation frame t + lag), `runs` of constant lag,
+   `frozen_tail_ref` (the generation's freeze), `summary`, `warnings`. The lag path is a staircase; it
+   is applied as it is, frame for frame. Read `in_model_range`, `low_margin_frames`, every warning.
+4. **Plan.** `conform.py time-plan --time S/time.json --fps 24 --clip-start <generation clip start s> --clip-in <its in-point s> --retime ref --out S/plan.json`
+   (`--retime ref` = the generation is the layer to cut). Use `cut_and_slip` / `cut_table`: one piece per
+   constant-lag run — `sequence_seconds [start, end)`, `slip_frames` (negative: the piece shows earlier
+   media), `repeat_frames` (1 at every step); `trim.sequence_seconds` = where the frozen tail starts;
+   `expected_mapping` = sequence frame → generation frame. Show the user the `cut_table` first.
+5. **Check the plan on the main moving subject before cutting.** The engine matches the whole frame
+   and follows the majority (on 850 the children); a subject moving differently can be one frame off in
+   one or two runs (the priest's bow: engine steps at generation frames 58/69, the right ones 54/63).
+   Run `time-match` again with `--boxes` on that subject (or compare crops of him at the suspected
+   runs); where his step differs, cut there instead. One subject out of phase everywhere is §3 p. 9.
+6. **Prepare the generation clip.** One clip, 100 %, no speed keys, in-point at its first frame; apply
+   Motion (coarse scale/position) and Levels/Lumetri now — pieces inherit effects, so colour and
+   geometry done before cutting need no per-piece work. Checkpoint (`create_sequence_checkpoint`).
+7. **Cut and slip.** `split_clip {node_id, time_seconds}` at `sequence_seconds[0]` of every piece but
+   the first, ascending (each split returns the new node ids; `get_sequence_structure` once after all
+   splits), then `slip_edit {node_id, offset_seconds: slip_seconds, include_linked:false}` on every
+   piece with `slip_frames ≠ 0` (both tools snap to the frame grid). Near the media end `slip_edit`
+   refuses «invalid source range» → in/out in ticks through `pr_execute_script`. The last piece must
+   reach the plate's end: `trim_clip {node_id, new_out_seconds}` (source out = in + length) — the
+   frozen tail is gone by itself because the slips pulled the media earlier.
+8. **Read back.** `get_sequence_structure` → table of the generation pieces (timeline start/end,
+   in-point in frames = seconds × fps) against `cut_table`; any frame of difference is reported.
+   Shot 850, 05.11, the accepted layout: pieces at 0 / 0.375 / 0.917 / 1.417 / 2.000 / 2.458 / 2.875 s
+   with in-points 0 / 8 / 20 / 31 / 44 / 54 / 63 frames, end 3.5 s.
+9. **Verify every frame.** Export both tracks again → `conform.py verify --ref GEN2/ --mov PLATE2/ --check-time --every 1 --report S/t8.json`.
+   `time_lost_frames` is read, not trusted blindly: ties at the repeated frames (the first frame of each
+   piece) are expected; a run of lost frames inside a piece means either the engine's whole-frame lag
+   there (acceptable when the user judged the subject right on playback, as on 850 frames 59–62 and
+   69–74) or a real miss — settle it with `--boxes` on the subject or crops, never by moving a cut
+   blindly. The strongest check is the one that caught the speed-key failure: match every exported
+   generation frame against its native frames — each must be a native frame, none a blend.
+10. **Never** speed keys on a piece and never cuts/slips on a clip that carries speed keys (05.11: that
+    combination is how 850 «went apart further»). To start over: remove the generation clips,
+    `overwrite_clip` the master clip from the bin at the same track and time, re-apply Motion and
+    Levels, cut again. A clip that already carries speed keys from an earlier attempt: the user removes
+    them (or the clip is replaced from the bin) before anything else.
+11. **Patches that belong to the generation** (e.g. a clip covering a leftover green-screen area of
+    the generation, as V2 in `PP_Sht_157_850.prproj`) are cut and slipped exactly like the generation,
+    at the same times, because they are locked to its frames, not to the plate's.
+12. **One object drifts, the rest coincides** (the priest on 850): not a layer time error — the
+    generation moved him at another phase. The layer stays as cut; the object gets its own copy of the
+    generation clip on a track above, masked to him (`object_mask_ui`), cut and slipped by its own lag
+    (measure with `--boxes` on him alone). Geometry never fixes a phase.
+
+Route C (no API for cuts, or a smooth retime wanted by the user): `conform.py render --time` makes a
+retimed media file → `replace_clip_media`. After Effects: §8 and the AE recipe — the same cuts as
+layer pieces (`plan.ae_pieces`).
+
 ## 4. Stage G — geometry (affine per piece; warp render only when affine fails on named people)
 
 1. `conform.py global-fit --ref REF/ --mov MOV/ --out S/ --time S/time.json --step 2 --mov-motion <scale_w,scale_h,pos_x,pos_y[,rot]> --seq-size W,H [--boxes boxes.json]`
@@ -158,8 +149,10 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
 ## 5. Stage E — colour (lower clip towards the upper)
 
 1. Geometry first, then colour. `conform.py exposure --ref REF/ --mov MOV/ --out S/levels.json --time S/time.json --geom S/geom.json --every 3 --apply-to <mov|ref>`
-   — `--apply-to` names the clip that gets the Levels (the **lower** one; `ref` when the lower clip is
-   the time/geometry reference, as on shot 009 where the Levels went on V1). Pairs = pixels where both
+   — `--apply-to` names the clip that gets the Levels: the **lower** one, the generation — `ref` in
+   the standard call (`--ref GEN/ --mov PLATE/`). Apply Levels before cutting (Stage T p. 6) so the
+   pieces inherit it; a per-frame drift (`flicker_per_frame`) is met with Levels keyframes on the
+   clip, as in `PP_Sht_157_850.prproj` (two keys, start and end). Pairs = pixels where both
    layers agree (local NCC > 0.55) and both are opaque — people and ground, typically 5–15 % of the
    frame; frames with < 3000 pairs are skipped and listed.
 2. Output: `linear` (gain/offset per channel, 8-bit), `levels_per_channel` (Input Black/White, Output
@@ -254,8 +247,8 @@ they stay as the generation rendered them.
 
 ## 7. Reporting and acceptance
 
-Measured on exported frames only, before → after: time (gain in frames, segment speeds, frames lost
-in T8), geometry (median / p90 / worst frame, per person), colour (bias per channel, median abs,
+Measured on exported frames only, before → after: time (gain in frames, pieces and slips, frames lost
+in T8 and why), geometry (median / p90 / worst frame, per person), colour (bias per channel, median abs,
 per-frame drift), mask (inset, transition, jitter, frames re-seeded). Accept when: no frame loses in
 T8; geometry p90 ≤ 2 px on people (or the best reached value with the reason — redrawn content,
 parallax); colour bias ≤ 1 level; every person in the mask on every frame with faces holding; no
@@ -265,8 +258,9 @@ stays in the bin; `pr_save_project` only after the user accepts.
 
 ## 8. After Effects
 
-The same engine runs for AE (`AE-MCP-IMT` skill, recipe `layer-conform.md`): frames from
-`render.frame` / a solo render of each layer, time through Time Remap keyframes (`plan.ae_time_remap_keys`:
-comp time → source time, a hold key at `hold`), geometry through Transform (Scale per axis, Rotation,
-Position = `motion.pos_px`), colour through Levels (Individual Controls) with the same Input/Output
-values, mask through roto/`layer.set_track_matte`.
+The same engine and the same principle run for AE (`AE-MCP-IMT` skill, recipe `layer-conform.md`):
+frames from a solo render of each layer, time by cutting the generation layer into pieces
+(`layer.split` at each piece start, then per piece `startTime` shifted by whole frames —
+`plan.ae_pieces`), geometry through Transform (Scale per axis, Rotation, Position = `motion.pos_px`),
+colour through Levels (Individual Controls) with the same Input/Output values, mask through
+roto/`layer.set_track_matte` on the plate layer, which stays whole.
