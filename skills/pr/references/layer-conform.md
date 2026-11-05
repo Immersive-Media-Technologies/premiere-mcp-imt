@@ -57,6 +57,9 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
 1. **Frames.** Export the reference track alone and the moving track alone as PNG sequences over the
    same in/out range (same frame count; frame i of both = sequence frame in + i). Straight alpha is
    handled (frames are composited over black inside the engine).
+   Keep every frame export, plan and report of this work in the session's own temporary working folder
+   (deleted with the session), one subfolder per purpose — never in the user's repositories, media or
+   project folders; renders meant for the user go next to the project.
 2. **Coarse geometry first.** `conform.py coarse-fit --ref REF/ --mov MOV/ --out S/ --frames 0,2,4,6`
    (frames at the shot start, where the lag is still 0). A 1.4 % scale error cost 1–2 frames of timing on
    shot 009 — never match time on unscaled frames. `in_range:false` → check the placement arguments.
