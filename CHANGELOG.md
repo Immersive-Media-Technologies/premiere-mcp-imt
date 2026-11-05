@@ -7,6 +7,18 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+### Changed
+
+- Layer conform, Stage T: the time plan now applies the measured lag **staircase frame for frame**.
+  Route A (`split_clip` + `slip_edit` per constant-lag piece, `cut_and_slip`) is the default in Premiere
+  and is correct for both `--retime` directions (the repeated frame at a step comes out of the cut); route B
+  speed keys are `--route step` — a key at every lag change (100/50/200 %) — instead of one key per
+  coincidence point with an averaged speed, which placed up to half the frames between two keys one frame
+  late (shot 850, 05.11). The plan lists `expected_mapping`; verify runs on every frame (`--every 1`), not
+  on the key frames, which are exact by construction. Rules added: never cut or slip a clip that carries
+  speed keys and never key a slipped piece; Frame Sampling on a remapped clip; an object out of phase
+  on its own gets a masked copy with its own cut-and-slip, not a layer retime.
+
 ### Fixed
 
 - `object_mask_edit_ui`: ⊕/⊖ under the Program Monitor show only while the Object Mask tool is active;

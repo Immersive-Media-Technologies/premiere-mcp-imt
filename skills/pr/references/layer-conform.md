@@ -22,7 +22,7 @@ Measured on three shots (30.10–04.11.2026, Premiere 26.5, 4608×3164):
 
 A value outside its range is a reason to re-check the measurement, not to apply it.
 
-Hard rules: **time before pixels** (a temporal drift cannot be fixed with geometry; a per-frame fit
+Hard rules: **time is a staircase** (the lag path changes by whole frames; apply it frame for frame — cuts + slip, or a key at every change — never as an averaged speed between distant keys) · **time before pixels** (a temporal drift cannot be fixed with geometry; a per-frame fit
 without time sync fits noise) · **phase vs width** (some people coincide and others double → the
 timing is right and the width/position is off: scale and shift until *everyone* coincides, never fit
 one person) · **one constant per piece** (per-frame keys only where the parameters move by more than
@@ -36,7 +36,7 @@ clip towards the upper · the user's edits between turns are kept: re-read the s
 |---|---|
 | numerics | `conform.py` (this skill's `scripts/conform.py`; needs Python 3 + `numpy` + `opencv-python-headless`, FFmpeg for `frames`/`render`). It measures PNG frames and writes JSON plans; it never talks to Premiere. |
 | frames of one track | `toggle_track_visibility` (solo) → `export_sequence {preset_path, range:"in_to_out"}` to a PNG sequence (8-bit for measuring; ProRes 4444 XQ → `conform.py frames --bits 16 --alpha` for the final resample) → restore visibility; single frames: `pr_export_frame` (straight alpha). Raw media frames of the lower clip: `conform.py frames --video` + the clip's Motion as `--mov-place "scale=161;pos=0.503,0.540"` with `--seq-size W,H`. |
-| time | `time_remap_ui {node_id, points}` (speed keyframes, macOS) — `conform.py time-plan` writes the `points`; fallback `split_clip` + `slip_edit` per constant-lag run (`cut_and_slip` in the same plan); `freeze_frame` for the frozen tail |
+| time | route A (default, frame-exact): `split_clip` + `slip_edit` per constant-lag piece (`cut_and_slip` from `conform.py time-plan`); route B (one clip, macOS): `time_remap_ui {node_id, points}` with the plan's step keys (a key at every lag change) + `set_time_interpolation 0`; `freeze_frame` / a cut for the frozen tail. Never both methods on one clip |
 | geometry | Motion on the moving clip: `set_effect_property` (Scale Width / Scale Height with Uniform Scale off, Rotation, Position normalised 0–1) for a constant per piece; `add_keyframe` per sampled frame when the piece needs keys. Warp render (route C): `conform.py render` → `import_media` → `replace_clip_media` |
 | colour | Levels («Уровни») on the lower clip: `apply_effect` + `set_effect_property` per channel (Input/Output Black/White; names from `get_effect_properties`); Lumetri only when Levels cannot express the transfer |
 | mask | `object_mask_ui` / `object_mask_edit_ui` / `object_mask_track_ui` / `object_mask_params_ui` on the upper clip (see `masking.md`); measure with `conform.py mask-measure` on exported alpha |
@@ -68,23 +68,49 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
    frame). Read `summary`: `in_model_range`, `disagree_with_free_best` (should be small),
    `low_margin_frames` (ambiguous frames), and every warning — «moving layer has N frames … forced»
    means the moving export is too short: export at least `max lag` more frames and match again.
-4. **Plan.** `conform.py time-plan --time S/time.json --fps 24 --clip-start <moving clip start s> --clip-in <moving clip in-point s> --out S/plan.json`
-   (`--range-start` when reference frame 0 is not the moving clip's start). Show the user the `table`
-   (ref frame ← mov frame, sequence s, source s, segment speed) before applying anything.
-5. **Apply — route B (default):** the moving clip must run at 100 % with no speed keys yet →
-   `time_remap_ui {node_id, points: plan.time_remap_ui_points, tolerance_frames: 0.1}`; read back the
-   result (`inspect_time_remap_ui`, the returned clip end against the expected one). Route A (no macOS
-   / UI refused): `split_clip` at each `cut_and_slip[i].sequence_seconds[0]` on the moving clip, then
-   `slip_edit` each piece by `slip_frames` (near the media end `slip_edit` refuses with «invalid source
-   range» → set in/out in ticks through `pr_execute_script`). Route C: `conform.py render --time` makes
-   a retimed media file → `replace_clip_media`.
-6. **Tail.** When `hold` is set (the reference freezes while the moving layer still acts): after the
-   last speed key the moving clip must hold too → `freeze_frame` on the moving clip at
-   `plan.hold.sequence_seconds_from` (or cut there and hold the last matching frame). Report the frames.
-7. **Verify.** Export the moving track again over the range → `conform.py verify --ref REF/ --mov MOV2/ --check-time --report S/t8.json`
-   (lag 0 now): every frame must win against its neighbours ±2 (`time_lost_frames` empty; ties at cut
-   points are allowed and listed). Jumps are judged by the user on playback — stills do not show them.
-
+   The lag path is a **staircase**: 100 % inside a run, one frame gained (or repeated) at each step.
+   That staircase is the mapping to apply — frame for frame, not a smoothed speed.
+4. **Plan.** `conform.py time-plan --time S/time.json --fps 24 --clip-start <clip start s> --clip-in <clip in-point s> [--retime ref] --out S/plan.json`
+   (`--retime ref` when the generation on the lower track is slowed onto the plate; `--range-start`
+   when reference frame 0 is not the clip's start). The plan carries `expected_mapping` (sequence frame →
+   media frame, the staircase), `cut_and_slip` (route A, `cut_table`), `time_remap_ui_points` (route B,
+   `--route step`: a key at every lag change, speeds 100/50/200 %; `table`) and `trim`/`hold`. Show the
+   user the `cut_table` (or `table`) before applying anything.
+5. **Apply — route A (default): cuts + slip, frame-exact.** `split_clip {node_id, time_seconds}` on the
+   retimed clip at `cut_and_slip[i].sequence_seconds[0]` for every piece but the first (ascending; the
+   split returns new node ids — after all splits `get_sequence_structure` once), then `slip_edit
+   {node_id, offset_seconds: slip_seconds, include_linked:false}` on every piece with `slip_frames ≠ 0`
+   (positive = later media). Nothing else: the repeated frame at a step comes out of the cut by itself
+   (`repeat_frames`). Effects already on the clip (Motion, Levels) are kept by every piece, so apply
+   them before cutting. Near the media end `slip_edit` refuses with «invalid source range» → set in/out
+   in ticks through `pr_execute_script`. Route B (one clip wanted, macOS): the clip must run at 100 %
+   with no speed keys → `time_remap_ui {node_id, points: plan.time_remap_ui_points, tolerance_frames: 0.1}`,
+   then `set_time_interpolation {node_id, mode: 0}` (Frame Sampling — blended or optical-flow frames
+   hide the sync) and read back with `inspect_time_remap_ui`. Route B is exact inside every run and lands
+   the one frame per step on a half frame (either neighbour is right there). Route C:
+   `conform.py render --time` makes a retimed media file → `replace_clip_media`.
+   **Never** slip or cut a clip that carries speed keys, and never put speed keys on a slipped piece —
+   the two methods do not combine (05.11: that is how shot 850 «went apart further»). To start over:
+   remove the retimed clip, `overwrite_clip` the master clip from the bin at the same track and time,
+   re-apply Motion and Levels from `S/geom.json` / `S/levels.json`, then route A.
+6. **Tail.** `trim` set (`--retime ref`: the generation freezes while the plate still acts) → cut the
+   retimed clip at `trim.sequence_seconds`. `hold` set (`--retime mov`: the plate layer must wait) →
+   `freeze_frame` on the moving clip at `plan.hold.sequence_seconds_from`. Report the frames.
+7. **Verify every frame.** Export the retimed track again over the range →
+   `conform.py verify --ref REF/ --mov MOV2/ --check-time --every 1 --report S/t8.json` (lag 0 now):
+   every frame must win against its neighbours ±2 (`time_lost_frames` empty; ties at the repeated frames
+   are allowed and listed). Checking only the key frames proves nothing — they are exact by construction;
+   the errors live between them. Jumps are judged by the user on playback — stills do not show them.
+8. **Why ramp keys desynced shot 850 (05.11).** Eight speed keys at the coincidence points with the
+   averaged speed between them (91–93 %) draw a straight line through a staircase: between two keys the
+   mapped media time is off by up to half a frame, and Premiere shows the frame that *contains* the mapped
+   time, so 33 of 78 frames came one frame late (simulated in `tests/test_conform.py::test_time_plan_ramp_is_not_frame_exact`).
+   The previous verify sampled only the key frames and passed. Denser keys are not the cure — keys at
+   *every* lag change are (`--route step`), or no keys at all (route A).
+9. **One object drifts, the rest coincides** (the priest on 850): that is not a layer time error — the
+   generation moved him at another phase. Layer-level time (route A/B) stays as measured; the object gets
+   its own copy of the generation clip on a track above, masked to him (`object_mask_ui`), and that copy
+   is cut and slipped by its own lag (measure with `--boxes` on him alone). Geometry never fixes a phase.
 ## 4. Stage G — geometry (affine per piece; warp render only when affine fails on named people)
 
 1. `conform.py global-fit --ref REF/ --mov MOV/ --out S/ --time S/time.json --step 2 --mov-motion <scale_w,scale_h,pos_x,pos_y[,rot]> --seq-size W,H [--boxes boxes.json]`
