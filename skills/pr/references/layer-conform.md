@@ -83,7 +83,14 @@ every export. Working folder: `<project folder>/DA_render/conform/<shot>/` (neve
    (positive = later media). Nothing else: the repeated frame at a step comes out of the cut by itself
    (`repeat_frames`). Effects already on the clip (Motion, Levels) are kept by every piece, so apply
    them before cutting. Near the media end `slip_edit` refuses with «invalid source range» → set in/out
-   in ticks through `pr_execute_script`. Route B (one clip wanted, macOS): the clip must run at 100 %
+   in ticks through `pr_execute_script`. **Sync a generation only by cuts** (user rule 05.11): its time is
+   a staircase of whole frames — the generator gains one frame every 9–15 frames — and no speed
+   between two steps reproduces it; stretching or squeezing makes in-between frames (34 of 84 blended on
+   850, 05.11). Cut where the lag steps, slip every piece by whole frames, drop one frame per step from
+   the layer that is cut (the plate in `PP_Sht_157_850.prproj`, 30.10–04.11: 9 pieces, +1…+7, 6 plate
+   frames out, the generation untouched but for its frozen tail) or repeat one (the generation when the
+   masked plate must stay one clip), cut the frozen tail. Speed keys only when the user asks for a speed
+   ramp. Route B, for reference (one clip wanted, macOS): the clip must run at 100 %
    with no speed keys → `time_remap_ui {node_id, points: plan.time_remap_ui_points, tolerance_frames: 0.1}`,
    then `set_time_interpolation {node_id, mode: 0}` (Frame Sampling — blended or optical-flow frames
    hide the sync) and read back with `inspect_time_remap_ui`. Route B is exact inside every run and lands
