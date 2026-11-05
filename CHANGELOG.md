@@ -7,6 +7,42 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-05
+
+### Added
+
+- **Object Masks by sight (macOS), new `masks` category.** Premiere has no scripting API for masks
+  (ExtendScript none, UXP only detects them), so these operations drive Premiere's own Object Mask tool:
+  the agent looks at a frame exported at the playhead and gives points (a click takes the whole object —
+  a whole person) or lassos (a closed outline takes only that part — a face).
+  - `object_mask_ui` — creates the mask on an effect row (Opacity by default, or the effect it should
+    drive), adds further shapes with ⊕, removes with ⊖, sets Feather / Expansion / Inverted and tracks it
+    (forward, both or none); `dry_run` locates everything without clicking.
+  - `object_mask_edit_ui` (⊕/⊖ on an existing mask, to fix the frame where tracking lost a part),
+    `object_mask_select_ui`, `object_mask_params_ui`, `object_mask_track_ui` (forward / backward / both,
+    waits for Premiere's progress bar), `inspect_object_mask_overlay_ui` (read-only).
+  - Every result returns the selected mask's red overlay as an image plus its extent in frame pixels
+    (`bboxFrame`, `areaFrac`) and reports `committed_unverified`; a failure after clicks reports
+    `mutationOutcome: "unknown"` with the steps taken.
+  - How: the Premiere window is captured (`screencapture`, converted by `sips`), the Program Monitor is
+    found by matching the exported frame (multi-scale normalized cross-correlation through an FFT),
+    icons by template matching — independent of the UI language, scaled for Retina — and clicks and
+    drags are posted as CGEvents through JavaScript for Automation. Pure TypeScript: no native modules,
+    no new dependencies. Needs Accessibility and Screen Recording for the app that runs the server;
+    refuses on Windows. Verified on Premiere 26.5 at 1:1.
+- The skill's `references/masking.md`: the agent route (prepare, look, create, check other frames 120–240
+  frames away, fix on the frame that lost a part and re-track) and its rules — mask only what the user
+  named, partly hidden people count, faces hold first, a click for a whole object and a lasso for a part,
+  and when to stop.
+- Image results can carry their own caption.
+
+### Fixed
+
+- Linked edits (`slip_edit`, `slide_edit`, `roll_edit`, `trim_clip`): a refusal in their check pass (a
+  slip past the media start, say) changes nothing and is now reported `not_applied`; before, it counted as
+  an unknown outcome and paused every later edit until recovery was acknowledged. The slip message says how
+  to fit the window.
+
 ## [1.1.1] - 2026-10-28
 
 ### Fixed

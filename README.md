@@ -7,12 +7,14 @@ inside your running **Adobe Premiere Pro**: read the project and its sequences, 
 ripple clips, apply effects, transitions and keyframes, add markers and captions, reframe, check
 frames and export — from plain language.
 
-**Every Adobe UI language · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
+**Every Adobe UI language · vision: masks and keyframes by sight · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, and the agent sees the frame: it looks at exported frames, draws Object Masks on the people or parts it sees — a click for a whole person, a lasso for a face; add, subtract, track (macOS) — and checks keyframed motion frame by frame. Premiere's scripting has no API for masks, and none of the other Premiere MCP servers we compared creates them. It comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
 
 Two parts, made to work together:
 
 - **The MCP server** — about 440 Premiere operations behind nine tools; writes are verified by
-  reading Premiere back; **works on every Premiere UI language** (verified live); no telemetry.
+  reading Premiere back; **works on every Premiere UI language** (verified live); **Object Masks by
+  sight** on macOS (the `masks` operations drive Premiere's own mask tool — there is no API for it); no
+  telemetry.
 - **The skill** (`skills/pr`, also served by the `pr_skill` tool, so it works in any client) — how
   to drive Premiere safely, where scripting ends, and how to use **Premiere's own AI tools**:
   Generative Extend, the Generative Media Tool (video, sound effects, music), Object Mask, Speech to
@@ -43,8 +45,9 @@ needed with the Claude Desktop extension).**
 - "Tighten the pauses in this interview to a third of a second and put a Morph Cut on the jump
   cuts where the camera is locked off." _(skill)_
 - "Make 9:16 and 1:1 versions of this edit and check the titles stay out of the TikTok UI zones."
-- "Blur the face of the man on the left for the whole shot." _(skill: you click the subject with
-  Object Mask, the agent does the rest)_
+- "Blur the face of the man on the left for the whole shot." _(macOS: the agent outlines the face
+  with Object Mask itself, tracks it and checks it on other frames; on Windows you click the subject)_
+- "Mask everyone in this shot, faces first, and keep the mask on them to the end of the clip."
 - "The music in this interview was recorded on location — get rid of it and score it again under
   the dialogue." _(skill)_
 - "Mark every beat of this track and lay the selects to it, two beats per shot."
@@ -115,6 +118,7 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 | **Read-only mode** | `PR_MCP_READONLY=true` — inspection and exports only; the project cannot change. |
 | **No raw scripting by default** | `pr_execute_script` exists only with `PR_MCP_ENABLE_SCRIPT=true`. |
 | **No telemetry** | the server sends nothing anywhere. |
+| **Real clicks only where there is no API** | the `masks` operations (macOS) bring Premiere to the front and click its mask tool; they need Accessibility and Screen Recording for the app that runs the server, refuse on other systems, are off in read-only mode (only the overlay inspection stays), and report `committed_unverified` with an overlay image to check. |
 
 ## Tools
 
@@ -122,7 +126,7 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 |---|---|
 | `pr_verify` | connector, open project and active sequence — the first call |
 | `pr_get_sequence` | tracks and clips with their `node_id`, times and speed |
-| `pr_catalog` / `pr_do` / `pr_batch` | discover the ~440 operations (44 categories) and run one or several |
+| `pr_catalog` / `pr_do` / `pr_batch` | discover the ~440 operations (45 categories) and run one or several |
 | `pr_export_frame` | a frame of the sequence as PNG — the agent's eye |
 | `pr_save_project` | save |
 | `pr_install_connector` | check / install the connector inside Premiere |
@@ -164,13 +168,14 @@ Clients with their own skill support can load the folder directly (e.g. copy `sk
 ## Why this one
 
 Several Premiere MCP servers exist; they differ in what the model sees, what it knows and what it
-sends home. As of 2026-10-26:
+sends home. As of 2026-11-04:
 
 |  | Premiere-MCP-IMT | [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp) (upstream) | [AdobePremiereProMCP](https://github.com/ayushozha/AdobePremiereProMCP) | [Adobe_Premiere_Pro_MCP](https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP) | [flue](https://github.com/sfkislev/flue) |
 | --- | --- | --- | --- | --- | --- |
 | Tools the model sees by default | 9, over ~440 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
 | Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
 | Non-English Premiere | every UI language (all ten), verified live | English and es-ES measured | not stated | not stated | not stated |
+| Vision: acting on what the agent sees | frames returned as images; Object Masks drawn on what it sees (click = whole person, lasso = a part), ⊕/⊖, tracking, overlay check (macOS); keyframes checked frame by frame | frames returned as images; Object Mask audits (read-only) | thumbnails; no masks | still export; no masks | no (scripting only) |
 | Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
 | Connector install | by the agent, with consent; installers with a live self-test | CLI flag | build from source (Go, Rust, Python) | CLI flag | `pip` + setup |
 | Clients | Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client | npm, .mcpb, Codex / Claude Code plugins | build from source | npm, plugins, .mcpb | CLI + skill |
@@ -187,6 +192,9 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.2.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.2.0) · 2026-11-05 —
+  vision: Object Masks by sight on macOS — the agent clicks a whole person or outlines a part (a face) on an
+  exported frame, adds and subtracts, tracks and checks the red overlay; Premiere has no API for masks.
 - [v1.1.1](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.1.1) · 2026-10-28 —
   Premiere's home screen: `pr_verify` says when no project is open, and an edit tried without a project no longer
   pauses the edits after it.
