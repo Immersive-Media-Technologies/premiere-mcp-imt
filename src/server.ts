@@ -64,6 +64,7 @@ import { getTimelineQaTools } from "./tools/timeline-qa.js";
 import { getCrossAppWorkflowTools } from "./tools/cross-app-workflow.js";
 import { getSpeakerLayoutTools } from "./tools/speaker-layout.js";
 import { getMaskFitTools } from "./tools/mask-fit.js";
+import { getObjectMaskUiTools } from "./tools/object-mask-ui.js";
 import { getRhythmPlanTools } from "./tools/rhythm-plans.js";
 import { getShortsIntelligenceTools } from "./tools/shorts-intelligence.js";
 import { getCaptionAuthoringTools } from "./tools/caption-authoring.js";
@@ -349,6 +350,7 @@ function collectStaticTools(
     ...categorize("workflows", getCrossAppWorkflowTools()),
     ...categorize("workflows", getSpeakerLayoutTools()),
     ...categorize("effects", getMaskFitTools(bridgeOptions)),
+    ...categorize("masks", getObjectMaskUiTools()),
     ...categorize("edit_plans", getRhythmPlanTools()),
     ...categorize("shorts", getShortsIntelligenceTools()),
     ...categorize("captions", getCaptionAuthoringTools()),
@@ -662,7 +664,7 @@ export function createServer(
                     },
                     {
                       type: "text" as const,
-                      text: "Frame captured successfully.",
+                      text: typeof data.imageCaption === "string" ? data.imageCaption : "Frame captured successfully.",
                     },
                   ],
                 };

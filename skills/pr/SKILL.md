@@ -55,7 +55,7 @@ UXP bridge (`PREMIERE_UXP_TOKEN` + the UXP plugin in Premiere).
 | Generative Extend | UI, paid credits | `references/generative.md` |
 | Generative Media Tool: video, sound effects, soundscape, music | UI, paid credits | `references/generative.md` |
 | Firefly Boards → sequence | UI | `references/generative.md` |
-| Object Mask, shape masks, mask tracking | UI; the effect the mask drives: `apply_effect`, `set_effect_property` | `references/masking.md` |
+| Object Mask, shape masks, mask tracking | macOS: `object_mask_ui` and the `masks` category (points / lassos on an exported frame, ⊕/⊖, tracking); otherwise UI. The effect the mask drives: `apply_effect`, `set_effect_property` | `references/masking.md` |
 | Speech to Text, text-based editing (pauses, fillers), Paper Edit | UI; `*_uxp` transcript ops; `plan_*` word-timeline ops + the cut route | `references/speech-text.md` |
 | Captions, single-word captions | UI create/style; `build_caption_artifact` → `create_caption_track` | `references/speech-text.md` |
 | Enhance Speech, Enhance Audio (stems), Auto Ducking, Remix | UI; `setup_ducking` writes level keyframes | `references/audio.md` |

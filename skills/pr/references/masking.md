@@ -1,6 +1,51 @@
 # Masks: Object Mask, shape masks, tracking
 
-UXP 26.3+ only detects masks: `detect_object_masks_uxp`, `audit_object_masks_uxp`.
+Premiere has no scripting API for masks (ExtendScript none; UXP 26.3+ only detects them:
+`detect_object_masks_uxp`, `audit_object_masks_uxp`). On macOS the `masks` operations drive Premiere's
+UI for you: the agent looks at a frame and points at what to mask. Elsewhere → the click path below.
+
+## Object Mask by the agent (macOS, `masks` category)
+
+The app that runs this MCP server (Claude Desktop, Cursor, Terminal …) needs **Accessibility** and
+**Screen Recording** (System Settings → Privacy & Security). Premiere comes to the front and receives
+real clicks: the user keeps hands off mouse and keyboard while an operation runs.
+
+1. **Prepare.** `create_sequence_checkpoint` + `pr_save_project`. Select the clip (`set_clip_selection`)
+   so Effect Controls shows it; Program Monitor at «Fit». Clip Opacity 100 % first if it is lower (a mask
+   on a semi-transparent clip cannot be judged; restore the value afterwards). Apply the effect the mask
+   should drive first (Gaussian Blur, Mosaic …): its row is `effect_index` — 0 Motion, 1 Opacity
+   (default), 2 Time Remapping, 3… added effects in Effect Controls order.
+2. **Look.** `set_playhead_position` on the frame where the subjects are clearest → `pr_export_frame`
+   at that playhead → choose points and lassos in that PNG's pixels.
+3. **Create** — `object_mask_ui {frame_path, points | lassos, effect_index, track}`:
+   - a **point** (click) takes the WHOLE object under it — a whole person;
+   - a **lasso** (closed outline, 8–16 points) takes only the outlined **part** — a face, a head,
+     hands. For a part never click the figure. The selection mode under the Program Monitor must be
+     Lasso (the dropdown next to ⊕/⊖).
+   - every further shape goes into the same mask (⊕); `subtract_points` / `subtract_lassos` remove (⊖,
+     clicks remove more reliably than lassos);
+   - optional `feather`, `expansion`, `inverted`; `track` forward (default), both or none;
+   - returns `maskIndex`, the red-overlay extent in frame pixels (`bboxFrame`, `areaFrac`) and the
+     overlay image — look at it before going on. `dry_run` locates everything without clicking.
+4. **Check other frames.** Move the playhead 120–240 frames away (and near the ends), export the frame,
+   `object_mask_select_ui {mask_index}` → `inspect_object_mask_overlay_ui {frame_path}`. A part lost on
+   a frame → fix it **on that frame** (`object_mask_edit_ui {mode:"add", …}`), then
+   `object_mask_track_ui` from there (forward / backward / both).
+5. **Tune** — `object_mask_params_ui {mask_index, feather, expansion, inverted}`.
+
+Rules:
+- Mask only what the user named. "All people" means every person — partly hidden ones and fragments
+  at the frame edge too; a doubtful fragment is checked on frames 120–240 away.
+- Faces first: where tracking loses parts of bodies that cannot be restored, heads and faces must still
+  hold on every frame.
+- Know when to stop: once every requested subject and every face holds, finish. At most two re-seed
+  rounds per shot and about ten minutes per piece — then report what remains instead of iterating.
+- Results are `committed_unverified`: the overlay sees one frame; motion is checked by exported frames.
+  Premiere drops the mask selection after tracking or a playhead move — the operations re-select by
+  `mask_index` (mask rows in Effect Controls from the top). Undo is Premiere's own Edit › Undo.
+- Icons are found by template matching (independent of the UI language); verified at 1:1 on 26.5,
+  Retina by template scaling. A failure after clicks reports `mutationOutcome: "unknown"` — look at
+  the overlay before retrying.
 
 ## Object Mask (26.0+, the default mask tool)
 

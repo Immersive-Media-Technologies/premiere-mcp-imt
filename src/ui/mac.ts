@@ -1,0 +1,248 @@
+// macOS desktop layer for the Object Mask UI tools: finds Premiere's window on any display, brings it to
+// the front, captures it (`screencapture -R`, converted by `sips`), and posts hardware-level mouse and
+// keyboard events (CGEvent through JavaScript for Automation). Needs, for the MCP client app that runs this
+// server: Accessibility (events) and Screen Recording (capture). No native modules.
+import { execFile } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { type RgbImage, encodeBmp, parseBmp } from "./image.js";
+
+export type Exec = (file: string, args: string[], timeoutMs: number) => Promise<{ stdout: string; stderr: string }>;
+
+export const defaultExec: Exec = (file, args, timeoutMs) =>
+  new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const e = error as Error & { stderr?: string };
+        e.stderr = String(stderr ?? "");
+        reject(e);
+      } else resolve({ stdout: String(stdout), stderr: String(stderr) });
+    });
+  });
+
+export interface WindowBounds {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  name: string;
+}
+
+/** One JXA program for every desktop action; argv[0] selects it. */
+export const JXA = String.raw`
+ObjC.import('CoreGraphics'); ObjC.import('AppKit'); ObjC.import('ApplicationServices');
+function ev(type, x, y) { var e = $.CGEventCreateMouseEvent(null, type, $.CGPointMake(x, y), $.kCGMouseButtonLeft); $.CGEventPost($.kCGHIDEventTap, e); }
+function flagsOf(mods) { var f = 0;
+  if (mods.indexOf('cmd') >= 0) f |= $.kCGEventFlagMaskCommand;
+  if (mods.indexOf('alt') >= 0 || mods.indexOf('opt') >= 0) f |= $.kCGEventFlagMaskAlternate;
+  if (mods.indexOf('shift') >= 0) f |= $.kCGEventFlagMaskShift;
+  if (mods.indexOf('ctrl') >= 0) f |= $.kCGEventFlagMaskControl;
+  return f; }
+function premiereApps() { var all = $.NSWorkspace.sharedWorkspace.runningApplications, out = [];
+  for (var i = 0; i < all.count; i++) { var a = all.objectAtIndex(i), id = ObjC.unwrap(a.bundleIdentifier) || '';
+    if (id.indexOf('com.adobe.PremierePro') === 0) out.push(a); }
+  return out; }
+function run(argv) {
+  var cmd = String(argv[0] || '');
+  if (cmd === 'trusted') return JSON.stringify({ trusted: !!$.AXIsProcessTrusted() });
+  if (cmd === 'front') { var apps = premiereApps(); if (!apps.length) return JSON.stringify({ error: 'Premiere Pro is not running' });
+    apps[0].activateWithOptions($.NSApplicationActivateIgnoringOtherApps); return JSON.stringify({ activated: ObjC.unwrap(apps[0].localizedName) }); }
+  if (cmd === 'window') {
+    var arr = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, 0)));
+    var pids = premiereApps().map(function (a) { return Number(a.processIdentifier); }), best = null;
+    for (var j = 0; j < arr.length; j++) { var w = arr[j], b = w.kCGWindowBounds;
+      if (pids.indexOf(Number(w.kCGWindowOwnerPID)) < 0 || w.kCGWindowLayer !== 0) continue;
+      if (!best || b.Width * b.Height > best.w * best.h) best = { x: b.X, y: b.Y, w: b.Width, h: b.Height, name: String(w.kCGWindowName || '') }; }
+    return JSON.stringify(best || { error: 'no Premiere window on screen' });
+  }
+  if (cmd === 'key') { var parts = String(argv[1]).toLowerCase().split('+'), code = parseInt(argv[2], 10), flags = flagsOf(parts);
+    var kd = $.CGEventCreateKeyboardEvent(null, code, true), ku = $.CGEventCreateKeyboardEvent(null, code, false);
+    if (flags) { $.CGEventSetFlags(kd, flags); $.CGEventSetFlags(ku, flags); }
+    $.CGEventPost($.kCGHIDEventTap, kd); delay(0.05); $.CGEventPost($.kCGHIDEventTap, ku); return 'key'; }
+  if (cmd === 'type') { var text = String(argv[1]), codes = {'0':29,'1':18,'2':19,'3':20,'4':21,'5':23,'6':22,'7':26,'8':28,'9':25,'-':27,' ':49};
+    for (var t = 0; t < text.length; t++) { var ch = text.charAt(t), kc = codes.hasOwnProperty(ch) ? codes[ch] : 0;
+      var d1 = $.CGEventCreateKeyboardEvent(null, kc, true), u1 = $.CGEventCreateKeyboardEvent(null, kc, false);
+      if (!codes.hasOwnProperty(ch)) { $.CGEventKeyboardSetUnicodeString(d1, 1, [ch.charCodeAt(0)]); $.CGEventKeyboardSetUnicodeString(u1, 1, [ch.charCodeAt(0)]); }
+      $.CGEventPost($.kCGHIDEventTap, d1); delay(0.02); $.CGEventPost($.kCGHIDEventTap, u1); delay(0.03); }
+    return 'typed'; }
+  if (cmd === 'path') { var pts = []; for (var q = 1; q + 1 < argv.length; q += 2) pts.push([parseFloat(argv[q]), parseFloat(argv[q + 1])]);
+    ev($.kCGEventMouseMoved, pts[0][0], pts[0][1]); delay(0.3); ev($.kCGEventLeftMouseDown, pts[0][0], pts[0][1]); delay(0.15);
+    for (var s = 1; s < pts.length; s++) { var x0 = pts[s-1][0], y0 = pts[s-1][1], x1 = pts[s][0], y1 = pts[s][1], n = Math.max(4, Math.round(Math.hypot(x1-x0, y1-y0) / 12));
+      for (var k = 1; k <= n; k++) { ev($.kCGEventLeftMouseDragged, x0 + (x1-x0)*k/n, y0 + (y1-y0)*k/n); delay(0.015); } }
+    delay(0.15); var last = pts[pts.length-1]; ev($.kCGEventLeftMouseUp, last[0], last[1]); return 'path'; }
+  var x = parseFloat(argv[1]), y = parseFloat(argv[2]);
+  if (cmd === 'move') { ev($.kCGEventMouseMoved, x, y); return 'moved'; }
+  if (cmd === 'click') { var fl = flagsOf(argv.slice(3).map(String));
+    ev($.kCGEventMouseMoved, x, y); delay(0.3);
+    var d = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseDown, $.CGPointMake(x, y), $.kCGMouseButtonLeft);
+    var u = $.CGEventCreateMouseEvent(null, $.kCGEventLeftMouseUp, $.CGPointMake(x, y), $.kCGMouseButtonLeft);
+    if (fl) { $.CGEventSetFlags(d, fl); $.CGEventSetFlags(u, fl); }
+    $.CGEventPost($.kCGHIDEventTap, d); delay(0.08); $.CGEventPost($.kCGHIDEventTap, u); return 'clicked'; }
+  return 'unknown command';
+}`;
+
+export const KEYCODES: Readonly<Record<string, number>> = { a: 0, o: 31, l: 37, return: 36, enter: 36, escape: 53, tab: 48 };
+
+export interface Capture {
+  img: RgbImage;
+  /** screenshot pixels per screen point (2 on Retina) */
+  scale: number;
+  /** window origin in global screen points */
+  origin: { x: number; y: number };
+}
+
+/** The desktop as the Object Mask actions see it; all coordinates are pixels of the latest capture. */
+export interface Desktop {
+  capture(): Promise<Capture>;
+  click(x: number, y: number, mods?: string[]): Promise<void>;
+  move(x: number, y: number): Promise<void>;
+  drag(points: { x: number; y: number }[]): Promise<void>;
+  key(combo: string): Promise<void>;
+  type(text: string): Promise<void>;
+  sleep(ms: number): Promise<void>;
+  savePng(img: RgbImage, path: string, maxWidth?: number): Promise<string>;
+}
+
+export class DesktopError extends Error {}
+
+export class MacDesktop implements Desktop {
+  private last: Capture | null = null;
+  private readonly work: string;
+
+  constructor(private readonly exec: Exec = defaultExec, workDir?: string) {
+    this.work = workDir ?? mkdtempSync(join(tmpdir(), "pr-objmask-ui-"));
+  }
+
+  private async jxa(...args: (string | number)[]): Promise<string> {
+    try {
+      const r = await this.exec("/usr/bin/osascript", ["-l", "JavaScript", "-e", JXA, ...args.map(String)], 30_000);
+      return r.stdout.trim();
+    } catch (e) {
+      throw new DesktopError(`osascript failed: ${String((e as { stderr?: string }).stderr || (e as Error).message).trim().slice(0, 300)}`);
+    }
+  }
+
+  private async json<T>(...args: (string | number)[]): Promise<T> {
+    const out = await this.jxa(...args);
+    try {
+      return JSON.parse(out) as T;
+    } catch {
+      throw new DesktopError(`unexpected osascript output: ${out.slice(0, 200)}`);
+    }
+  }
+
+  async checkAccess(): Promise<void> {
+    const t = await this.json<{ trusted: boolean }>("trusted");
+    if (!t.trusted) {
+      throw new DesktopError(
+        "Accessibility permission is missing for the app that runs this MCP server (Claude Desktop, Cursor, VS Code, Terminal …): System Settings → Privacy & Security → Accessibility → turn it on for that app, then restart it. Nothing was clicked.",
+      );
+    }
+  }
+
+  async front(): Promise<string> {
+    const r = await this.json<{ activated?: string; error?: string }>("front");
+    if (!r.activated) throw new DesktopError(r.error ?? "could not activate Premiere Pro");
+    await this.sleep(800);
+    return r.activated;
+  }
+
+  async window(): Promise<WindowBounds> {
+    const r = await this.json<WindowBounds & { error?: string }>("window");
+    if (r.error || !(r.w > 0 && r.h > 0)) {
+      throw new DesktopError(`${r.error ?? "no Premiere window"} — it may be minimized, on another Space or a Stage Manager thumbnail; bring Premiere to the front`);
+    }
+    return r;
+  }
+
+  async capture(): Promise<Capture> {
+    const b = await this.window();
+    const png = join(this.work, `shot-${Date.now()}.png`);
+    try {
+      await this.exec("/usr/sbin/screencapture", ["-x", "-R", `${Math.round(b.x)},${Math.round(b.y)},${Math.round(b.w)},${Math.round(b.h)}`, png], 30_000);
+    } catch (e) {
+      const msg = String((e as { stderr?: string }).stderr || (e as Error).message);
+      throw new DesktopError(
+        /could not create image/i.test(msg)
+          ? "Screen Recording permission is missing for the app that runs this MCP server: System Settings → Privacy & Security → Screen & System Audio Recording → turn it on for that app, then restart it."
+          : `screencapture failed: ${msg.trim().slice(0, 200)}`,
+      );
+    }
+    const img = await this.decode(png);
+    // window bounds may be off by a point (3840 px of a 3841 pt window): snap to the backing scale
+    const raw = img.w / b.w, near = Math.round(raw);
+    this.last = { img, scale: near >= 1 && Math.abs(raw - near) < 0.01 ? near : raw, origin: { x: b.x, y: b.y } };
+    return this.last;
+  }
+
+  /** Any image file → RGB through `sips` (optionally capped in width). */
+  async decode(path: string, maxWidth?: number): Promise<RgbImage> {
+    const bmp = join(this.work, `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.bmp`);
+    const args = [...(maxWidth ? ["--resampleWidth", String(maxWidth)] : []), "-s", "format", "bmp", path, "--out", bmp];
+    try {
+      await this.exec("/usr/bin/sips", args, 60_000);
+    } catch (e) {
+      throw new DesktopError(`sips could not read ${path}: ${String((e as { stderr?: string }).stderr || (e as Error).message).trim().slice(0, 200)}`);
+    }
+    return parseBmp(readFileSync(bmp));
+  }
+
+  /** Pixel size of an image file (`sips -g`), without decoding it. */
+  async imageSize(path: string): Promise<{ w: number; h: number }> {
+    let out = "";
+    try {
+      out = (await this.exec("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", path], 30_000)).stdout;
+    } catch (e) {
+      throw new DesktopError(`sips could not read ${path}: ${String((e as { stderr?: string }).stderr || (e as Error).message).trim().slice(0, 200)}`);
+    }
+    const w = Number(/pixelWidth:\s*(\d+)/.exec(out)?.[1]), h = Number(/pixelHeight:\s*(\d+)/.exec(out)?.[1]);
+    if (!(w > 0 && h > 0)) throw new DesktopError(`not an image: ${path}`);
+    return { w, h };
+  }
+
+  async savePng(img: RgbImage, path: string, maxWidth?: number): Promise<string> {
+    const bmp = join(this.work, `out-${Date.now()}.bmp`);
+    writeFileSync(bmp, encodeBmp(img));
+    const args = [...(maxWidth && img.w > maxWidth ? ["--resampleWidth", String(maxWidth)] : []), "-s", "format", "png", bmp, "--out", path];
+    await this.exec("/usr/bin/sips", args, 60_000);
+    return path;
+  }
+
+  private toPoint(x: number, y: number): [number, number] {
+    if (!this.last) throw new DesktopError("no capture yet — coordinates have no reference");
+    return [
+      Math.round((this.last.origin.x + x / this.last.scale) * 10) / 10,
+      Math.round((this.last.origin.y + y / this.last.scale) * 10) / 10,
+    ];
+  }
+
+  async click(x: number, y: number, mods: string[] = []): Promise<void> {
+    await this.jxa("click", ...this.toPoint(x, y), ...mods);
+  }
+
+  async move(x: number, y: number): Promise<void> {
+    await this.jxa("move", ...this.toPoint(x, y));
+  }
+
+  async drag(points: { x: number; y: number }[]): Promise<void> {
+    if (points.length < 2) throw new DesktopError("a drag needs at least two points");
+    await this.jxa("path", ...points.flatMap((p) => this.toPoint(p.x, p.y)));
+  }
+
+  async key(combo: string): Promise<void> {
+    const parts = combo.toLowerCase().split("+");
+    const code = KEYCODES[parts[parts.length - 1]];
+    if (code === undefined) throw new DesktopError(`unknown key: ${combo}`);
+    await this.jxa("key", combo, code);
+  }
+
+  async type(text: string): Promise<void> {
+    await this.jxa("type", text);
+  }
+
+  sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+}
