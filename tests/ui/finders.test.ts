@@ -11,6 +11,7 @@ describe.each([1, 2])("UI finders at scale %i", { timeout: 30_000 }, (s) => {
   it("find the tool, the effect rows, the mask strip and ⊕/⊖", async () => {
     const sim = new SimPremiere(s).withMask();
     sim.selected = true;
+    sim.toolActive = true; // ⊕/⊖ show only with the Object Mask tool active
     const shot = makeShot(await sim.capture());
     expect(shot.s).toBe(s);
 
@@ -70,6 +71,7 @@ describe("Program Monitor and overlay", { timeout: 40_000 }, () => {
     // ⊕/⊖ must sit under the monitor
     const above = { ...mon, y: mon.y + 300, h: 10 };
     sim.withMask().selected = true;
+    sim.toolActive = true;
     const shot2 = makeShot(await sim.capture());
     expect(findAddSub(shot2, mon).found).toBe(true);
     expect(findAddSub(shot2, above).found).toBe(false);

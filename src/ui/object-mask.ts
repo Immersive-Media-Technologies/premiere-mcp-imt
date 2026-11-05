@@ -295,6 +295,7 @@ export class ObjectMaskUi {
   readonly steps: Step[] = [];
   private shot: Shot | null = null;
   private mon: MonitorRect | null = null;
+  private lastMaskIndex: number | null = null;
 
   constructor(private readonly desktop: Desktop, private readonly frame: ExportedFrame | null, private readonly timing: Timing = DEFAULT_TIMING) {}
 
@@ -380,6 +381,7 @@ export class ObjectMaskUi {
     const st = strips[index];
     await this.desktop.click(fx.badgeX + NAME_DX * shot.s, st.nameRowY);
     await this.desktop.sleep(this.timing.afterClick * 2);
+    this.lastMaskIndex = index;
     this.log("select-mask", { index, row: Math.round(st.nameRowY) });
     return st;
   }
@@ -388,11 +390,26 @@ export class ObjectMaskUi {
   async editShapes(mode: "add" | "sub", shapes: Shape[]): Promise<Overlay | null> {
     let last: Overlay | null = null;
     for (const shape of shapes) {
-      const shot = await this.snap();
+      let shot = await this.snap();
       if (!this.mon) await this.monitor();
-      const ab = findAddSub(shot, this.mon!);
+      let ab = findAddSub(shot, this.mon!);
       this.log("find-add-subtract", { found: ab.found });
-      if (!ab.found) this.fail("⊕/⊖ buttons not found under the monitor — the mask is not selected (pass mask_index to select it first)");
+      if (!ab.found) {
+        // ⊕/⊖ show only while the Object Mask tool is active (live 05.11: after a timeline click the
+        // selection tool is active and a selected mask row shows no buttons) — activate it, re-select
+        // the mask, look again
+        const tool = findTool(shot);
+        this.log("activate-tool", { found: tool.found, score: tool.score });
+        if (tool.found) {
+          await this.desktop.click(tool.x, tool.y);
+          await this.desktop.sleep(this.timing.afterClick);
+          if (this.lastMaskIndex !== null) await this.selectMask(this.lastMaskIndex);
+          shot = await this.snap();
+          ab = findAddSub(shot, this.mon!);
+          this.log("find-add-subtract", { found: ab.found });
+        }
+      }
+      if (!ab.found) this.fail("⊕/⊖ buttons not found under the monitor — the mask is not selected (pass mask_index to select it first) or the Object Mask tool is not active");
       const btn = mode === "add" ? ab.add! : ab.sub!;
       await this.desktop.click(btn.x, btn.y);
       await this.desktop.sleep(this.timing.afterClick);

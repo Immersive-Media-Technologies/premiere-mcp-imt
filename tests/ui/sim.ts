@@ -162,8 +162,11 @@ export class SimPremiere implements UiDesktop {
         for (let y = cy - 3 * s; y <= cy + 3 * s; y++) for (let x = cx - 3 * s; x <= cx + 3 * s; x++) img.data.set([40, 120, 220], (y * img.w + x) * 3);
       }
       if (this.selected) {
-        pasteGray(img, template("add", s), BASE.addSub[0] * s, BASE.addSub[1] * s);
-        pasteGray(img, template("sub", s), (BASE.addSub[0] + 28) * s, BASE.addSub[1] * s);
+        // ⊕/⊖ show only while the Object Mask tool is active (live 05.11)
+        if (this.toolActive) {
+          pasteGray(img, template("add", s), BASE.addSub[0] * s, BASE.addSub[1] * s);
+          pasteGray(img, template("sub", s), (BASE.addSub[0] + 28) * s, BASE.addSub[1] * s);
+        }
         for (const r of this.regions) tintRed(img, r);
       }
     }
@@ -184,15 +187,16 @@ export class SimPremiere implements UiDesktop {
     if (this.missShapes) return;
     const p = 6 * this.s;
     const r = [Math.round(x0 - p), Math.round(y0 - p), Math.round(x1 + p), Math.round(y1 + p)];
-    if (this.toolActive && this.effectRow >= 0) {
-      this.masks = 1;
-      this.selected = true;
-      this.toolActive = false;
-      this.regions = [r];
-    } else if (this.selected && was === "add") {
+    // a selected mask in ⊕/⊖ mode takes the shape (Premiere: the tool stays active after a mask exists);
+    // a shape with the tool active and no mask in edit mode creates a new mask on the selected effect
+    if (this.selected && was === "add") {
       this.regions.push(r);
     } else if (this.selected && was === "sub") {
       this.regions.pop();
+    } else if (this.toolActive && this.effectRow >= 0) {
+      this.masks = 1;
+      this.selected = true;
+      this.regions = [r];
     }
   }
 
