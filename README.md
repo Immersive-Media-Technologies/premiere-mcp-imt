@@ -7,7 +7,7 @@ inside your running **Adobe Premiere Pro**: read the project and its sequences, 
 ripple clips, apply effects, transitions and keyframes, add markers and captions, reframe, check
 frames and export — from plain language.
 
-**Every Adobe UI language · vision: masks and keyframes by sight · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, and the agent sees the frame: it looks at exported frames, draws Object Masks on the people or parts it sees — a click for a whole person, a lasso for a face; add, subtract, track (macOS) — sets speed keyframes (Time Remapping) by dragging them into place on the timeline, and checks keyframed motion frame by frame. Premiere's scripting has no API for masks or speed keyframes, and none of the other Premiere MCP servers we compared creates them. It comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
+**Every Adobe UI language · vision: masks and keyframes by sight · a large skills library · built for generative features.** Premiere-MCP-IMT works with every UI language Adobe ships, and the agent sees the frame: it looks at exported frames, draws Object Masks on the people or parts it sees — a click for a whole person, a lasso for a face; add, subtract, track (macOS) — sets speed keyframes (Time Remapping) by dragging them into place on the timeline, and checks keyframed motion frame by frame. Premiere's scripting has no API for masks or speed keyframes; none of the other Premiere MCP servers we compared creates Object Masks, and Adobe's own AI Assistant in Premiere (beta) documents neither. It comes with a large skills library and is built for Adobe's generative features — Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant.
 
 Two parts, made to work together:
 
@@ -120,6 +120,34 @@ Desktop's, Cursor's and Antigravity's configs, backing them up.
 | **No telemetry** | the server sends nothing anywhere. |
 | **Real clicks only where there is no API** | the `masks` operations and `time_remap_ui` (macOS) bring Premiere to the front and click its mask tool or drag its speed keyframes; they need Accessibility and Screen Recording for the app that runs the server, refuse on other systems, are off in read-only mode (only the overlay inspection stays), and report `committed_unverified` with an overlay image to check. |
 
+## How the agent sees
+
+Adobe gives outside agents no picture: its scripting returns a project's structure, not its pixels,
+and panels have no live access to the Program Monitor ([requested since November 2025](https://community.adobe.com/feature-requests-730/feature-request-real-time-access-to-program-monitor-image-stream-from-cep-uxp-panels-1621138)).
+Its own connector for AI assistants «operates at Adobe Express level, not Photoshop or Premiere»
+([MindStudio](https://www.mindstudio.ai/blog/claude-mcp-adobe-vs-photoshop-premiere-what-it-does)), and editors who drive Premiere through AI report «no effects or anything more
+advanced» ([Adobe forum](https://community.adobe.com/feature-requests-730/enable-mcp-feature-to-edit-with-ai-1642387)).
+
+Premiere-MCP-IMT gives the agent two kinds of sight. **The model's:** `pr_export_frame` returns any frame of the
+sequence as an image, and the model decides from the picture what to mask, where a speed change
+belongs, whether a keyframed move lands. **The server's:** Premiere's scripting has no API for
+masks or speed keyframes — they exist only in its UI. So the server looks at Premiere itself: it
+captures the window, finds the Program Monitor, the Effect Controls rows and the timeline by their
+shapes (icons and layout, not labels, so it works on every UI language), acts with real mouse
+events, and captures again to confirm every step.
+
+**Object Masks by sight** (macOS): one click of the Object Mask tool on the Program Monitor takes a
+whole person; a closed lasso takes only the part it outlines (a face, a sign). ⊕ / ⊖ add to or
+subtract from the mask — the server selects the mask by its row first, because Premiere drops the
+selection after tracking or a playhead move. Then tracking, Feather, Expansion and the other mask
+settings; after each edit the server measures the mask's red overlay against the plain exported
+frame, and the model checks the result frame by frame.
+
+**Speed keyframes by sight** (Time Remapping, macOS): the server adds a speed keyframe at the
+playhead in Effect Controls, zooms the timeline until the clip is wide enough to place a frame,
+finds the keyframe's handle on the clip and Shift-drags it until the measured position matches the
+target frame — then the model checks the motion on exported frames.
+
 ## Tools
 
 | Tool | Purpose |
@@ -169,18 +197,20 @@ Clients with their own skill support can load the folder directly (e.g. copy `sk
 ## Why this one
 
 Several Premiere MCP servers exist; they differ in what the model sees, what it knows and what it
-sends home. As of 2026-11-04:
+sends home. As of 2026-11-04 (the vision row re-checked 2026-11-06):
 
 |  | Premiere-MCP-IMT | [premiere-pro-mcp](https://github.com/leancoderkavy/premiere-pro-mcp) (upstream) | [AdobePremiereProMCP](https://github.com/ayushozha/AdobePremiereProMCP) | [Adobe_Premiere_Pro_MCP](https://github.com/hetpatel-11/Adobe_Premiere_Pro_MCP) | [flue](https://github.com/sfkislev/flue) |
 | --- | --- | --- | --- | --- | --- |
 | Tools the model sees by default | 9, over ~440 operations | the whole catalog (~440 tools) | 74 (profile `standard`) of ~1,060 | 5, over 283 operations | none — the agent pipes ExtendScript |
 | Knowledge of Premiere's AI tools | skill with 8 references + recipes | 2 skills (editing, development) | 7 workflow skills | 1 skill | 1 skill (scripting) |
 | Non-English Premiere | every UI language (all ten), verified live | English and es-ES measured | not stated | not stated | not stated |
-| Vision: acting on what the agent sees | frames returned as images; Object Masks drawn on what it sees (click = whole person, lasso = a part), ⊕/⊖, tracking, overlay check; speed keyframes placed on the timeline by sight (macOS); keyframes checked frame by frame | frames returned as images; Object Mask audits (read-only) | thumbnails; no masks | still export; no masks | no (scripting only) |
+| Vision: acting on what the agent sees | frames returned as images; Object Masks drawn on what it sees (click = whole person, lasso = a part), ⊕/⊖, tracking, overlay check; speed keyframes placed on the timeline by sight (macOS); keyframes checked frame by frame | frames returned as images; Object Mask audits (read-only); no speed keyframes (no scripting setter) | frames as images; no masks; a time-remap keyframe tool listed in its unaudited full catalog | still export; no masks; constant speed only | no (scripting only) |
 | Telemetry | none | PostHog, off unless a key is set | none found | on by default (opt-out) | none mentioned |
 | Connector install | by the agent, with consent; installers with a live self-test | CLI flag | build from source (Go, Rust, Python) | CLI flag | `pip` + setup |
 | Clients | Claude Desktop (.mcpb), Cursor, Antigravity, ChatGPT gateway, any MCP client | npm, .mcpb, Codex / Claude Code plugins | build from source | npm, plugins, .mcpb | CLI + skill |
 | License | Apache-2.0 | MIT | MIT | MIT | MIT |
+
+Adobe's own [AI Assistant in Premiere](https://community.adobe.com/announcements-727/meet-your-new-assistant-editor-ai-assistant-in-premiere-pro-is-now-in-public-beta-1629317) (public beta since June 2026) organizes projects and assembles rough cuts; its documentation mentions neither Object Masks nor speed keyframes (checked 2026-11-06).
 
 What we changed in the upstream code, besides the skill and the packaging: component and property
 lookup by matchName and English names translated through Premiere's own UI dictionaries (on a
