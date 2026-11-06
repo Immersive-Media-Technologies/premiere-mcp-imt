@@ -1,7 +1,7 @@
 {
   "name": "@immersive-media-technologies/premiere-mcp-imt",
   "mcpName": "io.github.Immersive-Media-Technologies/premiere-mcp-imt",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Premiere-MCP-IMT + SKILLS — MCP server and agent skills for Adobe Premiere Pro. Works with every UI language Adobe ships and sees the frame: the agent draws Object Masks on the people or parts it sees (a click for a whole person, a lasso for a face; add, subtract, track — macOS), places speed keyframes (Time Remapping) on the timeline by sight — Premiere has no API for masks or speed keyframes — and checks keyframes frame by frame. Comes with a large skills library and is built for Adobe's generative features (Generative Extend, Generative Media, Object Mask, Enhance Speech, transcripts and captions, Auto Reframe, Search, the AI Assistant). Built for AI agents (macOS + Windows): ~440 readback-verified operations behind nine tools, no telemetry, connector installer and live self-test. By Immersive Media Technologies (fork of leancoderkavy/premiere-pro-mcp).",
   "main": "dist/index.js",
   "types": "./dist/index.d.ts",

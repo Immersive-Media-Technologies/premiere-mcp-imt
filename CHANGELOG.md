@@ -7,6 +7,16 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-06
+
+### Changed
+
+- **Descriptions: speed keyframes by sight.** npm, `.mcpb`, `server.json` and the README now name both things the
+  agent does by sight — Object Masks drawn on what it sees and speed keyframes (Time Remapping) placed on the
+  timeline — next to the UI languages. New README section «How the agent sees» (window capture, controls found by
+  shape on every UI language, closed loop); the vision row of the comparison re-checked 2026-11-06; the ChatGPT
+  icon in Install matches the others.
+
 ## [1.3.0] - 2026-11-06
 
 ### Fixed
