@@ -7,6 +7,8 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-06
+
 ### Fixed
 
 - Effect-property tools (`set_effect_property`, `get_keyframes`, `add_keyframe`, `get_value_at_time`,
@@ -46,6 +48,11 @@ PR-MCP-IMT versions start at 0.1.0; the upstream history of premiere-pro-mcp fol
   ends (live 05.11, shot 850), the timeline simulation draws the boxes.
 
 ### Added
+
+- **Layer conform: `conform.py refine-cuts` (engine 1.2.0).** The per-frame check of the built layout is
+  turned into moved cuts — every repeated frame where the plate needs it, the generator's duplicate frames
+  cut (`dropped_before`); the reference no longer calls a run of lost frames acceptable. Shot 850's layout
+  corrected (the last two repeats were 3 and 5 frames early).
 
 - **Layer conform reference and engine** (`pr_skill {doc:"layer-conform"}`, `skills/pr/scripts/conform.py`).
   How to make an AI-generated layer coincide with the plate before compositing, in the order the live

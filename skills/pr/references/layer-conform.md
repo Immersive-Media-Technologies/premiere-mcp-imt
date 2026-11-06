@@ -96,14 +96,23 @@ generation frame per step, hidden under the plate's people.
    frozen tail is gone by itself because the slips pulled the media earlier.
 8. **Read back.** `get_sequence_structure` → table of the generation pieces (timeline start/end,
    in-point in frames = seconds × fps) against `cut_table`; any frame of difference is reported.
-   Shot 850, 05.11, the accepted layout: pieces at 0 / 0.375 / 0.917 / 1.417 / 2.000 / 2.458 / 2.875 s
-   with in-points 0 / 8 / 20 / 31 / 44 / 54 / 63 frames, end 3.5 s.
+   Shot 850: the first layout (05.11 — pieces at 0 / 0.375 / 0.917 / 1.417 / 2.000 / 2.458 / 2.875 s,
+   in-points 0 / 8 / 20 / 31 / 44 / 54 / 63) had its last two repeated frames 3 and 5 frames too early —
+   double heads at 2.46–3.08 s, which the user cut out by hand. `refine-cuts` on the per-frame check
+   (06.11) gives 0 / 0.375 / 0.875 / 1.375 / 2.000 / 2.583 / 3.083 s with in-frames 0 / 8 / 19 / 30 / 44 /
+   57 / 68, end 3.5 s, every frame native.
 9. **Verify every frame.** Export both tracks again → `conform.py verify --ref GEN2/ --mov PLATE2/ --check-time --every 1 --report S/t8.json`.
-   `time_lost_frames` is read, not trusted blindly: ties at the repeated frames (the first frame of each
-   piece) are expected; a run of lost frames inside a piece means either the engine's whole-frame lag
-   there (acceptable when the user judged the subject right on playback, as on 850 frames 59–62 and
-   69–74) or a real miss — settle it with `--boxes` on the subject or crops, never by moving a cut
-   blindly. The strongest check is the one that caught the speed-key failure: match every exported
+   **A run of lost frames is never accepted.** It means a repeated frame sits at the wrong place (the
+   cut is too early or too late) or the generator duplicated a frame that is still in — the plate moves
+   while the generation stands still, heads double. Fix it from the same report, not by eye:
+   `conform.py refine-cuts --verify S/t8.json --plan S/plan.json --fps <fps> --clip-start <seq s of
+   frame 0> --clip-in <source s of frame 0> --out S/refine.json` (or `--layout 'seq:src,…'` = each
+   piece's start frame and the source frame it shows there, when the layout did not come from a plan)
+   → `layout_after`, `cut_table`, `cut_and_slip`; a piece with `dropped_before` cuts the generator's
+   duplicate frames. Apply it (split / slip / trim each piece to its new start, in-frame and end),
+   export again, verify again; accept when `disagree_after` is empty and the only lost frames left
+   are single ties at the repeated frames. A layout from another shot, another host or an earlier
+   run is a starting point only — the per-frame check of this render decides. The strongest check is the one that caught the speed-key failure: match every exported
    generation frame against its native frames — each must be a native frame, none a blend.
 10. **Never** speed keys on a piece and never cuts/slips on a clip that carries speed keys (05.11: that
     combination is how 850 «went apart further»). To start over: remove the generation clips,

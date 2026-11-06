@@ -10,8 +10,8 @@ description_ru: |
   Открывать в начале любой задачи в Adobe Premiere Pro через Premiere-MCP-IMT: монтаж, эффекты, экспорт и
   ИИ-инструменты Premiere на любом языке интерфейса. Это роутер: общие правила и карта справок — по задаче
   открывать ту справку, на которую ведёт карта.
-version: 1.5.0
-changes: "1.5.0 (05.11): the map (§4) is in the skill-creator form — one entry per ability with «Read when …»; layer conform is a cut-only technique (the generated lower clip is cut and slipped by whole frames, the original upper clip stays one clip with the mask) with its trigger phrases; Time Remapping stays a separate ability for speed ramps."
+version: 1.5.1
+changes: "1.5.1 (06.11): layer conform — a run of lost frames is never accepted: conform.py refine-cuts (1.2.0) moves the cuts from the per-frame check (repeats placed too early, the generator's duplicate frames cut); shot 850 layout corrected. 1.5.0 (05.11): the map (§4) is in the skill-creator form — one entry per ability with «Read when …»; layer conform is a cut-only technique (the generated lower clip is cut and slipped by whole frames, the original upper clip stays one clip with the mask) with its trigger phrases; Time Remapping stays a separate ability for speed ramps."
 updated_at: 2026-11-05
 ---
 

@@ -193,6 +193,8 @@ Each version is described on the
 [**Releases**](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases) page; every
 change is in [`CHANGELOG.md`](CHANGELOG.md).
 
+- [v1.3.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.3.0) · 2026-11-06 —
+  layer conform: syncing an AI-generated clip with the original plate — cut-only time (pieces slipped by whole frames, `conform.py` 1.2.0 with `refine-cuts`), Transform per piece, Levels on the lower clip, the people mask with its edge inside the silhouette; effect-property tools accept `property_index` alone; Object Mask edit and Time Remap UI fixes.
 - [v1.2.0](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/tag/v1.2.0) · 2026-11-05 —
   vision: Object Masks by sight on macOS — the agent clicks a whole person or outlines a part (a face) on an
   exported frame, adds and subtracts, tracks and checks the red overlay; Premiere has no API for masks.
