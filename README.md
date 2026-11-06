@@ -66,7 +66,7 @@ inside Premiere that the server talks to. The agent installs it for you on first
 | ![](https://www.google.com/s2/favicons?domain=claude.ai&sz=16) **Claude Desktop** | download [`premiere-mcp-imt.mcpb`](https://github.com/Immersive-Media-Technologies/premiere-mcp-imt/releases/latest/download/premiere-mcp-imt.mcpb), double-click, **Install** (Windows: drag it onto Settings → Extensions). No Node needed. |
 | ![](https://www.google.com/s2/favicons?domain=cursor.com&sz=16) **Cursor** | [**Add to Cursor**](https://cursor.com/en/install-mcp?name=premiere&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBpbW1lcnNpdmUtbWVkaWEtdGVjaG5vbG9naWVzL3ByZW1pZXJlLW1jcC1pbXQiXX0=) — one click: Cursor opens and writes the config (or put the snippet below into `~/.cursor/mcp.json`). |
 | ![](https://www.google.com/s2/favicons?domain=antigravity.google&sz=16) **Google Antigravity** | Settings → Customizations → Installed MCP Servers → **View raw config** → add the snippet below. |
-| ![](https://www.google.com/s2/favicons?domain=chatgpt.com&sz=16) **ChatGPT** (remote servers only) | on the Premiere machine: `npx -p @immersive-media-technologies/premiere-mcp-imt premiere-mcp-imt-chatgpt` — it starts the server behind a tunnel and prints the URL to paste into ChatGPT. |
+| ![](https://raw.githubusercontent.com/Immersive-Media-Technologies/premiere-mcp-imt/main/assets/clients/chatgpt.svg) **ChatGPT** (remote servers only) | on the Premiere machine: `npx -p @immersive-media-technologies/premiere-mcp-imt premiere-mcp-imt-chatgpt` — it starts the server behind a tunnel and prints the URL to paste into ChatGPT. |
 | **Any MCP client** | the snippet below in its `mcpServers`. |
 
 ```json
